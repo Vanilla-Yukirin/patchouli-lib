@@ -1,0 +1,9 @@
+**
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!alembic.ini
+!src/**
+!migrations/**
+!docker/**

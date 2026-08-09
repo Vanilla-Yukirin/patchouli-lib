@@ -6,9 +6,12 @@ proposal.
 
 ## Blocking the first implementation contract
 
-- [ ] Choose the implementation language and supported runtime versions.
-- [ ] Select an initial database and publish transaction, migration, backup, and
-  restore invariants.
+- [x] Choose the implementation language and supported runtime versions:
+  Python 3.13, recorded in [ADR 0001](decisions/0001-implementation-baseline.md).
+- [x] Select an initial database: SQLite with FTS5, recorded in
+  [ADR 0001](decisions/0001-implementation-baseline.md).
+- [ ] Publish transaction, migration, backup, and restore invariants beyond the
+  bootstrap migration checks.
 - [ ] Define the HTTP or RPC API, error model, pagination, and idempotency keys.
 - [ ] Specify the stable-ID timestamp encoding, timezone, normalization, and
   collision behavior.

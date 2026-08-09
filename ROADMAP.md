@@ -8,7 +8,11 @@ dates or promises.
 - Resolve the blocking questions in [docs/08-open-questions.md](docs/08-open-questions.md).
 - Define storage invariants and threat model.
 - Publish an initial API contract and compatibility policy.
-- Choose the implementation language through a public design proposal.
+- Implement the accepted runtime, database, validation, and delivery baseline.
+
+Bootstrap status: Python 3.13, FastAPI, SQLite/FTS5, Alembic, locked local
+validation, OCI publishing, and private-deployment plumbing are in place. The
+domain API and data-safety contracts remain Milestone 0 work.
 
 ## Milestone 1: durable core
 

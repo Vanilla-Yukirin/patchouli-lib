@@ -1,6 +1,6 @@
 # Contributing to PatchouliLib
 
-Thank you for helping shape PatchouliLib. The project is currently in its
+Thank you for helping shape PatchouliLib. The knowledge domain is still in its
 design stage, so a clear use case or failure mode is often more useful than a
 large implementation.
 
@@ -26,20 +26,24 @@ Only use synthetic or deliberately public examples. Do not submit:
 If a real incident motivates a proposal, replace identifying details with a
 minimal synthetic reproduction.
 
-## Documentation setup
+## Development setup
 
-The documentation checks require a current Node.js LTS release.
+Install Python 3.13, uv, Node.js 24, and npm. Then run the complete non-container
+validation path:
 
 ```sh
-npm ci
-npm run lint:docs
+python scripts/validate.py
 ```
+
+Before a release or delivery change, also start Docker and run
+`python scripts/validate.py --container`. See
+[development and delivery](docs/development-and-delivery.md) for details.
 
 ## Pull requests
 
 - Keep one coherent change per pull request.
 - Explain what changed, why it changed, and which design invariant it affects.
-- Update linked design documents and the changelog when behavior changes.
+- Update linked design documents, decisions, and the changelog when behavior changes.
 - Include validation output or a reproducible validation command.
 - Use short, imperative commit subjects. Conventional Commits are encouraged.
 - Confirm that the diff contains no private or operator-specific information.

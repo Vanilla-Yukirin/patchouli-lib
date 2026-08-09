@@ -3,7 +3,7 @@
 PatchouliLib 是一个面向人类与软件 agent 的可自托管知识库。它用于收拢可长期保存的原始资料、保留版本历史，并通过适合 agent 调用的接口提供检索与引用能力。
 
 > [!IMPORTANT]
-> PatchouliLib 目前处于设计阶段，尚未提供受支持的服务端、API、CLI、MCP server 或迁移路径。
+> PatchouliLib 已具备可运行的工程骨架，包括健康端点、SQLite migration、本地验证和容器交付；知识领域 API、CLI、MCP server 和受支持的数据迁移策略仍未实现。
 
 [English](README.md)
 
@@ -47,6 +47,16 @@ flowchart LR
 设计阶段尤其欢迎带有明确使用场景或失败案例的反馈。提交 Issue 或 Pull Request 前，请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。社区决策遵循 [GOVERNANCE.md](GOVERNANCE.md)，所有参与者都应遵守 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
 
 不要在 Issue、Discussion、示例、测试数据或 Pull Request 中提交凭据、私有文档、个人主机名和私有部署细节。安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。
+
+## 本地验证
+
+安装 Python 3.13、uv、Node.js 24 和 npm 后运行：
+
+```sh
+python scripts/validate.py
+```
+
+Docker 启动后，可用 `python scripts/validate.py --container` 追加镜像构建和回环健康烟测。完整说明见 [开发、验证与交付](docs/development-and-delivery.md)。
 
 ## 许可证
 
