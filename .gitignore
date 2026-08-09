@@ -1,0 +1,33 @@
+# Dependencies and build output
+node_modules/
+coverage/
+dist/
+build/
+.cache/
+tmp/
+temp/
+
+# Runtime secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Logs and databases
+*.log
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Editor and operating-system files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+Desktop.ini

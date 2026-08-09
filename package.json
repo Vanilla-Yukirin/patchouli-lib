@@ -1,0 +1,13 @@
+{
+  "name": "patchouli-lib",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Documentation tooling for the PatchouliLib design-stage repository.",
+  "license": "MIT",
+  "scripts": {
+    "lint:docs": "markdownlint-cli2 \"*.md\" \"docs/**/*.md\" \".github/**/*.md\""
+  },
+  "devDependencies": {
+    "markdownlint-cli2": "0.23.2"
+  }
+}

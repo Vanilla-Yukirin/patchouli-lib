@@ -1,0 +1,50 @@
+name: Feature request
+description: Propose a scoped user-facing capability.
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: Describe the user, goal, and current limitation without private data.
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior rather than a preferred implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+
+  - type: dropdown
+    id: milestone
+    attributes:
+      label: Roadmap area
+      options:
+        - Durable core
+        - Agent access
+        - Retrieval
+        - Derived knowledge
+        - Documentation and community
+        - Not sure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I used synthetic or deliberately public examples only.
+          required: true

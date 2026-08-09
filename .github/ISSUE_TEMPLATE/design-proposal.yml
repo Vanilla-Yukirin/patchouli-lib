@@ -1,0 +1,60 @@
+name: Design proposal
+description: Propose a change to an invariant, public interface, or open decision.
+title: "design: "
+labels:
+  - design
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: State the problem independently of the proposed solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and invariants
+      description: Link affected public design documents and list what must remain true.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed design
+      description: Include data flow, failure behavior, and compatibility impact.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and trade-offs
+    validations:
+      required: true
+
+  - type: textarea
+    id: migration
+    attributes:
+      label: Migration and rollout
+      description: Explain how existing data or callers would move to this design.
+    validations:
+      required: false
+
+  - type: textarea
+    id: safety
+    attributes:
+      label: Security and privacy impact
+      description: Cover authorization, data exposure, erasure, and provider boundaries.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: This proposal contains no private infrastructure or non-public source material.
+          required: true
