@@ -1,11 +1,20 @@
 # Dependencies and build output
 node_modules/
+.venv/
+__pycache__/
+*.py[cod]
 coverage/
+htmlcov/
 dist/
 build/
 .cache/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
 tmp/
 temp/
+data/
 
 # Runtime secrets and local configuration
 .env

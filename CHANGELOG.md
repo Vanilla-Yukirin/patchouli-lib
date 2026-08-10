@@ -13,3 +13,7 @@ it publishes a supported implementation.
 - Initial public product and architecture documentation.
 - Community governance, contribution, support, and security policies.
 - Documentation validation workflow and contribution templates.
+- Python/FastAPI service bootstrap with liveness and readiness endpoints.
+- SQLite/FTS5 validation and reversible Alembic migration plumbing.
+- Cross-platform source, test, migration, documentation, and container checks.
+- GHCR image publishing, provenance, releases, and opt-in private deployment.

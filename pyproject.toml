@@ -1,0 +1,68 @@
+[project]
+name = "patchouli-lib"
+version = "0.1.0a0"
+description = "A self-hostable knowledge library for people and software agents."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+license = "MIT"
+dependencies = [
+  "alembic>=1.16,<2",
+  "fastapi>=0.116,<1",
+  "pydantic-settings>=2.10,<3",
+  "sqlalchemy>=2.0.41,<3",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[dependency-groups]
+dev = [
+  "httpx2>=2.10,<3",
+  "mypy>=1.16,<2",
+  "pytest>=8.4,<10",
+  "pytest-cov>=6.2,<8",
+  "pyyaml>=6,<7",
+  "ruff>=0.12,<1",
+]
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/patchouli_lib"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["ASYNC", "B", "E", "F", "I", "SIM", "UP"]
+
+[tool.pytest.ini_options]
+addopts = [
+  "--strict-config",
+  "--strict-markers",
+  "--cov=patchouli_lib",
+  "--cov-branch",
+  "--cov-report=term-missing",
+  "--cov-fail-under=90",
+]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+packages = ["patchouli_lib"]
+
+[tool.coverage.run]
+branch = true
+source = ["patchouli_lib"]
+omit = [
+  "src/patchouli_lib/__main__.py",
+  "src/patchouli_lib/models.py",
+]
+
+[tool.coverage.report]
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "if __name__ == .__main__.:",
+]

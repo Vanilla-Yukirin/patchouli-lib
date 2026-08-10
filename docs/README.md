@@ -18,6 +18,11 @@ questions. They must not contain private deployment details or operator data.
 | [08-open-questions.md](08-open-questions.md) | Decision ledger | Active |
 | [09-automatic-organization.md](09-automatic-organization.md) | Reviewable split and merge suggestions | Experimental direction |
 
+## Engineering documents
+
+- [Development, validation, and delivery](development-and-delivery.md)
+- [ADR 0001: implementation and delivery baseline](decisions/0001-implementation-baseline.md)
+
 ## Status vocabulary
 
 - **Accepted direction**: stable enough to guide prototypes, but still subject

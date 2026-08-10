@@ -6,8 +6,10 @@ history, and expose retrieval and citation primitives through agent-friendly
 interfaces.
 
 > [!IMPORTANT]
-> PatchouliLib is currently a design-stage project. There is no supported
-> server, API, CLI, MCP server, or migration path yet.
+> PatchouliLib now has a runnable engineering bootstrap with health endpoints,
+> SQLite migration plumbing, local validation, and container delivery. The
+> knowledge domain API, CLI, MCP server, and supported migration policy are not
+> implemented yet.
 
 [简体中文](README.zh-CN.md)
 
@@ -67,6 +69,24 @@ The public design source of truth is [docs/README.md](docs/README.md).
 | Organization | [Automatic organization](docs/09-automatic-organization.md) |
 
 The implementation sequence is tracked in [ROADMAP.md](ROADMAP.md).
+
+## Development bootstrap
+
+With Python 3.13, uv, Node.js 24, and npm installed:
+
+```sh
+python scripts/validate.py
+```
+
+With Docker running, add the image and health smoke test:
+
+```sh
+python scripts/validate.py --container
+```
+
+See [development, validation, and delivery](docs/development-and-delivery.md)
+for source startup, Compose, CI, image publishing, and the generic private
+deployment contract.
 
 ## Contributing
 
