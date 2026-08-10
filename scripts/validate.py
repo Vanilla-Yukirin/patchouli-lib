@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 from pathlib import Path
@@ -33,6 +34,22 @@ def find_posix_shell() -> str:
     raise RuntimeError("A POSIX shell is required to validate deployment scripts.")
 
 
+def validate_sqlite_integrity(database_path: Path) -> None:
+    print("+ verify SQLite foreign keys and integrity", flush=True)
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        foreign_keys_enabled = connection.execute("PRAGMA foreign_keys").fetchone()
+        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+    finally:
+        connection.close()
+
+    if foreign_keys_enabled != (1,):
+        raise RuntimeError("SQLite foreign-key enforcement is disabled during validation.")
+    if violations:
+        raise RuntimeError("SQLite foreign-key integrity check found violations.")
+
+
 def validate_migrations() -> None:
     with tempfile.TemporaryDirectory(prefix="patchouli-migration-") as temporary_directory:
         database_path = (Path(temporary_directory) / "migration.db").as_posix()
@@ -40,8 +57,10 @@ def validate_migrations() -> None:
         environment["PATCHOULI_DATABASE_URL"] = f"sqlite:///{database_path}"
         environment["PATCHOULI_ENVIRONMENT"] = "test"
         run("uv", "run", "alembic", "upgrade", "head", env=environment)
+        validate_sqlite_integrity(Path(database_path))
         run("uv", "run", "alembic", "downgrade", "base", env=environment)
         run("uv", "run", "alembic", "upgrade", "head", env=environment)
+        validate_sqlite_integrity(Path(database_path))
 
 
 def main() -> None:
