@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "license": "CC0-1.0 synthetic fixture",
+  "description": "Synthetic Chinese and English text for evaluating SQLite FTS5 candidates.",
+  "provenance": "Original synthetic text authored for the PatchouliLib evaluation; not adapted from an external corpus.",
+  "documents": [
+    {
+      "id": "zh-retry",
+      "title": "帕秋莉检索与安全重试",
+      "summary": "讨论知识库查询、幂等写入和版本冲突。",
+      "tags": ["中文", "查询", "幂等"],
+      "body": "这是一份完全合成的会话归档。Agent 使用 If-Match 更新当前版本，并在响应丢失后复用幂等键。"
+    },
+    {
+      "id": "zh-backup",
+      "title": "中文备份恢复演练",
+      "summary": "验证备份、恢复和引用一致性。",
+      "tags": ["中文", "备份", "恢复"],
+      "body": "恢复后检查页面修订与引用，避免把旧索引当作当前内容。"
+    },
+    {
+      "id": "mixed-search",
+      "title": "SQLite FTS5 中英混合查询",
+      "summary": "Agent retrieval for a synthetic 中文知识库。",
+      "tags": ["sqlite", "fts5", "搜索"],
+      "body": "The synthetic Agent checks deterministic ranking，并验证中文检索能力与当前修订。"
+    },
+    {
+      "id": "en-idempotency",
+      "title": "Idempotent archive retry",
+      "summary": "A synthetic example of safe retry behavior.",
+      "tags": ["archive", "retry", "revision"],
+      "body": "Reuse the same operation key after a lost response. If-Match protects revision updates."
+    },
+    {
+      "id": "literal-syntax",
+      "title": "Literal search syntax",
+      "summary": "FTS-looking input stored as ordinary synthetic text.",
+      "tags": ["syntax", "literal"],
+      "body": "The words AND OR NOT are data. It also records \"quoted\", unmatched\"quote, prefix*, title:demo, alpha OR beta, NEAR(alpha beta), and the literal combination (alpha OR beta) NEAR(gamma delta)."
+    },
+    {
+      "id": "wildcard-decoy",
+      "title": "Prefix expansion decoy",
+      "summary": "A document used to expose accidental wildcard matching.",
+      "tags": ["syntax", "decoy"],
+      "body": "This synthetic document mentions prefixable content. The terms alpha beta gamma delta appear nearby without the literal operators."
+    }
+  ],
+  "queries": [
+    {
+      "id": "han-1",
+      "dimension": "han_1",
+      "text": "帕",
+      "relevant": ["zh-retry"]
+    },
+    {
+      "id": "han-2",
+      "dimension": "han_2",
+      "text": "检索",
+      "relevant": ["zh-retry", "mixed-search"]
+    },
+    {
+      "id": "han-3",
+      "dimension": "han_3_plus",
+      "text": "帕秋莉",
+      "relevant": ["zh-retry"]
+    },
+    {
+      "id": "han-4",
+      "dimension": "han_3_plus",
+      "text": "安全重试",
+      "relevant": ["zh-retry"]
+    },
+    {
+      "id": "mixed-agent",
+      "dimension": "mixed_language",
+      "text": "Agent 检索",
+      "relevant": ["zh-retry", "mixed-search"]
+    },
+    {
+      "id": "english-phrase",
+      "dimension": "english",
+      "text": "lost response",
+      "relevant": ["en-idempotency"]
+    },
+    {
+      "id": "punctuation-if-match",
+      "dimension": "punctuation",
+      "text": "If-Match",
+      "relevant": ["zh-retry", "en-idempotency"]
+    },
+    {
+      "id": "literal-and",
+      "dimension": "literal_fts_syntax",
+      "text": "AND",
+      "relevant": ["literal-syntax"]
+    },
+    {
+      "id": "literal-quotes",
+      "dimension": "literal_fts_syntax",
+      "text": "\"quoted\"",
+      "relevant": ["literal-syntax"]
+    },
+    {
+      "id": "literal-wildcard",
+      "dimension": "literal_fts_syntax",
+      "text": "prefix*",
+      "relevant": ["literal-syntax"]
+    },
+    {
+      "id": "literal-column-selector",
+      "dimension": "literal_fts_syntax",
+      "text": "title:demo",
+      "relevant": ["literal-syntax"]
+    },
+    {
+      "id": "literal-unmatched-quote",
+      "dimension": "literal_fts_syntax",
+      "text": "unmatched\"quote",
+      "relevant": ["literal-syntax"]
+    },
+    {
+      "id": "literal-or",
+      "dimension": "literal_fts_syntax",
+      "text": "alpha OR beta",
+      "relevant": ["literal-syntax"]
+    },
+    {
+      "id": "literal-near-parentheses",
+      "dimension": "literal_fts_syntax",
+      "text": "NEAR(alpha beta)",
+      "relevant": ["literal-syntax"]
+    },
+    {
+      "id": "literal-grouped-or-near",
+      "dimension": "literal_fts_syntax",
+      "text": "(alpha OR beta) NEAR(gamma delta)",
+      "relevant": ["literal-syntax"]
+    }
+  ]
+}
