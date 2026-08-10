@@ -76,8 +76,8 @@ running Compose.
 ## CI and artifacts
 
 Pull requests run documentation, Python, migration, and container jobs without
-deployment credentials. A successful trusted push publishes a `linux/amd64`
-image to GHCR with:
+deployment credentials. A successful trusted push, or a manual workflow
+dispatch against a trusted ref, publishes a `linux/amd64` image to GHCR with:
 
 - an immutable `sha-<commit>` tag;
 - an `edge` tag for `main`;
@@ -105,6 +105,10 @@ the previous digest when health checks fail.
 
 Forks can use the same public workflow without deploying anywhere because the
 enable variable and private Environment are absent by default.
+
+A manual workflow dispatch deploys only when it targets `main` and the same
+enable variable and private Environment are present. This provides an explicit
+redeploy path without weakening pull-request isolation.
 
 ## Releases
 
