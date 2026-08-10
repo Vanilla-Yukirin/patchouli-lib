@@ -39,6 +39,10 @@ Before a release or delivery change, also start Docker and run
 `python scripts/validate.py --container`. See
 [development and delivery](docs/development-and-delivery.md) for details.
 
+AI-assisted or parallel contributions must also follow the
+[agent contribution workflow](docs/agent-contribution-workflow.md). It defines
+task ownership, shared-worktree safety, independent review, and handoff evidence.
+
 ## Pull requests
 
 - Keep one coherent change per pull request.

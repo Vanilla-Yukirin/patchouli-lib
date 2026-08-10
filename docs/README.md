@@ -21,6 +21,7 @@ questions. They must not contain private deployment details or operator data.
 ## Engineering documents
 
 - [Development, validation, and delivery](development-and-delivery.md)
+- [Agent contribution workflow](agent-contribution-workflow.md)
 - [ADR 0001: implementation and delivery baseline](decisions/0001-implementation-baseline.md)
 
 ## Status vocabulary
