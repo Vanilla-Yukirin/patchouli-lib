@@ -1,0 +1,327 @@
+{
+  "schema_version": "agent-v1",
+  "pagination": {
+    "default_limit": 20,
+    "max_limit": 100
+  },
+  "responses": {
+    "sections": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json",
+        "X-Request-ID": "req_11111111111111111111111111111111",
+        "Cache-Control": "private, no-store"
+      },
+      "body": {
+        "items": [
+          {
+            "section_id": "sec_synthetic",
+            "name": "Synthetic section"
+          }
+        ],
+        "next_cursor": "cursor_synthetic_next"
+      }
+    },
+    "search": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json",
+        "X-Request-ID": "req_22222222222222222222222222222222",
+        "Cache-Control": "private, no-store"
+      },
+      "request": {
+        "query": "synthetic query",
+        "limit": 20
+      },
+      "body": {
+        "items": [
+          {
+            "page": {
+              "section_id": "sec_synthetic",
+              "book_id": "book_synthetic",
+              "page_id": "20260811t091500123z-synthetic-session",
+              "title": "Synthetic session",
+              "type": "archive",
+              "occurred_at": "2026-08-11T09:15:00.123456Z",
+              "current_revision_id": "rev_0123456789abcdef0123456789abcdef",
+              "current_revision_number": 1
+            },
+            "citation": {
+              "section_id": "sec_synthetic",
+              "page_id": "20260811t091500123z-synthetic-session",
+              "revision_id": "rev_0123456789abcdef0123456789abcdef",
+              "revision_number": 1,
+              "href": "/api/v1/sections/sec_synthetic/pages/20260811t091500123z-synthetic-session/revisions/1"
+            },
+            "snippet": "Synthetic snippet"
+          }
+        ],
+        "next_cursor": null
+      }
+    }
+  },
+  "mutation_success": {
+    "create_replay": {
+      "status": 201,
+      "headers": {
+        "Content-Type": "application/json",
+        "Location": "/api/v1/sections/sec_synthetic/pages/20260811t091500123z-synthetic-session",
+        "ETag": "\"revision-synthetic-1\"",
+        "Idempotency-Replayed": "true",
+        "X-Request-ID": "req_33333333333333333333333333333333",
+        "Cache-Control": "private, no-store"
+      },
+      "body": {
+        "page": {
+          "section_id": "sec_synthetic",
+          "book_id": "book_synthetic",
+          "page_id": "20260811t091500123z-synthetic-session",
+          "title": "Synthetic session",
+          "type": "archive",
+          "occurred_at": "2026-08-11T09:15:00.123456Z",
+          "current_revision_id": "rev_0123456789abcdef0123456789abcdef",
+          "current_revision_number": 1
+        },
+        "revision": {
+          "page_id": "20260811t091500123z-synthetic-session",
+          "revision_id": "rev_0123456789abcdef0123456789abcdef",
+          "revision_number": 1,
+          "created_at": "2026-08-11T09:16:00.000000Z",
+          "content_type": "text/markdown;charset=utf-8",
+          "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "content": "# Synthetic archive"
+        },
+        "citation": {
+          "section_id": "sec_synthetic",
+          "page_id": "20260811t091500123z-synthetic-session",
+          "revision_id": "rev_0123456789abcdef0123456789abcdef",
+          "revision_number": 1,
+          "href": "/api/v1/sections/sec_synthetic/pages/20260811t091500123z-synthetic-session/revisions/1"
+        }
+      }
+    }
+  },
+  "problems": {
+    "authentication_required": {
+      "status": 401,
+      "headers": {
+        "Content-Type": "application/problem+json",
+        "WWW-Authenticate": "Bearer",
+        "X-Request-ID": "req_44444444444444444444444444444444",
+        "Cache-Control": "private, no-store"
+      },
+      "body": {
+        "type": "about:blank",
+        "title": "Authentication required",
+        "status": 401,
+        "detail": "A caller credential is required.",
+        "code": "authentication_required",
+        "request_id": "req_44444444444444444444444444444444",
+        "details": {}
+      }
+    },
+    "invalid_token": {
+      "status": 401,
+      "headers": {
+        "Content-Type": "application/problem+json",
+        "WWW-Authenticate": "Bearer error=\"invalid_token\"",
+        "X-Request-ID": "req_55555555555555555555555555555555",
+        "Cache-Control": "private, no-store"
+      },
+      "body": {
+        "type": "about:blank",
+        "title": "Invalid credential",
+        "status": 401,
+        "detail": "The caller credential is invalid or no longer active.",
+        "code": "invalid_token",
+        "request_id": "req_55555555555555555555555555555555",
+        "details": {}
+      }
+    },
+    "insufficient_scope": {
+      "status": 403,
+      "headers": {
+        "Content-Type": "application/problem+json",
+        "WWW-Authenticate": "Bearer error=\"insufficient_scope\"",
+        "X-Request-ID": "req_66666666666666666666666666666666",
+        "Cache-Control": "private, no-store"
+      },
+      "body": {
+        "type": "about:blank",
+        "title": "Insufficient scope",
+        "status": 403,
+        "detail": "The caller does not have the required action.",
+        "code": "insufficient_scope",
+        "request_id": "req_66666666666666666666666666666666",
+        "details": {}
+      }
+    },
+    "resource_not_found": {
+      "status": 404,
+      "headers": {
+        "Content-Type": "application/problem+json",
+        "X-Request-ID": "req_77777777777777777777777777777777",
+        "Cache-Control": "private, no-store"
+      },
+      "body": {
+        "type": "about:blank",
+        "title": "Resource not found",
+        "status": 404,
+        "detail": "The requested resource was not found.",
+        "code": "resource_not_found",
+        "request_id": "req_77777777777777777777777777777777",
+        "details": {}
+      }
+    },
+    "idempotency_mismatch": {
+      "status": 409,
+      "headers": {
+        "Content-Type": "application/problem+json",
+        "X-Request-ID": "req_88888888888888888888888888888888",
+        "Cache-Control": "private, no-store"
+      },
+      "body": {
+        "type": "about:blank",
+        "title": "Idempotency conflict",
+        "status": 409,
+        "detail": "The idempotency key was already used for a different request.",
+        "code": "idempotency_mismatch",
+        "request_id": "req_88888888888888888888888888888888",
+        "details": {}
+      }
+    },
+    "revision_conflict": {
+      "status": 412,
+      "headers": {
+        "Content-Type": "application/problem+json",
+        "X-Request-ID": "req_99999999999999999999999999999999",
+        "Cache-Control": "private, no-store"
+      },
+      "body": {
+        "type": "about:blank",
+        "title": "Precondition failed",
+        "status": 412,
+        "detail": "The Page has a newer current Revision.",
+        "code": "revision_conflict",
+        "request_id": "req_99999999999999999999999999999999",
+        "details": {}
+      }
+    },
+    "precondition_required": {
+      "status": 428,
+      "headers": {
+        "Content-Type": "application/problem+json",
+        "X-Request-ID": "req_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "Cache-Control": "private, no-store"
+      },
+      "body": {
+        "type": "about:blank",
+        "title": "Precondition required",
+        "status": 428,
+        "detail": "A required precondition is missing.",
+        "code": "precondition_required",
+        "request_id": "req_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "details": {}
+      }
+    },
+    "rate_limited": {
+      "status": 429,
+      "headers": {
+        "Content-Type": "application/problem+json",
+        "Retry-After": "1",
+        "X-Request-ID": "req_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "Cache-Control": "private, no-store"
+      },
+      "body": {
+        "type": "about:blank",
+        "title": "Too many requests",
+        "status": 429,
+        "detail": "The request rate limit was exceeded.",
+        "code": "rate_limited",
+        "request_id": "req_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "details": {}
+      }
+    },
+    "search_unavailable": {
+      "status": 503,
+      "headers": {
+        "Content-Type": "application/problem+json",
+        "X-Request-ID": "req_cccccccccccccccccccccccccccccccc",
+        "Cache-Control": "private, no-store"
+      },
+      "body": {
+        "type": "about:blank",
+        "title": "Service unavailable",
+        "status": 503,
+        "detail": "Search is temporarily unavailable.",
+        "code": "search_unavailable",
+        "request_id": "req_cccccccccccccccccccccccccccccccc",
+        "details": {}
+      }
+    },
+    "content_too_large": {
+      "status": 413,
+      "headers": {
+        "Content-Type": "application/problem+json",
+        "X-Request-ID": "req_dddddddddddddddddddddddddddddddd",
+        "Cache-Control": "private, no-store"
+      },
+      "body": {
+        "type": "about:blank",
+        "title": "Content too large",
+        "status": 413,
+        "detail": "The request content is too large.",
+        "code": "content_too_large",
+        "request_id": "req_dddddddddddddddddddddddddddddddd",
+        "details": {}
+      }
+    },
+    "unsupported_media_type": {
+      "status": 415,
+      "headers": {
+        "Content-Type": "application/problem+json",
+        "X-Request-ID": "req_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "Cache-Control": "private, no-store"
+      },
+      "body": {
+        "type": "about:blank",
+        "title": "Unsupported media type",
+        "status": 415,
+        "detail": "The media type is not supported.",
+        "code": "unsupported_media_type",
+        "request_id": "req_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "details": {}
+      }
+    },
+    "request_validation_failed": {
+      "status": 422,
+      "headers": {
+        "Content-Type": "application/problem+json",
+        "X-Request-ID": "req_ffffffffffffffffffffffffffffffff",
+        "Cache-Control": "private, no-store"
+      },
+      "body": {
+        "type": "about:blank",
+        "title": "Request validation failed",
+        "status": 422,
+        "detail": "The request did not satisfy the required schema.",
+        "code": "request_validation_failed",
+        "request_id": "req_ffffffffffffffffffffffffffffffff",
+        "details": {
+          "errors": [
+            {
+              "location": ["body", "count"],
+              "type": "int_parsing",
+              "message": "Invalid value."
+            }
+          ],
+          "truncated": false
+        }
+      }
+    }
+  },
+  "retry": {
+    "statuses": [408, 429, 502, 503, 504],
+    "never_statuses": [401, 412, 413, 415, 422, 428]
+  }
+}
