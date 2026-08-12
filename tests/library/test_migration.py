@@ -18,6 +18,13 @@ def _database_url(path: Path) -> str:
     return f"sqlite:///{path.as_posix()}"
 
 
+def _configure_database(path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, Config]:
+    database_url = _database_url(path)
+    monkeypatch.setenv("PATCHOULI_DATABASE_URL", database_url)
+    monkeypatch.setenv("PATCHOULI_ENVIRONMENT", "test")
+    return database_url, _alembic_config()
+
+
 def _assert_upgraded_schema(database_url: str) -> None:
     engine = build_engine(database_url)
     try:
@@ -63,11 +70,7 @@ def test_alembic_upgrade_downgrade_upgrade_round_trip(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    database_path = tmp_path / "migration.db"
-    database_url = _database_url(database_path)
-    monkeypatch.setenv("PATCHOULI_DATABASE_URL", database_url)
-    monkeypatch.setenv("PATCHOULI_ENVIRONMENT", "test")
-    config = _alembic_config()
+    database_url, config = _configure_database(tmp_path / "migration.db", monkeypatch)
 
     command.upgrade(config, "head")
     _assert_upgraded_schema(database_url)
@@ -85,3 +88,13 @@ def test_alembic_upgrade_downgrade_upgrade_round_trip(
 
     command.upgrade(config, "head")
     _assert_upgraded_schema(database_url)
+
+
+def test_upgraded_schema_has_no_alembic_metadata_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, config = _configure_database(tmp_path / "metadata-drift.db", monkeypatch)
+
+    command.upgrade(config, "head")
+    command.check(config)
