@@ -16,6 +16,11 @@ RequestId = Annotated[
 ]
 AuditName = Annotated[str, Field(min_length=1, max_length=100)]
 ResourceIdentifier = Annotated[str, Field(min_length=1, max_length=200)]
+MAX_RFC3339_TIMESTAMP_MICROSECONDS = 253_402_300_799_999_999
+CredentialExpiryMicros = Annotated[
+    int,
+    Field(ge=0, le=MAX_RFC3339_TIMESTAMP_MICROSECONDS),
+]
 
 
 class CallerKind(StrEnum):
@@ -66,7 +71,7 @@ class NewCredential(AuthSchema):
     selector: CredentialSelector = Field(repr=False)
     token_version: Annotated[int, Field(ge=1)]
     verifier: CredentialVerifier
-    expires_at: TimestampMicros
+    expires_at: CredentialExpiryMicros
     created_at: TimestampMicros
     updated_at: TimestampMicros
     last_used_at: TimestampMicros | None = None
@@ -84,7 +89,7 @@ class CredentialRecord(AuthSchema):
     library_id: OpaqueId
     caller_id: OpaqueId
     token_version: Annotated[int, Field(ge=1)]
-    expires_at: TimestampMicros
+    expires_at: CredentialExpiryMicros
     created_at: TimestampMicros
     updated_at: TimestampMicros
     last_used_at: TimestampMicros | None = None
@@ -180,7 +185,7 @@ class OperatorBootstrap(AuthSchema):
     library_id: OpaqueId
     operator_name: ResourceName
     operator_description: BoundedText = ""
-    credential_expires_at: TimestampMicros
+    credential_expires_at: CredentialExpiryMicros
     request_id: RequestId
     initial_grants: tuple[BootstrapGrant, ...] = ()
 
@@ -189,7 +194,7 @@ class LocalOperatorRecovery(AuthSchema):
     """Explicit local-only request; it intentionally accepts no bearer credential."""
 
     library_id: OpaqueId
-    credential_expires_at: TimestampMicros
+    credential_expires_at: CredentialExpiryMicros
     request_id: RequestId
 
 
@@ -235,9 +240,11 @@ __all__ = [
     "BootstrappedOperator",
     "CallerKind",
     "CallerRecord",
+    "CredentialExpiryMicros",
     "CredentialRecord",
     "IssuedCredential",
     "LocalOperatorRecovery",
+    "MAX_RFC3339_TIMESTAMP_MICROSECONDS",
     "NewAuditEvent",
     "NewBootstrapMarker",
     "NewCaller",

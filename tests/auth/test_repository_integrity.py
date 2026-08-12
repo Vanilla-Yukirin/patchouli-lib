@@ -18,7 +18,7 @@ from patchouli_lib.auth.schemas import (
 from patchouli_lib.auth.tokens import generate_token
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.library.repository import LibraryRepository
-from patchouli_lib.library.schemas import LibraryStructureSeed
+from patchouli_lib.library.schemas import LibraryStructureSeed, NewSection
 from patchouli_lib.library.service import LibrarySeedService
 
 
@@ -161,6 +161,50 @@ def test_composite_foreign_keys_reject_cross_library_credential_and_grant(
 
     with auth_engine.connect() as connection:
         assert connection.scalar(select(SectionGrant)) is None
+
+
+def test_grant_listing_is_scoped_and_deterministic(
+    auth_engine: Engine,
+    scoped_library: tuple[str, str, str],
+) -> None:
+    library_id, first_section, _ = scoped_library
+    second_section = "4" * 32
+    with immediate_transaction(auth_engine) as connection:
+        repository = AuthRepository(connection)
+        LibraryRepository(connection).add_section(
+            NewSection(
+                id=second_section,
+                library_id=library_id,
+                name="Second Synthetic Grant Section",
+                created_at=2_000_000,
+                updated_at=2_000_000,
+            )
+        )
+        _add_caller(repository, caller_id="7" * 32, library_id=library_id)
+        _add_caller(repository, caller_id="8" * 32, library_id=library_id)
+        for caller_id, section_id, action in (
+            ("7" * 32, second_section, SectionAction.QUERY),
+            ("7" * 32, first_section, SectionAction.QUERY),
+            ("7" * 32, first_section, SectionAction.PAGE_READ),
+            ("8" * 32, first_section, SectionAction.ARCHIVE_WRITE),
+        ):
+            repository.add_grant(
+                NewSectionGrant(
+                    library_id=library_id,
+                    caller_id=caller_id,
+                    section_id=section_id,
+                    action=action,
+                    created_at=2_000_000,
+                )
+            )
+
+        listed = repository.list_grants(library_id, "7" * 32)
+
+    assert [(grant.section_id, grant.action) for grant in listed] == [
+        (first_section, SectionAction.PAGE_READ),
+        (first_section, SectionAction.QUERY),
+        (second_section, SectionAction.QUERY),
+    ]
 
 
 def test_audit_actor_credential_scope_is_enforced(
