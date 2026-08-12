@@ -1,5 +1,31 @@
-"""Authentication primitives for PatchouliLib callers."""
+"""Authentication, exact authorization, and audit foundations."""
 
+from patchouli_lib.auth.repository import AuthRepository
+from patchouli_lib.auth.schemas import (
+    AuditEventRecord,
+    AuditOutcome,
+    AuthenticatedCaller,
+    BootstrapGrant,
+    BootstrapMarkerRecord,
+    BootstrappedOperator,
+    CallerKind,
+    CallerRecord,
+    CredentialRecord,
+    IssuedCredential,
+    LocalOperatorRecovery,
+    OperatorBootstrap,
+    RecoveredOperator,
+    SectionAction,
+    SectionGrantRecord,
+)
+from patchouli_lib.auth.service import (
+    AuthenticationError,
+    AuthenticationService,
+    AuthorizationError,
+    CredentialExpiryError,
+    CredentialIssuer,
+    CredentialPersistenceError,
+)
 from patchouli_lib.auth.tokens import (
     SECRET_BYTES,
     SELECTOR_BYTES,
@@ -28,4 +54,26 @@ __all__ = [
     "generate_token",
     "parse_token",
     "verify_token",
+    "AuditEventRecord",
+    "AuditOutcome",
+    "AuthRepository",
+    "AuthenticatedCaller",
+    "AuthenticationError",
+    "AuthenticationService",
+    "AuthorizationError",
+    "BootstrapGrant",
+    "BootstrapMarkerRecord",
+    "BootstrappedOperator",
+    "CallerKind",
+    "CallerRecord",
+    "CredentialExpiryError",
+    "CredentialIssuer",
+    "CredentialPersistenceError",
+    "CredentialRecord",
+    "IssuedCredential",
+    "LocalOperatorRecovery",
+    "OperatorBootstrap",
+    "RecoveredOperator",
+    "SectionAction",
+    "SectionGrantRecord",
 ]

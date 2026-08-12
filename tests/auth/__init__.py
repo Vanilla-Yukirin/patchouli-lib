@@ -1,0 +1,1 @@
+"""Authentication foundation tests."""
