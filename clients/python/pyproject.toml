@@ -1,0 +1,54 @@
+[project]
+name = "patchouli-client"
+version = "0.1.0a0"
+description = "Typed Python wire client for PatchouliLib Agent integrations."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+  "httpx>=0.28,<1",
+]
+
+[dependency-groups]
+dev = [
+  "hatchling>=1.27,<2",
+  "mypy>=1.16,<2",
+  "pytest>=8.4,<10",
+  "pytest-cov>=6.2,<8",
+  "ruff>=0.12,<1",
+]
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/patchouli_client"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["ASYNC", "B", "E", "F", "I", "SIM", "UP"]
+
+[tool.pytest.ini_options]
+addopts = [
+  "--strict-config",
+  "--strict-markers",
+  "--cov=patchouli_client",
+  "--cov-branch",
+  "--cov-report=term-missing",
+  "--cov-fail-under=95",
+]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["src", "tests", "scripts"]
+
+[tool.coverage.run]
+branch = true
+source = ["patchouli_client"]
