@@ -91,6 +91,30 @@ jobs:
       - name: Verify distribution license metadata
         run: uv run --frozen python scripts/verify_artifacts.py
 
+  client-python-windows-safety:
+    name: Python client Windows safety
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: clients/python
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: 0.10.11
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: clients/python/uv.lock
+
+      - name: Install locked client dependencies
+        run: uv sync --frozen --all-groups
+
+      - name: Test Windows handle, reparse, ACL, and durability safety
+        run: uv run --frozen pytest --no-cov tests/cli/test_secure_fs.py
+
   container:
     name: Container
     needs:
@@ -112,6 +136,7 @@ jobs:
       - docs
       - python
       - client-python
+      - client-python-windows-safety
       - container
     runs-on: ubuntu-latest
     permissions:
