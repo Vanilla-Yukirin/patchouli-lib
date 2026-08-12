@@ -36,7 +36,7 @@ def _assert_head(database_url: str) -> None:
             assert second.exec_driver_sql("PRAGMA foreign_key_check").all() == []
             assert (
                 first.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-                == "20260813_0004"
+                == "20260813_0005"
             )
     finally:
         engine.dispose()

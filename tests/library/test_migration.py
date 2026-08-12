@@ -61,7 +61,7 @@ def _assert_upgraded_schema(database_url: str) -> None:
             assert first.exec_driver_sql("PRAGMA foreign_key_check").all() == []
             assert second.exec_driver_sql("PRAGMA foreign_key_check").all() == []
             revision = first.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert revision == "20260813_0004"
+            assert revision == "20260813_0005"
     finally:
         engine.dispose()
 
