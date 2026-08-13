@@ -60,6 +60,7 @@ patchouli capabilities
 patchouli whoami
 patchouli sections list [--limit N] [--cursor CURSOR]
 patchouli books list --section SECTION [--limit N] [--cursor CURSOR]
+patchouli pages list --section SECTION [--limit N] [--cursor CURSOR]
 patchouli section search --section SECTION (--query-file FILE | --query-stdin) \
   [--limit N] [--cursor CURSOR]
 patchouli page current --section SECTION --page PAGE

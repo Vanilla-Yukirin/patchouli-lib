@@ -93,6 +93,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_pagination(book_list)
     book_list.set_defaults(handler="books.list")
 
+    pages = commands.add_parser("pages", help="Page metadata operations").add_subparsers(
+        dest="pages_action", required=True
+    )
+    page_list = pages.add_parser("list", help="list Page metadata in a Section")
+    page_list.add_argument("--section", required=True)
+    _add_pagination(page_list)
+    page_list.set_defaults(handler="pages.list")
+
     section = commands.add_parser("section", help="Section-scoped queries").add_subparsers(
         dest="section_action", required=True
     )
@@ -316,6 +324,19 @@ def _dispatch(
             cast(
                 ClientResponse[object],
                 client.list_books(
+                    args.section,
+                    token=caller_token,
+                    limit=args.limit,
+                    cursor=args.cursor,
+                ),
+            ),
+            None,
+        )
+    if operation == "pages.list":
+        return (
+            cast(
+                ClientResponse[object],
+                client.list_pages(
                     args.section,
                     token=caller_token,
                     limit=args.limit,
