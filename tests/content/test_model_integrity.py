@@ -554,6 +554,171 @@ def test_source_locator_is_not_a_deduplication_key(content_engine: Engine) -> No
         )
 
 
+def test_source_revision_scope_and_exact_pair_are_enforced(content_engine: Engine) -> None:
+    first_library = seed_library_structure(content_engine)
+    second_library = seed_library_structure(content_engine, prefix="4", label="Second")
+    first_values = page_graph_values(
+        library_id=first_library[0],
+        section_id=first_library[1],
+        book_id=first_library[2],
+    )
+    other_page_values = page_graph_values(
+        library_id=first_library[0],
+        section_id=first_library[1],
+        book_id=first_library[2],
+        page_byte=0x44,
+        revision_hex="55",
+        source_hex="6",
+        title="Other Synthetic Archive",
+        occurrence_wire="2026-08-13T10:00:01Z",
+    )
+    other_library_values = page_graph_values(
+        library_id=second_library[0],
+        section_id=second_library[1],
+        book_id=second_library[2],
+        revision_hex="66",
+        source_hex="7",
+        title="Second Library Archive",
+    )
+    with immediate_transaction(content_engine) as connection:
+        insert_page_graph(connection, first_values)
+        insert_page_graph(connection, other_page_values)
+        insert_page_graph(connection, other_library_values)
+
+        second_content = MarkdownContent.from_bytes(b"# Second exact Revision\n")
+        second_revision = NewRevision(
+            library_id=first_library[0],
+            revision_id=f"rev_{'77' * 16}",
+            page_uid=first_values[0].page_uid,
+            revision_number=2,
+            created_at=3_000_000,
+            **second_content.model_dump(),
+        )
+        connection.execute(insert(Revision), second_revision.model_dump())
+        connection.execute(
+            update(Page)
+            .where(
+                Page.library_id == first_library[0],
+                Page.page_uid == first_values[0].page_uid,
+            )
+            .values(
+                current_revision_id=second_revision.revision_id,
+                current_revision_number=second_revision.revision_number,
+                updated_at=3_000_000,
+            )
+        )
+
+    source = first_values[4]
+    invalid_sources = (
+        {
+            **source.model_dump(),
+            "source_id": "8" * 32,
+            "revision_id": other_page_values[1].revision_id,
+        },
+        {
+            **source.model_dump(),
+            "source_id": "9" * 32,
+            "revision_id": other_library_values[1].revision_id,
+        },
+        {
+            **source.model_dump(),
+            "source_id": "a" * 32,
+            "revision_number": 2,
+        },
+    )
+    for invalid in invalid_sources:
+        with pytest.raises(IntegrityError), immediate_transaction(content_engine) as connection:
+            connection.execute(insert(PageSource), invalid)
+
+    with content_engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(PageSource)) == 3
+        assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+
+
+def test_sources_can_repeat_per_revision_and_differ_across_revisions(
+    content_engine: Engine,
+) -> None:
+    library_id, section_id, book_id = seed_library_structure(content_engine)
+    values = page_graph_values(
+        library_id=library_id,
+        section_id=section_id,
+        book_id=book_id,
+    )
+    page, first_source = values[0], values[4]
+    with immediate_transaction(content_engine) as connection:
+        insert_page_graph(connection, values)
+        connection.execute(
+            insert(PageSource),
+            {**first_source.model_dump(), "source_id": "4" * 32},
+        )
+
+        second_content = MarkdownContent.from_bytes(b"# Revised synthetic archive\n")
+        second_revision = NewRevision(
+            library_id=library_id,
+            revision_id=f"rev_{'77' * 16}",
+            page_uid=page.page_uid,
+            revision_number=2,
+            created_at=3_000_000,
+            **second_content.model_dump(),
+        )
+        connection.execute(insert(Revision), second_revision.model_dump())
+        connection.execute(
+            update(Page)
+            .where(Page.library_id == library_id, Page.page_uid == page.page_uid)
+            .values(
+                current_revision_id=second_revision.revision_id,
+                current_revision_number=second_revision.revision_number,
+                updated_at=3_000_000,
+            )
+        )
+        for source_id in ("5" * 32, "6" * 32):
+            connection.execute(
+                insert(PageSource),
+                {
+                    **first_source.model_dump(),
+                    "source_id": source_id,
+                    "revision_id": second_revision.revision_id,
+                    "revision_number": second_revision.revision_number,
+                },
+            )
+
+    with content_engine.connect() as connection:
+        grouped = [
+            (revision_id, revision_number, count)
+            for revision_id, revision_number, count in connection.execute(
+                select(
+                    PageSource.revision_id,
+                    PageSource.revision_number,
+                    func.count(),
+                )
+                .group_by(PageSource.revision_id, PageSource.revision_number)
+                .order_by(PageSource.revision_number)
+            )
+        ]
+        assert grouped == [
+            (first_source.revision_id, 1, 2),
+            (f"rev_{'77' * 16}", 2, 2),
+        ]
+
+
+def test_source_revision_association_is_required_by_storage(content_engine: Engine) -> None:
+    library_id, section_id, book_id = seed_library_structure(content_engine)
+    values = page_graph_values(
+        library_id=library_id,
+        section_id=section_id,
+        book_id=book_id,
+    )
+    source = values[4]
+    with immediate_transaction(content_engine) as connection:
+        insert_page_graph(connection, values, include_source=False)
+
+    with pytest.raises(IntegrityError), immediate_transaction(content_engine) as connection:
+        connection.execute(
+            insert(PageSource),
+            source.model_dump(exclude={"revision_id", "revision_number"}),
+        )
+
+
 def test_failed_graph_write_rolls_back_every_content_row(content_engine: Engine) -> None:
     library_id, section_id, book_id = seed_library_structure(content_engine)
     values = page_graph_values(

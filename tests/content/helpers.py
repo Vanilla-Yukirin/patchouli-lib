@@ -123,6 +123,8 @@ def page_graph_values(
         library_id=library_id,
         source_id=source_hex * 32,
         page_uid=page_uid,
+        revision_id=revision_id,
+        revision_number=1,
         kind="synthetic",
         locator="urn:synthetic:archive",
         captured_at=occurrence.utc_microseconds,
@@ -142,6 +144,7 @@ def insert_page_graph(
     ],
     *,
     include_counter: bool = True,
+    include_source: bool = True,
 ) -> None:
     page, revision, identifier, counter, source = values
     connection.execute(insert(Page), page.model_dump())
@@ -149,4 +152,5 @@ def insert_page_graph(
     connection.execute(insert(PageIdentifier), identifier.model_dump())
     if include_counter:
         connection.execute(insert(PageIdCollisionCounter), counter.model_dump())
-    connection.execute(insert(PageSource), source.model_dump())
+    if include_source:
+        connection.execute(insert(PageSource), source.model_dump())
