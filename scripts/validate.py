@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+_SYNTHETIC_CURSOR_SECRET = "synthetic-validation-cursor-secret-32-bytes"
 
 
 def run(*args: str, env: dict[str, str] | None = None) -> None:
@@ -63,6 +64,12 @@ def validate_migrations() -> None:
         validate_sqlite_integrity(Path(database_path))
 
 
+def container_validation_environment(source: dict[str, str]) -> dict[str, str]:
+    environment = source.copy()
+    environment["PATCHOULI_RETRIEVAL_CURSOR_SIGNING_SECRET"] = _SYNTHETIC_CURSOR_SECRET
+    return environment
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Validate the public repository.")
     parser.add_argument(
@@ -95,7 +102,13 @@ def main() -> None:
         run("npm", "run", "lint:docs")
 
     if args.container:
-        run("docker", "compose", "config", "--quiet")
+        run(
+            "docker",
+            "compose",
+            "config",
+            "--quiet",
+            env=container_validation_environment(os.environ.copy()),
+        )
         run("uv", "run", "python", "scripts/container_smoke.py")
         run(
             "docker",

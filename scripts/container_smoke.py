@@ -64,6 +64,8 @@ def main() -> None:
             container_name,
             "--publish",
             "127.0.0.1::8000",
+            "--env",
+            "PATCHOULI_RETRIEVAL_CURSOR_SIGNING_SECRET=synthetic-container-cursor-secret-32-bytes",
             "--mount",
             f"type=volume,source={volume_name},target=/data",
             args.image,

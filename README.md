@@ -7,8 +7,9 @@ interfaces.
 
 > [!IMPORTANT]
 > PatchouliLib has a runnable engineering bootstrap, typed Agent client, CLI,
-> and stdio MCP adapter. The knowledge-domain HTTP routes and supported
-> migration policy are not implemented yet.
+> stdio MCP adapter, scoped archive mutation routes, and non-search retrieval
+> routes. Full-text search and a supported backup/restore policy are not
+> implemented yet.
 
 [简体中文](README.zh-CN.md)
 
