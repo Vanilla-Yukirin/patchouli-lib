@@ -22,6 +22,38 @@
         "next_cursor": "cursor_synthetic_next"
       }
     },
+    "pages": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json",
+        "X-Request-ID": "req_12121212121212121212121212121212",
+        "Cache-Control": "private, no-store"
+      },
+      "body": {
+        "items": [
+          {
+            "page": {
+              "section_id": "11111111111111111111111111111111",
+              "book_id": "22222222222222222222222222222222",
+              "page_id": "20260811t091500123z-synthetic-session",
+              "title": "Synthetic session",
+              "type": "archive",
+              "occurred_at": "2026-08-11T09:15:00.123456Z",
+              "current_revision_id": "rev_0123456789abcdef0123456789abcdef",
+              "current_revision_number": 1
+            },
+            "citation": {
+              "section_id": "11111111111111111111111111111111",
+              "page_id": "20260811t091500123z-synthetic-session",
+              "revision_id": "rev_0123456789abcdef0123456789abcdef",
+              "revision_number": 1,
+              "href": "/api/v1/sections/11111111111111111111111111111111/pages/20260811t091500123z-synthetic-session/revisions/1"
+            }
+          }
+        ],
+        "next_cursor": "cursor_synthetic_pages_next"
+      }
+    },
     "search": {
       "status": 200,
       "headers": {

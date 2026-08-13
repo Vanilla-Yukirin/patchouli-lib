@@ -331,6 +331,30 @@ class Page:
 
 
 @dataclass(frozen=True, slots=True)
+class PageMetadata:
+    page: Page
+    citation: Citation
+
+    def __post_init__(self) -> None:
+        if (
+            self.citation.page_id != self.page.page_id
+            or self.citation.section_id != self.page.section_id
+            or self.citation.revision_id != self.page.current_revision_id
+            or self.citation.revision_number != self.page.current_revision_number
+        ):
+            raise ProtocolError("Page metadata citation did not identify the current Revision")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> PageMetadata:
+        if set(data) != {"page", "citation"}:
+            raise ProtocolError("Page metadata item must contain exactly 'page' and 'citation'")
+        return cls(
+            page=Page.from_dict(_object(data.get("page"), context="page")),
+            citation=Citation.from_dict(_object(data.get("citation"), context="citation")),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PageDocument:
     page: Page
     revision: Revision
