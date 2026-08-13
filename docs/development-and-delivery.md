@@ -56,6 +56,29 @@ generator and keep it in an ignored environment file or secret store. Production
 configuration fails closed when this value is absent or too short. Changing it
 invalidates previously issued pagination cursors.
 
+## Packaged synthetic Agent E2E
+
+After the normal validation gate, run the explicit packaged boundary test:
+
+```sh
+python scripts/agent_e2e.py
+```
+
+The runner builds the server and Python client source distributions, installs
+them into separate temporary environments, migrates a temporary SQLite
+database, and exercises the installed operator and Agent command-line tools over
+ephemeral loopback TLS. It covers bootstrap and scoped Agent provisioning,
+archive response-loss replay, Revision history and exact citations, the
+explicitly unavailable search contract, credential revocation, and cleanup.
+
+OpenSSL and `uv` must be available on `PATH`. All identities, content,
+credentials, cursor keys, certificates, ports, and database state are synthetic
+and temporary. Credentials are supplied only through stdin or child-process
+environment variables, are never placed in command arguments, and are not
+emitted by the runner. The package build and installation run in `uv` offline
+mode, and all application traffic stays on loopback. The runner does not contact
+a configured deployment and does not make search an implemented feature.
+
 ## Run with Compose
 
 ```sh
