@@ -14,6 +14,7 @@ from patchouli_client import (
     IdempotencySupport,
     MarkdownContent,
     PageDocument,
+    PageMetadata,
     ProblemDetails,
     ProtocolError,
     SearchRequest,
@@ -39,7 +40,7 @@ def test_collection_json_vectors_match_top_level_server_shape() -> None:
     responses = response_object(fixture["responses"])
 
     assert pagination == {"default_limit": DEFAULT_PAGE_LIMIT, "max_limit": MAX_PAGE_LIMIT}
-    for name in ("sections", "search"):
+    for name in ("sections", "pages", "search"):
         response = response_object(responses[name])
         assert response["status"] == 200
         body = response_object(response["body"])
@@ -54,6 +55,13 @@ def test_collection_json_vectors_match_top_level_server_shape() -> None:
         section_id="sec_synthetic",
         name="Synthetic section",
     )
+
+    pages = response_object(responses["pages"])
+    page_body = response_object(pages["body"])
+    page_item = PageMetadata.from_dict(response_object(response_items(page_body)[0]))
+    assert page_item.page.page_id == page_item.citation.page_id
+    assert page_item.page.current_revision_id == page_item.citation.revision_id
+    assert page_item.page.current_revision_number == page_item.citation.revision_number
 
 
 def test_public_fixture_freezes_mutation_and_problem_envelopes() -> None:
@@ -313,6 +321,85 @@ def test_page_document_rejects_mismatched_exact_citation() -> None:
 
     with pytest.raises(ProtocolError, match="did not agree"):
         PageDocument.from_dict(response)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("section_id", "sec_other"),
+        ("page_id", "page_other"),
+        ("revision_id", "rev_ffffffffffffffffffffffffffffffff"),
+        ("revision_number", 2),
+    ],
+)
+def test_page_metadata_rejects_non_current_citation(field: str, value: object) -> None:
+    document = sample_page(content=None)
+    citation = document["citation"]
+    assert isinstance(citation, dict)
+    citation[field] = value
+    if field == "section_id":
+        citation["href"] = (
+            "/api/v1/sections/sec_other/pages/20260811t091500123z-synthetic-session/revisions/1"
+        )
+    elif field == "page_id":
+        citation["href"] = "/api/v1/sections/sec_synthetic/pages/page_other/revisions/1"
+    elif field == "revision_number":
+        citation["href"] = (
+            "/api/v1/sections/sec_synthetic/pages/20260811t091500123z-synthetic-session/revisions/2"
+        )
+
+    with pytest.raises(ProtocolError, match="current Revision"):
+        PageMetadata.from_dict(
+            {
+                "page": document["page"],
+                "citation": citation,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"citation": sample_page(content=None)["citation"]},
+        {"page": sample_page(content=None)["page"]},
+        {
+            "page": sample_page(content=None)["page"],
+            "citation": sample_page(content=None)["citation"],
+            "future_outer_field": "rejected",
+        },
+    ],
+    ids=["missing-page", "missing-citation", "extra-outer-field"],
+)
+def test_page_metadata_requires_exact_outer_shape(item: dict[str, object]) -> None:
+    with pytest.raises(ProtocolError, match="exactly 'page' and 'citation'"):
+        PageMetadata.from_dict(item)
+
+
+@pytest.mark.parametrize("field", ["page", "citation"])
+def test_page_metadata_requires_nested_objects(field: str) -> None:
+    document = sample_page(content=None)
+    item = {
+        "page": document["page"],
+        "citation": document["citation"],
+    }
+    item[field] = []
+
+    with pytest.raises(ProtocolError, match=rf"{field} must be a JSON object"):
+        PageMetadata.from_dict(item)
+
+
+def test_page_metadata_preserves_nested_extension_compatibility() -> None:
+    document = sample_page(content=None)
+    page = document["page"]
+    citation = document["citation"]
+    assert isinstance(page, dict)
+    assert isinstance(citation, dict)
+    assert "future_page_field" in page
+    assert "future_citation_field" in citation
+
+    parsed = PageMetadata.from_dict({"page": page, "citation": citation})
+
+    assert parsed.page.page_id == parsed.citation.page_id
 
 
 @pytest.mark.parametrize(

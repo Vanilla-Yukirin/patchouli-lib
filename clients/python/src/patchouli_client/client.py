@@ -18,8 +18,8 @@ from patchouli_client.models import (
     Capabilities,
     CursorPage,
     MarkdownContent,
-    Page,
     PageDocument,
+    PageMetadata,
     ProblemDetails,
     SearchHit,
     SearchRequest,
@@ -119,7 +119,7 @@ class PatchouliClient:
         token: BearerToken,
         limit: int = DEFAULT_PAGE_LIMIT,
         cursor: str | None = None,
-    ) -> ClientResponse[CursorPage[Page]]:
+    ) -> ClientResponse[CursorPage[PageMetadata]]:
         response = self._transport.send(
             "GET",
             f"/api/v1/sections/{self._segment(section_id)}/pages",
@@ -127,8 +127,8 @@ class PatchouliClient:
             operation=OperationKind.READ,
             params=self._cursor_params(limit, cursor),
         )
-        result = self._page_success(response, Page.from_dict)
-        if any(page.section_id != section_id for page in result.value.items):
+        result = self._page_success(response, PageMetadata.from_dict)
+        if any(item.page.section_id != section_id for item in result.value.items):
             raise ProtocolError("Page response did not match the requested Section")
         return result
 

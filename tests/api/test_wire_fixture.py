@@ -7,9 +7,10 @@ from http import HTTPStatus
 from pathlib import Path
 from typing import Annotated, cast
 
+import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-from pydantic import Field
+from pydantic import Field, ValidationError
 from starlette.requests import Request
 
 from patchouli_lib.api.contracts import (
@@ -31,6 +32,7 @@ from patchouli_lib.api.errors import (
     problem_response,
 )
 from patchouli_lib.api.request_ids import REQUEST_ID_HEADER, RequestIDMiddleware
+from patchouli_lib.retrieval.schemas import PageMetadata
 
 _FIXTURE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "api" / "agent_v1_wire.json"
 _REQUEST_ID_PATTERN = re.compile(r"^req_[0-9a-f]{32}$", re.ASCII)
@@ -114,18 +116,42 @@ def test_collection_vectors_use_server_models_and_flat_pagination() -> None:
         SectionItem(section_id="sec_synthetic", name="Synthetic section")
     ]
 
+    pages = as_object(responses["pages"])
+    page_body = as_object(pages["body"])
+    parsed_pages = PaginatedResponse[PageMetadata].model_validate(page_body)
+    assert parsed_pages.model_dump(mode="json") == page_body
+    assert parsed_pages.items[0].citation.revision_id == (
+        parsed_pages.items[0].page.current_revision_id
+    )
+    assert parsed_pages.items[0].citation.revision_number == (
+        parsed_pages.items[0].page.current_revision_number
+    )
+
     search = as_object(responses["search"])
     search_body = as_object(search["body"])
     parsed_search = PaginatedResponse[dict[str, object]].model_validate(search_body)
     assert parsed_search.model_dump(mode="json") == search_body
 
-    for response in (sections, search):
+    for response in (sections, pages, search):
         body = as_object(response["body"])
         assert set(body) == {"items", "next_cursor"}
         headers = as_headers(response["headers"])
         assert headers["Content-Type"] == "application/json"
         assert headers["Cache-Control"] == PROTECTED_CACHE_CONTROL
         assert _REQUEST_ID_PATTERN.fullmatch(headers[REQUEST_ID_HEADER]) is not None
+
+
+def test_page_collection_vector_rejects_non_current_citation() -> None:
+    responses = as_object(load_wire_fixture()["responses"])
+    pages = as_object(responses["pages"])
+    page_body = as_object(pages["body"])
+    items = cast(list[object], page_body["items"])
+    item = as_object(items[0])
+    citation = as_object(item["citation"])
+    citation["revision_id"] = "rev_ffffffffffffffffffffffffffffffff"
+
+    with pytest.raises(ValidationError, match="current Revision"):
+        PaginatedResponse[PageMetadata].model_validate(page_body)
 
 
 def test_mutation_vector_uses_representable_server_contracts() -> None:

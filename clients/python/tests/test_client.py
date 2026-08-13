@@ -101,7 +101,11 @@ def test_collection_routes_expose_opaque_cursor() -> None:
                 "title": "Synthetic book",
             }
         elif request.url.path.endswith("/pages"):
-            item = sample_page(content=None)["page"]
+            document = sample_page(content=None)
+            item = {
+                "page": document["page"],
+                "citation": document["citation"],
+            }
         else:
             item = {"section_id": "sec_synthetic", "name": "Synthetic section"}
         return httpx.Response(
@@ -123,10 +127,29 @@ def test_collection_routes_expose_opaque_cursor() -> None:
 
     assert sections.value.items[0].name == "Synthetic section"
     assert books.value.items[0].book_id == "book_synthetic"
-    assert pages.value.items[0].page_id == "20260811t091500123z-synthetic-session"
+    assert pages.value.items[0].page.page_id == "20260811t091500123z-synthetic-session"
+    assert pages.value.items[0].citation.revision_number == 1
     assert sections.value.next_cursor == "cursor_opaque"
     assert "limit=20" in paths[0]
     assert "cursor=cursor_input" in paths[1]
+
+
+def test_page_collection_rejects_non_object_item() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers=protected_headers(),
+            json={"items": [[]], "next_cursor": None},
+        )
+
+    with (
+        PatchouliClient(
+            "https://patchouli.example.invalid",
+            http_transport=httpx.MockTransport(handler),
+        ) as client,
+        pytest.raises(ProtocolError, match="response must be a JSON object"),
+    ):
+        client.list_pages("sec_synthetic", token=BearerToken("cred_synthetic_123"))
 
 
 def test_search_is_post_json_and_returns_exact_citation() -> None:
@@ -344,10 +367,17 @@ def test_section_scoped_collections_validate_response_context(operation: str) ->
                 "title": "Synthetic book",
             }
         elif operation == "pages":
-            page = sample_page()["page"]
+            document = sample_page()
+            page = document["page"]
+            citation = document["citation"]
             assert isinstance(page, dict)
+            assert isinstance(citation, dict)
             page["section_id"] = "sec_other"
-            item = page
+            citation["section_id"] = "sec_other"
+            citation["href"] = (
+                "/api/v1/sections/sec_other/pages/20260811t091500123z-synthetic-session/revisions/1"
+            )
+            item = {"page": page, "citation": citation}
         else:
             document = sample_page()
             page = document["page"]
