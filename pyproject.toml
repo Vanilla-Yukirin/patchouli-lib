@@ -8,6 +8,7 @@ license = "MIT"
 dependencies = [
   "alembic>=1.16,<2",
   "fastapi>=0.116,<1",
+  "python-multipart>=0.0.32,<1",
   "pydantic-settings>=2.10,<3",
   "sqlalchemy>=2.0.41,<3",
   "uvicorn[standard]>=0.35,<1",
