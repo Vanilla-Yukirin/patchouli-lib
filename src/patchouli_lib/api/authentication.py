@@ -45,7 +45,15 @@ def _authorization_values(request: Request) -> tuple[bytes, ...]:
     return tuple(value for name, value in headers if name.lower() == AUTHORIZATION_HEADER)
 
 
-def _bearer_credential(request: Request) -> str:
+def extract_bearer_token(request: Request) -> str:
+    """Return one strictly parsed bearer token for immediate authentication only.
+
+    The caller must keep the returned raw token in a short-lived local variable and
+    pass it directly to the transaction-owned authentication or application service.
+    It must never be retained on the request, an authenticated context, a model, a
+    response, a log record, or durable storage.
+    """
+
     values = _authorization_values(request)
     if not values:
         raise authentication_required()
@@ -79,7 +87,7 @@ class BearerAuthentication:
         self._clock = clock
 
     def __call__(self, request: Request) -> AuthenticatedRequestContext:
-        credential = _bearer_credential(request)
+        credential = extract_bearer_token(request)
         try:
             with immediate_transaction(self._engine) as connection:
                 repository = AuthRepository(connection)
@@ -109,4 +117,5 @@ __all__ = [
     "MAX_AUTHORIZATION_HEADER_BYTES",
     "AuthenticatedRequestContext",
     "BearerAuthentication",
+    "extract_bearer_token",
 ]
