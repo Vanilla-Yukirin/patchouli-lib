@@ -6,10 +6,9 @@ history, and expose retrieval and citation primitives through agent-friendly
 interfaces.
 
 > [!IMPORTANT]
-> PatchouliLib now has a runnable engineering bootstrap with health endpoints,
-> SQLite migration plumbing, local validation, and container delivery. The
-> knowledge domain API, CLI, MCP server, and supported migration policy are not
-> implemented yet.
+> PatchouliLib has a runnable engineering bootstrap, typed Agent client, CLI,
+> and stdio MCP adapter. The knowledge-domain HTTP routes and supported
+> migration policy are not implemented yet.
 
 [简体中文](README.zh-CN.md)
 
@@ -63,6 +62,7 @@ The public design source of truth is [docs/README.md](docs/README.md).
 | Data safety | [Page revisions and history](docs/03-page-revision-and-history.md) |
 | Retrieval context | [Distillation and summaries](docs/04-distillation-and-summary.md) |
 | Query interfaces | [Retrieval and hosted agents](docs/05-retrieval-and-cloud-agent.md) |
+| Agent workflow | [Bundled Agent Skill](skills/patchouli-agent/SKILL.md) |
 | Linking | [Identifiers and references](docs/06-identifiers-and-references.md) |
 | Access control | [Authentication and audit](docs/07-authentication-and-audit.md) |
 | Decisions needed | [Open questions](docs/08-open-questions.md) |
