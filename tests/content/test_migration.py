@@ -3,8 +3,10 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import inspect, text
+from sqlalchemy import insert, inspect, select, text, update
 
+from patchouli_lib.content.models import Page, PageSource, Revision
+from patchouli_lib.content.schemas import MarkdownContent, NewRevision
 from patchouli_lib.database import build_engine, immediate_transaction
 
 from .helpers import insert_page_graph, page_graph_values, seed_library_structure
@@ -88,6 +90,33 @@ def test_page_content_migration_upgrade_check_downgrade_upgrade(
             "initially": "DEFERRED",
         }
 
+        source_columns = {item["name"]: item for item in inspector.get_columns("page_sources")}
+        assert source_columns["revision_id"]["nullable"] is False
+        assert source_columns["revision_number"]["nullable"] is False
+        source_foreign_keys = {
+            item["name"]: item for item in inspector.get_foreign_keys("page_sources")
+        }
+        assert {item["referred_table"] for item in source_foreign_keys.values()} == {
+            "pages",
+            "revisions",
+        }
+        source_revision = source_foreign_keys["fk_page_sources_library_page_revision_revisions"]
+        assert source_revision["constrained_columns"] == [
+            "library_id",
+            "page_uid",
+            "revision_id",
+            "revision_number",
+        ]
+        assert source_revision["referred_table"] == "revisions"
+        assert source_revision["referred_columns"] == [
+            "library_id",
+            "page_uid",
+            "revision_id",
+            "revision_number",
+        ]
+        assert source_revision["options"].get("ondelete") == "RESTRICT"
+        assert inspector.get_unique_constraints("page_sources") == []
+
         guard_foreign_keys = {
             item["name"]: item for item in inspector.get_foreign_keys("page_revision_append_guards")
         }
@@ -157,7 +186,7 @@ def test_page_content_migration_upgrade_check_downgrade_upgrade(
                 "trg_pages_stable_identity",
             }
             assert first.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == (
-                "20260813_0005"
+                "20260813_0006"
             )
     finally:
         engine.dispose()
@@ -179,6 +208,169 @@ def test_page_content_migration_upgrade_check_downgrade_upgrade(
 
     command.upgrade(config, "head")
     command.check(config)
+
+
+def test_upgrade_refuses_unresolvable_legacy_source_without_schema_loss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url, config = configure_database(tmp_path / "unsafe-backfill.db", monkeypatch)
+    command.upgrade(config, "20260813_0005")
+    engine = build_engine(database_url)
+    library_id, section_id, book_id = seed_library_structure(engine)
+    values = page_graph_values(
+        library_id=library_id,
+        section_id=section_id,
+        book_id=book_id,
+    )
+    source = values[4]
+    with immediate_transaction(engine) as connection:
+        insert_page_graph(connection, values, include_source=False)
+        connection.execute(
+            text(
+                "INSERT INTO page_sources "
+                "(library_id, source_id, page_uid, kind, locator, captured_at, created_at) "
+                "VALUES (:library_id, :source_id, :page_uid, :kind, :locator, "
+                ":captured_at, :created_at)"
+            ),
+            source.model_dump(exclude={"revision_id", "revision_number"}),
+        )
+    with engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        connection.execute(
+            text("UPDATE page_sources SET page_uid = :page_uid"),
+            {"page_uid": b"\x99" * 16},
+        )
+        connection.commit()
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match="cannot be associated"):
+        command.upgrade(config, "20260813_0006")
+
+    engine = build_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        columns = {item["name"] for item in inspector.get_columns("page_sources")}
+        assert "revision_id" not in columns
+        assert "revision_number" not in columns
+        with engine.connect() as connection:
+            assert connection.execute(text("SELECT count(*) FROM page_sources")).scalar_one() == 1
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == ("20260813_0005")
+    finally:
+        engine.dispose()
+
+
+def test_legacy_source_backfills_current_revision_and_roundtrips_without_loss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url, config = configure_database(tmp_path / "source-backfill.db", monkeypatch)
+    command.upgrade(config, "20260813_0005")
+    engine = build_engine(database_url)
+    library_id, section_id, book_id = seed_library_structure(engine)
+    values = page_graph_values(
+        library_id=library_id,
+        section_id=section_id,
+        book_id=book_id,
+    )
+    page, legacy_source = values[0], values[4]
+    with immediate_transaction(engine) as connection:
+        insert_page_graph(connection, values, include_source=False)
+        connection.execute(
+            text(
+                "INSERT INTO page_sources "
+                "(library_id, source_id, page_uid, kind, locator, captured_at, created_at) "
+                "VALUES (:library_id, :source_id, :page_uid, :kind, :locator, "
+                ":captured_at, :created_at)"
+            ),
+            legacy_source.model_dump(exclude={"revision_id", "revision_number"}),
+        )
+
+    second_content = MarkdownContent.from_bytes(b"# Current at legacy upgrade\n")
+    second_revision = NewRevision(
+        library_id=library_id,
+        revision_id=f"rev_{'77' * 16}",
+        page_uid=page.page_uid,
+        revision_number=2,
+        created_at=3_000_000,
+        **second_content.model_dump(),
+    )
+    with immediate_transaction(engine) as connection:
+        connection.execute(insert(Revision), second_revision.model_dump())
+        connection.execute(
+            update(Page)
+            .where(Page.library_id == library_id, Page.page_uid == page.page_uid)
+            .values(
+                current_revision_id=second_revision.revision_id,
+                current_revision_number=second_revision.revision_number,
+                updated_at=3_000_000,
+            )
+        )
+    engine.dispose()
+
+    command.upgrade(config, "20260813_0006")
+    engine = build_engine(database_url)
+    try:
+        with engine.connect() as connection:
+            stored = (
+                connection.execute(
+                    select(PageSource.__table__).where(
+                        PageSource.source_id == legacy_source.source_id
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            assert stored["revision_id"] == second_revision.revision_id
+            assert stored["revision_number"] == second_revision.revision_number
+            assert stored["kind"] == legacy_source.kind
+            assert stored["locator"] == legacy_source.locator
+            assert stored["captured_at"] == legacy_source.captured_at
+            assert stored["created_at"] == legacy_source.created_at
+            assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, "20260813_0005")
+    engine = build_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        assert "revision_id" not in {item["name"] for item in inspector.get_columns("page_sources")}
+        assert "revision_number" not in {
+            item["name"] for item in inspector.get_columns("page_sources")
+        }
+        with engine.connect() as connection:
+            legacy = (
+                connection.execute(
+                    text(
+                        "SELECT library_id, source_id, page_uid, kind, locator, captured_at, "
+                        "created_at FROM page_sources WHERE source_id = :source_id"
+                    ),
+                    {"source_id": legacy_source.source_id},
+                )
+                .mappings()
+                .one()
+            )
+            assert dict(legacy) == legacy_source.model_dump(
+                exclude={"revision_id", "revision_number"}
+            )
+            assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = build_engine(database_url)
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(
+                select(PageSource.revision_id, PageSource.revision_number)
+            ).one() == (second_revision.revision_id, 2)
+            assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+    finally:
+        engine.dispose()
 
 
 def test_populated_downgrade_removes_only_content_slice(

@@ -394,9 +394,30 @@ class PageSource(Base):
             name="fk_page_sources_library_page_pages",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["library_id", "page_uid", "revision_id", "revision_number"],
+            [
+                "revisions.library_id",
+                "revisions.page_uid",
+                "revisions.revision_id",
+                "revisions.revision_number",
+            ],
+            name="fk_page_sources_library_page_revision_revisions",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint(
             "length(source_id) = 32 AND source_id NOT GLOB '*[^0-9a-f]*'",
             name="ck_page_sources_source_id_lower_hex",
+        ),
+        CheckConstraint(
+            "typeof(revision_id) = 'text' AND length(revision_id) = 36 "
+            "AND substr(revision_id, 1, 4) = 'rev_' "
+            "AND substr(revision_id, 5) NOT GLOB '*[^0-9a-f]*'",
+            name="ck_page_sources_revision_id_wire",
+        ),
+        CheckConstraint(
+            "revision_number BETWEEN 1 AND 9223372036854775807",
+            name="ck_page_sources_revision_number",
         ),
         CheckConstraint(
             f"length(kind) BETWEEN 1 AND {SOURCE_KIND_MAX_LENGTH} "
@@ -424,6 +445,8 @@ class PageSource(Base):
         primary_key=True,
     )
     page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), nullable=False)
+    revision_id: Mapped[str] = mapped_column(String(REVISION_ID_LENGTH), nullable=False)
+    revision_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
     kind: Mapped[str] = mapped_column(String(SOURCE_KIND_MAX_LENGTH), nullable=False)
     locator: Mapped[str | None] = mapped_column(Text)
     captured_at: Mapped[int | None] = mapped_column(BigInteger)

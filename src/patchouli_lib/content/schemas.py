@@ -281,10 +281,22 @@ class NewPageSource(ContentSchema):
     library_id: OpaqueId
     source_id: OpaqueId
     page_uid: PageUid
+    revision_id: RevisionId
+    revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
     kind: SourceKind
     locator: str | None = None
     captured_at: OccurrenceMicros | None = None
     created_at: StoredTimestamp
+
+    @field_validator("revision_id")
+    @classmethod
+    def require_revision_id(cls, value: str) -> str:
+        return validate_revision_id(value)
+
+    @field_validator("revision_number")
+    @classmethod
+    def require_revision_number(cls, value: int) -> int:
+        return validate_revision_number(value)
 
     @field_validator("kind")
     @classmethod

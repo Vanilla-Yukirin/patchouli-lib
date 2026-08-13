@@ -46,6 +46,18 @@ def valid_page_values() -> dict[str, object]:
     }
 
 
+def valid_source_values() -> dict[str, object]:
+    return {
+        "library_id": LIBRARY_ID,
+        "source_id": "3" * 32,
+        "page_uid": PAGE_UID,
+        "revision_id": REVISION_ID,
+        "revision_number": 1,
+        "kind": "synthetic",
+        "created_at": 1_000_000,
+    }
+
+
 def test_markdown_content_preserves_exact_utf8_bytes_and_metadata() -> None:
     raw = "# 合成\r\n\r\nCafe\u0301\n".encode()
 
@@ -234,18 +246,13 @@ def test_counter_schema_rejects_invalid_floor_or_ordinal(
 
 
 def test_source_schema_keeps_locator_optional_and_does_not_define_identity() -> None:
-    first = NewPageSource(
-        library_id=LIBRARY_ID,
-        source_id="3" * 32,
-        page_uid=PAGE_UID,
-        kind="synthetic",
-        locator=None,
-        created_at=1_000_000,
-    )
+    first = NewPageSource.model_validate({**valid_source_values(), "locator": None})
     second = NewPageSource(
         library_id=LIBRARY_ID,
         source_id="4" * 32,
         page_uid=PAGE_UID,
+        revision_id=REVISION_ID,
+        revision_number=1,
         kind="synthetic import",
         locator="urn:synthetic:shared",
         captured_at=-1,
@@ -254,6 +261,8 @@ def test_source_schema_keeps_locator_optional_and_does_not_define_identity() -> 
 
     assert first.locator is None
     assert second.locator == "urn:synthetic:shared"
+    assert second.revision_id == REVISION_ID
+    assert second.revision_number == 1
 
 
 @pytest.mark.parametrize(
@@ -262,11 +271,26 @@ def test_source_schema_keeps_locator_optional_and_does_not_define_identity() -> 
 )
 def test_source_schema_rejects_invalid_text(kind: str, locator: str | None) -> None:
     with pytest.raises(ValidationError):
-        NewPageSource(
-            library_id=LIBRARY_ID,
-            source_id="3" * 32,
-            page_uid=PAGE_UID,
-            kind=kind,
-            locator=locator,
-            created_at=1_000_000,
+        NewPageSource.model_validate(
+            {
+                **valid_source_values(),
+                "kind": kind,
+                "locator": locator,
+            }
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("revision_id", "rev_" + "A" * 32),
+        ("revision_number", 0),
+        ("revision_number", True),
+    ],
+)
+def test_source_schema_requires_exact_revision_identity(field: str, value: object) -> None:
+    values = valid_source_values()
+    values[field] = value
+
+    with pytest.raises(ValidationError):
+        NewPageSource.model_validate(values)
