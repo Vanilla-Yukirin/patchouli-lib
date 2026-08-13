@@ -6,6 +6,7 @@
   "documents": [
     {
       "id": "zh-retry",
+      "section_id": "section-primary",
       "title": "帕秋莉检索与安全重试",
       "summary": "讨论知识库查询、幂等写入和版本冲突。",
       "tags": ["中文", "查询", "幂等"],
@@ -13,6 +14,7 @@
     },
     {
       "id": "zh-backup",
+      "section_id": "section-primary",
       "title": "中文备份恢复演练",
       "summary": "验证备份、恢复和引用一致性。",
       "tags": ["中文", "备份", "恢复"],
@@ -20,6 +22,7 @@
     },
     {
       "id": "mixed-search",
+      "section_id": "section-primary",
       "title": "SQLite FTS5 中英混合查询",
       "summary": "Agent retrieval for a synthetic 中文知识库。",
       "tags": ["sqlite", "fts5", "搜索"],
@@ -27,6 +30,7 @@
     },
     {
       "id": "en-idempotency",
+      "section_id": "section-primary",
       "title": "Idempotent archive retry",
       "summary": "A synthetic example of safe retry behavior.",
       "tags": ["archive", "retry", "revision"],
@@ -34,6 +38,7 @@
     },
     {
       "id": "literal-syntax",
+      "section_id": "section-primary",
       "title": "Literal search syntax",
       "summary": "FTS-looking input stored as ordinary synthetic text.",
       "tags": ["syntax", "literal"],
@@ -41,6 +46,7 @@
     },
     {
       "id": "wildcard-decoy",
+      "section_id": "section-primary",
       "title": "Prefix expansion decoy",
       "summary": "A document used to expose accidental wildcard matching.",
       "tags": ["syntax", "decoy"],
