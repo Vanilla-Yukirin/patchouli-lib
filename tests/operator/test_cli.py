@@ -144,12 +144,73 @@ def _provision_arguments() -> list[str]:
     ]
 
 
+def _revoke_arguments(caller_id: str, credential_id: str) -> list[str]:
+    return [
+        "revoke-agent-credential",
+        "--library-name",
+        _LIBRARY_NAME,
+        "--caller-id",
+        caller_id,
+        "--credential-id",
+        credential_id,
+    ]
+
+
 def _token(stdout: str) -> str:
     assert stdout.endswith("\n")
     value = stdout.removesuffix("\n")
     assert value.startswith("plb1.")
     assert "\n" not in value
     return value
+
+
+def _prepare_agent_credential(
+    engine: Engine,
+    clock: list[int],
+) -> tuple[str, str, str, str, str, str]:
+    bootstrap_code, bootstrap_stdout, bootstrap_stderr = _run(_bootstrap_arguments())
+    assert bootstrap_code == 0
+    assert bootstrap_stderr == ""
+    operator_token = _token(bootstrap_stdout)
+    clock[0] = 2_000_000
+    provision_code, provision_stdout, provision_stderr = _run(
+        _provision_arguments(),
+        stdin_text=f"{operator_token}\n",
+    )
+    assert provision_code == 0
+    assert provision_stderr == ""
+    agent_token = _token(provision_stdout)
+    with engine.connect() as connection:
+        operator = (
+            connection.execute(
+                select(Caller.__table__).where(Caller.kind == CallerKind.OPERATOR.value)
+            )
+            .mappings()
+            .one()
+        )
+        agent = (
+            connection.execute(
+                select(Caller.__table__).where(Caller.kind == CallerKind.AGENT.value)
+            )
+            .mappings()
+            .one()
+        )
+        operator_credential_id = connection.scalar(
+            select(Credential.id).where(Credential.caller_id == operator.id)
+        )
+        agent_credential_id = connection.scalar(
+            select(Credential.id).where(Credential.caller_id == agent.id)
+        )
+    assert isinstance(operator_credential_id, str)
+    assert isinstance(agent_credential_id, str)
+    return (
+        operator_token,
+        agent_token,
+        operator.id,
+        operator_credential_id,
+        agent.id,
+        agent_credential_id,
+    )
 
 
 def test_bootstrap_seeds_structure_and_outputs_secret_only_after_commit(
@@ -321,6 +382,220 @@ def test_provision_agent_reads_operator_token_from_stdin_and_grants_exact_action
     database_bytes = database_path.read_bytes()
     assert operator_token.encode() not in database_bytes
     assert agent_token.encode() not in database_bytes
+
+
+def test_revoke_agent_credential_commits_exact_audit_and_rejects_bearer(
+    cli_database: tuple[Path, Engine, list[int]],
+) -> None:
+    database_path, engine, clock = cli_database
+    (
+        operator_token,
+        agent_token,
+        operator_id,
+        operator_credential_id,
+        agent_id,
+        agent_credential_id,
+    ) = _prepare_agent_credential(engine, clock)
+    arguments = _revoke_arguments(agent_id, agent_credential_id)
+    assert operator_token not in arguments
+    assert agent_token not in arguments
+    clock[0] = 3_000_000
+
+    exit_code, stdout, stderr = _run(
+        arguments,
+        stdin_text=f"{operator_token}\r\n",
+    )
+
+    assert exit_code == 0
+    assert stdout == ""
+    assert stderr == ""
+    with engine.connect() as connection:
+        revoked_at = connection.scalar(
+            select(Credential.revoked_at).where(Credential.id == agent_credential_id)
+        )
+        audit = (
+            connection.execute(
+                select(AuditEvent.__table__).where(AuditEvent.action == "auth.credential.revoke")
+            )
+            .mappings()
+            .one()
+        )
+        assert revoked_at == 3_000_000
+        assert audit.actor_caller_id == operator_id
+        assert audit.actor_credential_id == operator_credential_id
+        assert audit.target_caller_id is None
+        assert audit.action == "auth.credential.revoke"
+        assert audit.resource_type == "credential"
+        assert audit.resource_id == agent_credential_id
+        assert audit.outcome == "succeeded"
+        assert audit.request_id.startswith("req_local_")
+        assert audit.occurred_at == 3_000_000
+        with pytest.raises(AuthenticationError):
+            AuthenticationService(
+                AuthRepository(connection),
+                clock=lambda: 4_000_000,
+            ).authenticate(agent_token)
+        connection.rollback()
+    database_bytes = database_path.read_bytes()
+    assert operator_token.encode() not in database_bytes
+    assert agent_token.encode() not in database_bytes
+
+    clock[0] = 4_000_000
+    repeated_code, repeated_stdout, repeated_stderr = _run(
+        arguments,
+        stdin_text=f"{operator_token}\n",
+    )
+    assert repeated_code == 0
+    assert repeated_stdout == ""
+    assert repeated_stderr == ""
+    with engine.connect() as connection:
+        assert (
+            connection.scalar(
+                select(Credential.revoked_at).where(Credential.id == agent_credential_id)
+            )
+            == 3_000_000
+        )
+        assert (
+            connection.scalar(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(AuditEvent.action == "auth.credential.revoke")
+            )
+            == 1
+        )
+
+
+def test_revoke_agent_credential_rejects_malformed_stdin_without_state_drift(
+    cli_database: tuple[Path, Engine, list[int]],
+) -> None:
+    _, engine, clock = cli_database
+    (
+        operator_token,
+        _,
+        _,
+        _,
+        agent_id,
+        agent_credential_id,
+    ) = _prepare_agent_credential(engine, clock)
+    with engine.connect() as connection:
+        credentials_before = [
+            dict(row)
+            for row in connection.execute(
+                select(Credential.__table__).order_by(Credential.id)
+            ).mappings()
+        ]
+        audits_before = [
+            dict(row)
+            for row in connection.execute(
+                select(AuditEvent.__table__).order_by(AuditEvent.id)
+            ).mappings()
+        ]
+    clock[0] = 3_000_000
+
+    exit_code, stdout, stderr = _run(
+        _revoke_arguments(agent_id, agent_credential_id),
+        stdin_text=f"{operator_token}\nunexpected-second-line\n",
+    )
+
+    assert exit_code == 2
+    assert stdout == ""
+    assert stderr == "Invalid operator command input.\n"
+    assert operator_token not in stderr
+    with engine.connect() as connection:
+        credentials_after = [
+            dict(row)
+            for row in connection.execute(
+                select(Credential.__table__).order_by(Credential.id)
+            ).mappings()
+        ]
+        audits_after = [
+            dict(row)
+            for row in connection.execute(
+                select(AuditEvent.__table__).order_by(AuditEvent.id)
+            ).mappings()
+        ]
+    assert credentials_after == credentials_before
+    assert audits_after == audits_before
+
+
+def test_revoke_agent_credential_hides_wrong_targets_and_operator_credential(
+    cli_database: tuple[Path, Engine, list[int]],
+) -> None:
+    _, engine, clock = cli_database
+    (
+        operator_token,
+        agent_token,
+        operator_id,
+        operator_credential_id,
+        agent_id,
+        agent_credential_id,
+    ) = _prepare_agent_credential(engine, clock)
+    with engine.connect() as connection:
+        callers_before = [
+            dict(row)
+            for row in connection.execute(select(Caller.__table__).order_by(Caller.id)).mappings()
+        ]
+        credentials_before = [
+            dict(row)
+            for row in connection.execute(
+                select(Credential.__table__).order_by(Credential.id)
+            ).mappings()
+        ]
+        audits_before = [
+            dict(row)
+            for row in connection.execute(
+                select(AuditEvent.__table__).order_by(AuditEvent.id)
+            ).mappings()
+        ]
+    bad_arguments = [
+        _revoke_arguments("f" * 32, agent_credential_id),
+        _revoke_arguments(agent_id, "e" * 32),
+        _revoke_arguments(operator_id, operator_credential_id),
+        [
+            "revoke-agent-credential",
+            "--library-name",
+            "Missing Synthetic Library",
+            "--caller-id",
+            agent_id,
+            "--credential-id",
+            agent_credential_id,
+        ],
+    ]
+    clock[0] = 3_000_000
+
+    for arguments in bad_arguments:
+        assert operator_token not in arguments
+        assert agent_token not in arguments
+        exit_code, stdout, stderr = _run(
+            arguments,
+            stdin_text=f"{operator_token}\n",
+        )
+        assert exit_code == 1
+        assert stdout == ""
+        assert stderr == "Operator command failed.\n"
+        assert operator_token not in stderr
+        assert agent_token not in stderr
+
+    with engine.connect() as connection:
+        callers_after = [
+            dict(row)
+            for row in connection.execute(select(Caller.__table__).order_by(Caller.id)).mappings()
+        ]
+        credentials_after = [
+            dict(row)
+            for row in connection.execute(
+                select(Credential.__table__).order_by(Credential.id)
+            ).mappings()
+        ]
+        audits_after = [
+            dict(row)
+            for row in connection.execute(
+                select(AuditEvent.__table__).order_by(AuditEvent.id)
+            ).mappings()
+        ]
+    assert callers_after == callers_before
+    assert credentials_after == credentials_before
+    assert audits_after == audits_before
 
 
 def test_provision_failure_rolls_back_identity_credential_grants_and_audit(
@@ -681,6 +956,12 @@ def test_duplicate_agent_provision_rolls_back_without_extra_audit(
         ([], "", 2, "Invalid operator command input.\n"),
         (
             ["provision-agent", "--operator-token", "plb1.argv-secret"],
+            "",
+            2,
+            "Invalid operator command input.\n",
+        ),
+        (
+            ["revoke-agent-credential", "--operator-token", "plb1.argv-secret"],
             "",
             2,
             "Invalid operator command input.\n",
