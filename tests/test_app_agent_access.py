@@ -156,6 +156,7 @@ def test_application_registers_exact_agent_access_routes(tmp_path: Path) -> None
                 "/api/v1/sections/{section_id}/pages/{page_id}/revisions",
                 "POST",
             ),
+            ("/api/v1/sections/{section_id}/search", "POST"),
         }
     finally:
         application.state.engine.dispose()
@@ -174,7 +175,8 @@ def test_application_does_not_register_retrieval_without_cursor_secret(tmp_path:
         paths = application.openapi()["paths"]
         assert "/api/v1/sections" not in paths
         assert "/api/v1/sections/{section_id}/pages/{page_id}" not in paths
-        _section_id, _book_id, token = _seed_agent(application.state.engine)
+        assert "/api/v1/sections/{section_id}/search" in paths
+        section_id, _book_id, token = _seed_agent(application.state.engine)
         with TestClient(application, raise_server_exceptions=False) as client:
             capabilities = client.get(
                 "/api/v1/capabilities",
@@ -189,6 +191,14 @@ def test_application_does_not_register_retrieval_without_cursor_secret(tmp_path:
                 ).status_code
                 == 404
             )
+            unavailable = client.post(
+                f"/api/v1/sections/{section_id}/search",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"query": "synthetic query"},
+            )
+            assert unavailable.status_code == 503
+            assert unavailable.headers["content-type"].startswith("application/problem+json")
+            assert unavailable.json()["code"] == "search_unavailable"
     finally:
         application.state.engine.dispose()
 
@@ -218,6 +228,15 @@ def test_integrated_archive_create_replay_and_revise(tmp_path: Path) -> None:
             "content_mutations": True,
             "successful_replay_retention": "indefinite-alpha",
         }
+
+        unavailable = client.post(
+            f"/api/v1/sections/{section_id}/search",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"query": "synthetic query"},
+        )
+        assert unavailable.status_code == 503
+        assert unavailable.headers["content-type"].startswith("application/problem+json")
+        assert unavailable.json()["code"] == "search_unavailable"
 
         whoami = client.get(
             "/api/v1/auth/whoami",

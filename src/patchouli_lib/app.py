@@ -13,6 +13,7 @@ from patchouli_lib.api.auth_routes import create_auth_router
 from patchouli_lib.api.errors import install_api_exception_handlers
 from patchouli_lib.api.request_ids import RequestIDMiddleware
 from patchouli_lib.api.retrieval_routes import create_retrieval_router
+from patchouli_lib.api.search_routes import create_search_router
 from patchouli_lib.config import Settings
 from patchouli_lib.database import DatabaseNotReadyError, build_engine, check_database
 from patchouli_lib.retrieval.cursor import CursorCodec
@@ -61,6 +62,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
     )
     application.include_router(create_archive_router(engine))
+    application.include_router(create_search_router(engine))
     if cursor_secret is not None:
         application.include_router(
             create_retrieval_router(
