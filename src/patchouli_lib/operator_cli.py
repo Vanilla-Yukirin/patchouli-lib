@@ -14,6 +14,7 @@ from sqlalchemy import Engine
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
     MAX_RFC3339_TIMESTAMP_MICROSECONDS,
+    CallerKind,
     LocalOperatorRecovery,
     OperatorBootstrap,
     SectionAction,
@@ -108,6 +109,13 @@ class _ProvisionAgentCommand:
     grants: tuple[SectionAction, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _RevokeAgentCredentialCommand:
+    library_name: str
+    caller_id: str
+    credential_id: str
+
+
 @dataclass(frozen=True, slots=True, repr=False, eq=False)
 class _AgentCompensation:
     actor_token: str = field(repr=False)
@@ -198,6 +206,16 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=tuple(action.value for action in SectionAction),
         help="exact Section action; repeat for additional actions",
     )
+
+    revoke = subparsers.add_parser(
+        "revoke-agent-credential",
+        help="immediately revoke one Agent credential",
+        add_help=False,
+    )
+    _add_help(revoke)
+    revoke.add_argument("--library-name", required=True)
+    revoke.add_argument("--caller-id", required=True)
+    revoke.add_argument("--credential-id", required=True)
     return parser
 
 
@@ -210,11 +228,10 @@ def _namespace_value[T](namespace: argparse.Namespace, name: str, value_type: ty
 
 def _parse_command(
     argv: Sequence[str],
-) -> _BootstrapCommand | _RecoverCommand | _ProvisionAgentCommand:
+) -> _BootstrapCommand | _RecoverCommand | _ProvisionAgentCommand | _RevokeAgentCredentialCommand:
     namespace = _build_parser().parse_args(list(argv))
     command = _namespace_value(namespace, "command", str)
     library_name = _namespace_value(namespace, "library_name", str)
-    credential_ttl_seconds = _namespace_value(namespace, "credential_ttl_seconds", int)
     if command == "bootstrap":
         return _BootstrapCommand(
             library_name=library_name,
@@ -224,12 +241,20 @@ def _parse_command(
             book_summary=_namespace_value(namespace, "book_summary", str),
             operator_name=_namespace_value(namespace, "operator_name", str),
             operator_description=_namespace_value(namespace, "operator_description", str),
-            credential_ttl_seconds=credential_ttl_seconds,
+            credential_ttl_seconds=_namespace_value(
+                namespace,
+                "credential_ttl_seconds",
+                int,
+            ),
         )
     if command == "recover":
         return _RecoverCommand(
             library_name=library_name,
-            credential_ttl_seconds=credential_ttl_seconds,
+            credential_ttl_seconds=_namespace_value(
+                namespace,
+                "credential_ttl_seconds",
+                int,
+            ),
         )
     if command == "provision-agent":
         raw_grants = _namespace_value(namespace, "grant", list)
@@ -241,8 +266,18 @@ def _parse_command(
             section_name=_namespace_value(namespace, "section_name", str),
             agent_name=_namespace_value(namespace, "agent_name", str),
             agent_description=_namespace_value(namespace, "agent_description", str),
-            credential_ttl_seconds=credential_ttl_seconds,
+            credential_ttl_seconds=_namespace_value(
+                namespace,
+                "credential_ttl_seconds",
+                int,
+            ),
             grants=grants,
+        )
+    if command == "revoke-agent-credential":
+        return _RevokeAgentCredentialCommand(
+            library_name=library_name,
+            caller_id=_namespace_value(namespace, "caller_id", str),
+            credential_id=_namespace_value(namespace, "credential_id", str),
         )
     raise _CliInputError
 
@@ -391,16 +426,46 @@ def _provision_agent(
     )
 
 
+def _revoke_agent_credential(
+    engine: Engine,
+    command: _RevokeAgentCredentialCommand,
+    stdin: TextIO,
+) -> None:
+    actor_token = _read_operator_token(stdin)
+    now = utc_microseconds()
+    with immediate_transaction(engine) as connection:
+        library_id = _require_library(LibraryRepository(connection), command.library_name)
+        repository = AuthRepository(connection)
+        caller = repository.get_caller(library_id, command.caller_id)
+        if caller is None or caller.kind is not CallerKind.AGENT:
+            raise ResourceNotFoundError
+        OperatorService(
+            repository,
+            clock=lambda: now,
+        ).revoke_credential(
+            actor_token,
+            library_id=library_id,
+            caller_id=caller.id,
+            credential_id=command.credential_id,
+            request_id=_request_id(),
+        )
+
+
 def _execute(
     engine: Engine,
-    command: _BootstrapCommand | _RecoverCommand | _ProvisionAgentCommand,
+    command: (
+        _BootstrapCommand | _RecoverCommand | _ProvisionAgentCommand | _RevokeAgentCredentialCommand
+    ),
     stdin: TextIO,
-) -> _SecretDelivery:
+) -> _SecretDelivery | None:
     if isinstance(command, _BootstrapCommand):
         return _bootstrap(engine, command)
     if isinstance(command, _RecoverCommand):
         return _recover(engine, command)
-    return _provision_agent(engine, command, stdin)
+    if isinstance(command, _ProvisionAgentCommand):
+        return _provision_agent(engine, command, stdin)
+    _revoke_agent_credential(engine, command, stdin)
+    return None
 
 
 def _output_position(stdout: TextIO) -> int | None:
@@ -502,6 +567,8 @@ def main(
         settings = Settings()
         engine = build_engine(settings.database_url)
         delivery = _execute(engine, command, input_stream)
+        if delivery is None:
+            return 0
         return _deliver_secret(engine, delivery, output_stream, error_stream)
     except (ValidationError, _CliInputError):
         error_stream.write(f"{_SAFE_INPUT_MESSAGE}\n")
