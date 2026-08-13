@@ -252,6 +252,22 @@ class AuthRepository:
         row = self._connection.execute(statement).mappings().one_or_none()
         return None if row is None else SectionGrantRecord.model_validate(row)
 
+    def list_grants(
+        self,
+        library_id: str,
+        caller_id: str,
+    ) -> tuple[SectionGrantRecord, ...]:
+        statement = (
+            select(SectionGrant.__table__)
+            .where(
+                SectionGrant.library_id == library_id,
+                SectionGrant.caller_id == caller_id,
+            )
+            .order_by(SectionGrant.section_id, SectionGrant.action)
+        )
+        rows = self._connection.execute(statement).mappings().all()
+        return tuple(SectionGrantRecord.model_validate(row) for row in rows)
+
     def add_grant(self, grant: NewSectionGrant) -> SectionGrantRecord:
         values = grant.model_dump()
         self._connection.execute(insert(SectionGrant), values)

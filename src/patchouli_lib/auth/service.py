@@ -8,6 +8,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
+    MAX_RFC3339_TIMESTAMP_MICROSECONDS,
     AuthenticatedCaller,
     CallerKind,
     CallerRecord,
@@ -73,7 +74,7 @@ class CredentialIssuer:
 
     def issue(self, caller: CallerRecord, *, expires_at: int) -> IssuedCredential:
         created_at = self._clock()
-        if expires_at <= created_at:
+        if expires_at <= created_at or expires_at > MAX_RFC3339_TIMESTAMP_MICROSECONDS:
             raise CredentialExpiryError
         if caller.disabled_at is not None:
             raise AuthenticationError
