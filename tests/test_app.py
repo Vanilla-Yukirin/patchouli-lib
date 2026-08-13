@@ -41,5 +41,9 @@ def test_readiness_hides_database_failure_details(
     response = client.get("/health/ready")
 
     assert response.status_code == 503
-    assert response.json() == {"detail": "database unavailable"}
+    payload = response.json()
+    assert payload["status"] == 503
+    assert payload["code"] == "internal_error"
+    assert payload["detail"] == "The server could not complete the request."
+    assert payload["request_id"].startswith("req_")
     assert "private database detail" not in response.text

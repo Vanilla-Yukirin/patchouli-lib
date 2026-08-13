@@ -376,7 +376,7 @@ def _client_module(monkeypatch: pytest.MonkeyPatch, name: str) -> ModuleType:
     raise AssertionError("Unknown synthetic client module.")
 
 
-def test_router_inventory_is_exact_and_app_remains_unmodified() -> None:
+def test_router_inventory_is_exact() -> None:
     engine = build_engine("sqlite://")
     try:
         router = create_archive_router(engine)
@@ -392,9 +392,6 @@ def test_router_inventory_is_exact_and_app_remains_unmodified() -> None:
             {"POST"},
         ),
     ]
-    app_source = (Path(__file__).resolve().parents[2] / "src/patchouli_lib/app.py").read_text()
-    assert "archive_routes" not in app_source
-    assert "create_archive_router" not in app_source
 
 
 def test_typed_client_multipart_create_and_response_parity(
