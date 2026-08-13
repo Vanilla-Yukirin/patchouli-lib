@@ -7,6 +7,11 @@ from pydantic import BaseModel
 from sqlalchemy import Engine
 
 from patchouli_lib import __version__
+from patchouli_lib.api.archive_routes import create_archive_router
+from patchouli_lib.api.auth_contracts import CapabilityConfiguration
+from patchouli_lib.api.auth_routes import create_auth_router
+from patchouli_lib.api.errors import install_api_exception_handlers
+from patchouli_lib.api.request_ids import RequestIDMiddleware
 from patchouli_lib.config import Settings
 from patchouli_lib.database import DatabaseNotReadyError, build_engine, check_database
 
@@ -21,12 +26,19 @@ class HealthResponse(BaseModel):
     status: str
 
 
+AGENT_ACCESS_CAPABILITIES = CapabilityConfiguration(
+    features=("archive",),
+    content_mutation_idempotency=True,
+    successful_replay_retention="indefinite-alpha",
+)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved_settings = settings or Settings()
+    engine = build_engine(resolved_settings.database_url)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-        engine = build_engine(resolved_settings.database_url)
         application.state.engine = engine
         try:
             yield
@@ -38,6 +50,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version=__version__,
         lifespan=lifespan,
     )
+    application.state.engine = engine
+    install_api_exception_handlers(application)
+    application.add_middleware(RequestIDMiddleware)
+    application.include_router(
+        create_auth_router(
+            engine,
+            capability_configuration=AGENT_ACCESS_CAPABILITIES,
+        )
+    )
+    application.include_router(create_archive_router(engine))
 
     def get_engine(request: Request) -> Engine:
         return cast(Engine, request.app.state.engine)
