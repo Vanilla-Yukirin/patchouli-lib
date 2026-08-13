@@ -1,6 +1,18 @@
 """Persistence contracts for Library-scoped Page and Revision content."""
 
+from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import (
+    AppendArchiveRevisionCommand,
+    ArchiveCitation,
+    ArchiveIdempotencyKey,
+    ArchiveMutationReplay,
+    ArchiveMutationResult,
+    ArchiveMutationSuccess,
+    ArchivePageView,
+    ArchiveResponseBody,
+    ArchiveRevisionView,
+    ArchiveSourceInput,
+    CreateArchiveCommand,
     MarkdownContent,
     NewPage,
     NewPageIdCollisionCounter,
@@ -13,8 +25,39 @@ from patchouli_lib.content.schemas import (
     PageSourceRecord,
     RevisionRecord,
 )
+from patchouli_lib.content.service import (
+    ArchiveIdentifierExhaustedError,
+    ArchiveNotFoundError,
+    ArchivePersistenceError,
+    ArchivePreconditionFailedError,
+    ArchivePreconditionRequiredError,
+    ArchiveReplayCorruptError,
+    ArchiveService,
+    ArchiveTransactionRequiredError,
+    page_current_etag,
+)
 
 __all__ = [
+    "AppendArchiveRevisionCommand",
+    "ArchiveCitation",
+    "ArchiveIdempotencyKey",
+    "ArchiveIdentifierExhaustedError",
+    "ArchiveMutationReplay",
+    "ArchiveMutationResult",
+    "ArchiveMutationSuccess",
+    "ArchiveNotFoundError",
+    "ArchivePageView",
+    "ArchivePersistenceError",
+    "ArchivePreconditionFailedError",
+    "ArchivePreconditionRequiredError",
+    "ArchiveReplayCorruptError",
+    "ArchiveResponseBody",
+    "ArchiveRevisionView",
+    "ArchiveService",
+    "ArchiveSourceInput",
+    "ArchiveTransactionRequiredError",
+    "CreateArchiveCommand",
+    "ContentRepository",
     "MarkdownContent",
     "NewPage",
     "NewPageIdCollisionCounter",
@@ -26,4 +69,5 @@ __all__ = [
     "PageRecord",
     "PageSourceRecord",
     "RevisionRecord",
+    "page_current_etag",
 ]

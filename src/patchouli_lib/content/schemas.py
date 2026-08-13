@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import dataclass, field
 from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBytes, field_validator, model_validator
 
+from patchouli_lib.api.contracts import validate_api_v1_path
+from patchouli_lib.auth.schemas import AuditEventRecord
 from patchouli_lib.content.models import (
     CONTENT_SHA256_BYTES,
     EXHAUSTED_COLLISION_ORDINAL,
@@ -16,6 +19,7 @@ from patchouli_lib.content.models import (
     MAX_OCCURRENCE_MICROSECONDS,
     MIN_OCCURRENCE_MICROSECONDS,
 )
+from patchouli_lib.idempotency.schemas import OriginalResponse, ReplayResponse
 from patchouli_lib.identifiers import (
     MAX_BASE_SLUG_BYTES,
     MAX_COLLISION_ORDINAL,
@@ -51,6 +55,12 @@ CollisionOrdinal = Annotated[int, Field(ge=1, le=MAX_COLLISION_ORDINAL)]
 CounterOrdinal = Annotated[int, Field(ge=2, le=EXHAUSTED_COLLISION_ORDINAL)]
 Digest32 = Annotated[StrictBytes, Field(min_length=32, max_length=32)]
 SourceKind = Annotated[str, Field(min_length=1, max_length=100)]
+IdempotencyDigest = Annotated[StrictBytes, Field(min_length=32, max_length=32)]
+RequestId = Annotated[str, Field(pattern=r"^req_[0-9a-f]{32}$")]
+StrongPageETag = Annotated[
+    str,
+    Field(min_length=74, max_length=74, pattern=r'^"page-v1-[0-9a-f]{64}"$'),
+]
 
 _SOURCE_KIND_PATTERN = re.compile(r"\A\S(?:.*\S)?\Z", re.DOTALL)
 
@@ -69,7 +79,10 @@ class ContentSchema(BaseModel):
 class MarkdownContent(ContentSchema):
     """Exact accepted Markdown bytes plus verified storage metadata."""
 
-    content_md: Annotated[StrictBytes, Field(min_length=1, max_length=MAX_MARKDOWN_BYTES)]
+    content_md: Annotated[
+        StrictBytes,
+        Field(min_length=1, max_length=MAX_MARKDOWN_BYTES, repr=False),
+    ]
     content_size_bytes: Annotated[int, Field(ge=1, le=MAX_MARKDOWN_BYTES)]
     content_sha256: Annotated[
         StrictBytes,
@@ -284,7 +297,7 @@ class NewPageSource(ContentSchema):
     revision_id: RevisionId
     revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
     kind: SourceKind
-    locator: str | None = None
+    locator: str | None = Field(default=None, repr=False)
     captured_at: OccurrenceMicros | None = None
     created_at: StoredTimestamp
 
@@ -303,6 +316,10 @@ class NewPageSource(ContentSchema):
     def require_trimmed_source_kind(cls, value: str) -> str:
         if _SOURCE_KIND_PATTERN.fullmatch(value) is None or "\x00" in value:
             raise ValueError("Source kind must be non-empty trimmed text.")
+        try:
+            value.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise ValueError("Source kind must be valid Unicode text.") from exc
         return value
 
     @field_validator("locator")
@@ -310,6 +327,11 @@ class NewPageSource(ContentSchema):
     def require_safe_locator_storage(cls, value: str | None) -> str | None:
         if value is not None and (not value or "\x00" in value):
             raise ValueError("Source locator must be non-empty text without NUL.")
+        if value is not None:
+            try:
+                value.encode("utf-8", errors="strict")
+            except UnicodeEncodeError as exc:
+                raise ValueError("Source locator must be valid Unicode text.") from exc
         return value
 
 
@@ -317,7 +339,214 @@ class PageSourceRecord(NewPageSource):
     pass
 
 
+class ArchiveSourceInput(ContentSchema):
+    """Required provenance stored verbatim without identity or dedup semantics."""
+
+    kind: SourceKind
+    locator: str | None = Field(default=None, repr=False)
+    captured_at: OccurrenceMicros | None = None
+
+    @field_validator("kind")
+    @classmethod
+    def require_trimmed_source_kind(cls, value: str) -> str:
+        if _SOURCE_KIND_PATTERN.fullmatch(value) is None or "\x00" in value:
+            raise ValueError("Source kind must be non-empty trimmed text.")
+        try:
+            value.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise ValueError("Source kind must be valid Unicode text.") from exc
+        return value
+
+    @field_validator("locator")
+    @classmethod
+    def require_safe_locator(cls, value: str | None) -> str | None:
+        if value is not None and (not value or "\x00" in value):
+            raise ValueError("Source locator must be non-empty text without NUL.")
+        if value is not None:
+            try:
+                value.encode("utf-8", errors="strict")
+            except UnicodeEncodeError as exc:
+                raise ValueError("Source locator must be valid Unicode text.") from exc
+        return value
+
+
+class CreateArchiveCommand(ContentSchema):
+    """Semantic create request; bearer and raw idempotency key are kept separate."""
+
+    library_id: OpaqueId
+    section_id: OpaqueId
+    book_id: OpaqueId
+    title: Annotated[str, Field(min_length=1)]
+    occurred_at: OccurrenceMicros
+    content_md: Annotated[
+        StrictBytes,
+        Field(min_length=1, max_length=MAX_MARKDOWN_BYTES, repr=False),
+    ]
+    source: ArchiveSourceInput
+    request_id: RequestId
+
+    @field_validator("title")
+    @classmethod
+    def require_safe_title(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("Page title must not contain NUL characters.")
+        try:
+            value.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise ValueError("Page title must be valid Unicode text.") from exc
+        return value
+
+    @field_validator("content_md")
+    @classmethod
+    def require_valid_markdown(cls, value: bytes) -> bytes:
+        MarkdownContent.from_bytes(value)
+        return value
+
+
+class AppendArchiveRevisionCommand(ContentSchema):
+    """Semantic append request with one optional strong current precondition."""
+
+    library_id: OpaqueId
+    section_id: OpaqueId
+    page_id: PageId
+    expected_etag: StrongPageETag | None = Field(default=None, repr=False)
+    source: ArchiveSourceInput
+    content_md: Annotated[
+        StrictBytes,
+        Field(min_length=1, max_length=MAX_MARKDOWN_BYTES, repr=False),
+    ]
+    request_id: RequestId
+
+    @field_validator("page_id")
+    @classmethod
+    def require_page_id(cls, value: str) -> str:
+        return validate_page_id(value)
+
+    @field_validator("content_md")
+    @classmethod
+    def require_valid_markdown(cls, value: bytes) -> bytes:
+        MarkdownContent.from_bytes(value)
+        return value
+
+
+class ArchiveIdempotencyKey(ContentSchema):
+    """Already-digested key material safe to cross the domain boundary."""
+
+    key_digest: IdempotencyDigest = Field(repr=False)
+
+
+class ArchivePageView(ContentSchema):
+    section_id: OpaqueId
+    book_id: OpaqueId
+    page_id: PageId
+    title: Annotated[str, Field(min_length=1)]
+    type: Literal["archive"]
+    occurred_at: str
+    current_revision_id: RevisionId
+    current_revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+
+    @field_validator("occurred_at")
+    @classmethod
+    def require_canonical_occurrence(cls, value: str) -> str:
+        from patchouli_lib.identifiers import parse_occurrence_time
+
+        if parse_occurrence_time(value).canonical_utc != value:
+            raise ValueError("Occurrence timestamp must be canonical UTC text.")
+        return value
+
+
+class ArchiveRevisionView(ContentSchema):
+    page_id: PageId
+    revision_id: RevisionId
+    revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+    created_at: str
+    content_type: Literal["text/markdown;charset=utf-8"] = "text/markdown;charset=utf-8"
+    content_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    content: Annotated[str, Field(min_length=1, repr=False)]
+
+    @field_validator("created_at")
+    @classmethod
+    def require_canonical_created_at(cls, value: str) -> str:
+        from patchouli_lib.identifiers import parse_occurrence_time
+
+        if parse_occurrence_time(value).canonical_utc != value:
+            raise ValueError("Creation timestamp must be canonical UTC text.")
+        return value
+
+
+class ArchiveCitation(ContentSchema):
+    section_id: OpaqueId
+    page_id: PageId
+    revision_id: RevisionId
+    revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+    href: Annotated[str, Field(min_length=1, max_length=2_048)]
+
+    @field_validator("href")
+    @classmethod
+    def require_relative_href(cls, value: str) -> str:
+        return validate_api_v1_path(value)
+
+
+class ArchiveResponseBody(ContentSchema):
+    page: ArchivePageView
+    revision: ArchiveRevisionView
+    citation: ArchiveCitation
+
+    @model_validator(mode="after")
+    def require_consistent_identity(self) -> Self:
+        if (
+            self.revision.page_id != self.page.page_id
+            or self.citation.page_id != self.page.page_id
+            or self.citation.section_id != self.page.section_id
+            or self.revision.revision_id != self.page.current_revision_id
+            or self.citation.revision_id != self.page.current_revision_id
+            or self.revision.revision_number != self.page.current_revision_number
+            or self.citation.revision_number != self.page.current_revision_number
+        ):
+            raise ValueError("Archive response identity is inconsistent.")
+        return self
+
+
+@dataclass(frozen=True, slots=True, repr=False, eq=False)
+class ArchiveMutationSuccess:
+    page: PageRecord
+    revision: RevisionRecord
+    source: PageSourceRecord
+    citation: ArchiveCitation
+    audit_event: AuditEventRecord
+    response: OriginalResponse = field(repr=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"{type(self).__name__}(page_id={self.page.page_id!r}, "
+            f"revision_id={self.revision.revision_id!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True, repr=False, eq=False)
+class ArchiveMutationReplay:
+    body: ArchiveResponseBody = field(repr=False)
+    response: ReplayResponse = field(repr=False)
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(response=<redacted>)"
+
+
+ArchiveMutationResult = ArchiveMutationSuccess | ArchiveMutationReplay
+
+
 __all__ = [
+    "AppendArchiveRevisionCommand",
+    "ArchiveCitation",
+    "ArchiveIdempotencyKey",
+    "ArchiveMutationReplay",
+    "ArchiveMutationResult",
+    "ArchiveMutationSuccess",
+    "ArchivePageView",
+    "ArchiveResponseBody",
+    "ArchiveRevisionView",
+    "ArchiveSourceInput",
+    "CreateArchiveCommand",
     "MarkdownContent",
     "NewPage",
     "NewPageIdCollisionCounter",
