@@ -3,7 +3,7 @@
 PatchouliLib 是一个面向人类与软件 agent 的可自托管知识库。它用于收拢可长期保存的原始资料、保留版本历史，并通过适合 agent 调用的接口提供检索与引用能力。
 
 > [!IMPORTANT]
-> PatchouliLib 已具备可运行的工程骨架，包括健康端点、SQLite migration、本地验证和容器交付；知识领域 API、CLI、MCP server 和受支持的数据迁移策略仍未实现。
+> PatchouliLib 已具备可运行的工程骨架、类型化 Agent 客户端、CLI、stdio MCP adapter、限定范围的 archive 写入接口和非搜索读取接口。全文检索与受支持的备份恢复策略仍未实现。
 
 [English](README.md)
 

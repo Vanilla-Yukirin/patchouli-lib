@@ -48,9 +48,18 @@ uv run uvicorn patchouli_lib.app:app --reload
 The default development database is `data/patchouli.db`. Copy `.env.example` to
 an ignored `.env` file when local overrides are needed.
 
+Archive mutation routes are available without a cursor key. The five non-search
+retrieval routes are registered only when
+`PATCHOULI_RETRIEVAL_CURSOR_SIGNING_SECRET` contains at least 32 UTF-8 bytes.
+Generate a deployment-specific random value with a cryptographic random-number
+generator and keep it in an ignored environment file or secret store. Production
+configuration fails closed when this value is absent or too short. Changing it
+invalidates previously issued pagination cursors.
+
 ## Run with Compose
 
 ```sh
+export PATCHOULI_RETRIEVAL_CURSOR_SIGNING_SECRET="$(openssl rand -base64 32)"
 docker compose up --build --wait
 ```
 
@@ -61,8 +70,15 @@ explicit free port without terminating the existing process:
 PATCHOULI_PORT=18765 docker compose up --build --wait
 ```
 
-PowerShell users can set the same variable with `$env:PATCHOULI_PORT` before
-running Compose.
+PowerShell users can generate and set the cursor key for the current process,
+then optionally set the port override before running Compose:
+
+```powershell
+$bytes = [Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
+$env:PATCHOULI_RETRIEVAL_CURSOR_SIGNING_SECRET = [Convert]::ToBase64String($bytes)
+$env:PATCHOULI_PORT = 18765
+docker compose up --build --wait
+```
 
 ## Database migrations
 

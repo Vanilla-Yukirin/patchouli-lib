@@ -25,6 +25,7 @@ def _settings(tmp_path: Path) -> Settings:
         {
             "environment": "test",
             "database_url": f"sqlite:///{(tmp_path / 'agent-access.db').as_posix()}",
+            "retrieval_cursor_signing_secret": "synthetic-cursor-secret-value-32-bytes",
         }
     )
 
@@ -71,6 +72,24 @@ def _seed_agent(engine: Engine) -> tuple[str, str, str]:
                 caller_id=caller.id,
                 section_id=structure.section.id,
                 action=SectionAction.ARCHIVE_WRITE,
+                created_at=now,
+            )
+        )
+        auth.add_grant(
+            NewSectionGrant(
+                library_id=structure.library.id,
+                caller_id=caller.id,
+                section_id=structure.section.id,
+                action=SectionAction.QUERY,
+                created_at=now,
+            )
+        )
+        auth.add_grant(
+            NewSectionGrant(
+                library_id=structure.library.id,
+                caller_id=caller.id,
+                section_id=structure.section.id,
+                action=SectionAction.PAGE_READ,
                 created_at=now,
             )
         )
@@ -121,6 +140,14 @@ def test_application_registers_exact_agent_access_routes(tmp_path: Path) -> None
         assert routes == {
             ("/api/v1/capabilities", "GET"),
             ("/api/v1/auth/whoami", "GET"),
+            ("/api/v1/sections", "GET"),
+            ("/api/v1/sections/{section_id}/books", "GET"),
+            ("/api/v1/sections/{section_id}/pages", "GET"),
+            ("/api/v1/sections/{section_id}/pages/{page_id}", "GET"),
+            (
+                "/api/v1/sections/{section_id}/pages/{page_id}/revisions/{revision_number}",
+                "GET",
+            ),
             (
                 "/api/v1/sections/{section_id}/books/{book_id}/pages",
                 "POST",
@@ -130,6 +157,38 @@ def test_application_registers_exact_agent_access_routes(tmp_path: Path) -> None
                 "POST",
             ),
         }
+    finally:
+        application.state.engine.dispose()
+
+
+def test_application_does_not_register_retrieval_without_cursor_secret(tmp_path: Path) -> None:
+    application = create_app(
+        Settings.model_validate(
+            {
+                "environment": "test",
+                "database_url": f"sqlite:///{(tmp_path / 'archive-only.db').as_posix()}",
+            }
+        )
+    )
+    try:
+        paths = application.openapi()["paths"]
+        assert "/api/v1/sections" not in paths
+        assert "/api/v1/sections/{section_id}/pages/{page_id}" not in paths
+        _section_id, _book_id, token = _seed_agent(application.state.engine)
+        with TestClient(application, raise_server_exceptions=False) as client:
+            capabilities = client.get(
+                "/api/v1/capabilities",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert capabilities.status_code == 200
+            assert capabilities.json()["features"] == ["archive"]
+            assert (
+                client.get(
+                    "/api/v1/sections",
+                    headers={"Authorization": f"Bearer {token}"},
+                ).status_code
+                == 404
+            )
     finally:
         application.state.engine.dispose()
 
@@ -154,7 +213,7 @@ def test_integrated_archive_create_replay_and_revise(tmp_path: Path) -> None:
             headers={"Authorization": f"Bearer {token}"},
         )
         assert capabilities.status_code == 200
-        assert capabilities.json()["features"] == ["archive"]
+        assert capabilities.json()["features"] == ["archive", "retrieval"]
         assert capabilities.json()["idempotency"] == {
             "content_mutations": True,
             "successful_replay_retention": "indefinite-alpha",
@@ -200,3 +259,43 @@ def test_integrated_archive_create_replay_and_revise(tmp_path: Path) -> None:
         assert revised.json()["citation"]["revision_number"] == 2
         assert revised.headers["location"] == revised.json()["citation"]["href"]
         assert revised.headers["etag"] != first_etag
+
+        listed_sections = client.get(
+            "/api/v1/sections",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert listed_sections.status_code == 200
+        assert [item["section_id"] for item in listed_sections.json()["items"]] == [section_id]
+
+        listed_books = client.get(
+            f"/api/v1/sections/{section_id}/books",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert listed_books.status_code == 200
+        assert [item["book_id"] for item in listed_books.json()["items"]] == [book_id]
+
+        listed_pages = client.get(
+            f"/api/v1/sections/{section_id}/pages",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert listed_pages.status_code == 200
+        assert listed_pages.json()["items"][0]["citation"]["revision_number"] == 2
+
+        current = client.get(
+            f"/api/v1/sections/{section_id}/pages/{page_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert current.status_code == 200
+        assert current.headers["etag"] == revised.headers["etag"]
+        assert current.json()["citation"]["revision_number"] == 2
+        assert current.json()["revision"]["content"] == (
+            "# Synthetic integrated archive\n\nRevision two.\n"
+        )
+
+        revision_one = client.get(
+            f"/api/v1/sections/{section_id}/pages/{page_id}/revisions/1",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert revision_one.status_code == 200
+        assert revision_one.json()["citation"] == created.json()["citation"]
+        assert revision_one.json()["revision"]["content"] == ("# Synthetic integrated archive\n")

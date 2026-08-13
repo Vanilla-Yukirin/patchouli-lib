@@ -12,8 +12,10 @@ from patchouli_lib.api.auth_contracts import CapabilityConfiguration
 from patchouli_lib.api.auth_routes import create_auth_router
 from patchouli_lib.api.errors import install_api_exception_handlers
 from patchouli_lib.api.request_ids import RequestIDMiddleware
+from patchouli_lib.api.retrieval_routes import create_retrieval_router
 from patchouli_lib.config import Settings
 from patchouli_lib.database import DatabaseNotReadyError, build_engine, check_database
+from patchouli_lib.retrieval.cursor import CursorCodec
 
 
 class ServiceResponse(BaseModel):
@@ -26,16 +28,15 @@ class HealthResponse(BaseModel):
     status: str
 
 
-AGENT_ACCESS_CAPABILITIES = CapabilityConfiguration(
-    features=("archive",),
-    content_mutation_idempotency=True,
-    successful_replay_retention="indefinite-alpha",
-)
-
-
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved_settings = settings or Settings()
     engine = build_engine(resolved_settings.database_url)
+    cursor_secret = resolved_settings.retrieval_cursor_signing_secret
+    capabilities = CapabilityConfiguration(
+        features=("archive", "retrieval") if cursor_secret is not None else ("archive",),
+        content_mutation_idempotency=True,
+        successful_replay_retention="indefinite-alpha",
+    )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -56,10 +57,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(
         create_auth_router(
             engine,
-            capability_configuration=AGENT_ACCESS_CAPABILITIES,
+            capability_configuration=capabilities,
         )
     )
     application.include_router(create_archive_router(engine))
+    if cursor_secret is not None:
+        application.include_router(
+            create_retrieval_router(
+                engine,
+                cursor_codec=CursorCodec(cursor_secret.get_secret_value().encode("utf-8")),
+            )
+        )
 
     def get_engine(request: Request) -> Engine:
         return cast(Engine, request.app.state.engine)
