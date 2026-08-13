@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -22,9 +22,13 @@ from patchouli_lib.api.auth_contracts import (
     WhoAmIResponse,
 )
 from patchouli_lib.api.auth_routes import create_auth_router
-from patchouli_lib.api.authentication import BearerAuthentication
+from patchouli_lib.api.authentication import BearerAuthentication, extract_bearer_token
 from patchouli_lib.api.contracts import PROTECTED_CACHE_CONTROL
-from patchouli_lib.api.errors import PROBLEM_MEDIA_TYPE, install_api_exception_handlers
+from patchouli_lib.api.errors import (
+    PROBLEM_MEDIA_TYPE,
+    ApplicationProblem,
+    install_api_exception_handlers,
+)
 from patchouli_lib.api.request_ids import REQUEST_ID_HEADER, RequestIDMiddleware
 from patchouli_lib.auth.models import Caller, Credential
 from patchouli_lib.auth.repository import AuthRepository
@@ -277,6 +281,23 @@ def _build_app(
 
 def _authorization(token: str, *, scheme: str = "Bearer") -> dict[str, str]:
     return {"Authorization": f"{scheme} {token}"}
+
+
+def _raw_request(headers: Sequence[tuple[bytes, bytes]]) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/v1/capabilities",
+            "headers": headers,
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("testclient", 50000),
+            "root_path": "",
+            "http_version": "1.1",
+        }
+    )
 
 
 def _credential_row(fixture: AuthApiFixture) -> dict[str, object]:
@@ -552,6 +573,117 @@ def test_missing_credential_uses_authentication_required_problem(
     assert response.headers["Cache-Control"] == PROTECTED_CACHE_CONTROL
     assert response.headers[REQUEST_ID_HEADER] == REQUEST_ID
     assert response.json()["code"] == "authentication_required"
+
+
+@pytest.mark.parametrize(
+    ("header_name", "scheme"),
+    [
+        (b"authorization", b"Bearer"),
+        (b"Authorization", b"Bearer"),
+        (b"aUtHoRiZaTiOn", b"bEaReR"),
+    ],
+)
+def test_bearer_bridge_returns_exact_token_only_for_one_valid_header(
+    auth_api: AuthApiFixture,
+    header_name: bytes,
+    scheme: bytes,
+) -> None:
+    token = auth_api.agent_token.encode("ascii")
+    request = _raw_request([(header_name, scheme + b" " + token)])
+
+    extracted = extract_bearer_token(request)
+
+    assert extracted == auth_api.agent_token
+    assert type(extracted) is str
+    assert "state" not in request.scope
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected_code"),
+    [
+        ([], "authentication_required"),
+        ([(b"authorization", b"")], "invalid_token"),
+        ([(b"authorization", b"Bearer \xff")], "invalid_token"),
+        ([(b"authorization", b"Bearer " + b"x" * 250)], "invalid_token"),
+        ([(b"authorization", b"Bearer  synthetic")], "invalid_token"),
+        ([(b"authorization", b"Basic synthetic")], "invalid_token"),
+        ([(b"authorization", b"Bearer")], "invalid_token"),
+        (
+            [
+                (b"authorization", b"Bearer synthetic"),
+                (b"Authorization", b"Bearer synthetic"),
+            ],
+            "invalid_token",
+        ),
+    ],
+    ids=(
+        "missing",
+        "empty",
+        "non-ascii",
+        "over-256",
+        "multiple-spaces",
+        "unsupported-scheme",
+        "missing-token",
+        "duplicate-mixed-case-name",
+    ),
+)
+def test_bearer_bridge_rejects_invalid_raw_headers_with_fixed_safe_errors(
+    headers: list[tuple[bytes, bytes]],
+    expected_code: str,
+) -> None:
+    with pytest.raises(ApplicationProblem) as exc_info:
+        extract_bearer_token(_raw_request(headers))
+
+    assert exc_info.value.code == expected_code
+
+
+def test_bridge_and_bearer_authentication_share_all_parsing_outcomes(
+    auth_api: AuthApiFixture,
+) -> None:
+    valid = f"Bearer {auth_api.agent_token}".encode("ascii")
+    cases: tuple[tuple[tuple[tuple[bytes, bytes], ...], str | None], ...] = (
+        (((b"authorization", valid),), None),
+        (((b"AuThOrIzAtIoN", b"bEaReR " + auth_api.agent_token.encode("ascii")),), None),
+        ((), "authentication_required"),
+        (((b"authorization", b""),), "invalid_token"),
+        (((b"authorization", b"Bearer \xff"),), "invalid_token"),
+        (((b"authorization", b"Bearer " + b"x" * 250),), "invalid_token"),
+        (((b"authorization", b"Bearer  synthetic"),), "invalid_token"),
+        (((b"authorization", b"Basic synthetic"),), "invalid_token"),
+        (
+            (
+                (b"authorization", valid),
+                (b"AUTHORIZATION", valid),
+            ),
+            "invalid_token",
+        ),
+    )
+    authenticate = BearerAuthentication(auth_api.engine, clock=auth_api.clock)
+
+    for headers, expected_code in cases:
+        if expected_code is None:
+            assert extract_bearer_token(_raw_request(headers)) == auth_api.agent_token
+            context = authenticate(_raw_request(headers))
+            assert context.authenticated.caller.id == auth_api.agent_caller_id
+            continue
+
+        with pytest.raises(ApplicationProblem) as bridge_error:
+            extract_bearer_token(_raw_request(headers))
+        with pytest.raises(ApplicationProblem) as authentication_error:
+            authenticate(_raw_request(headers))
+        assert bridge_error.value.code == authentication_error.value.code == expected_code
+
+
+def test_bearer_bridge_function_and_errors_never_render_candidate_token() -> None:
+    candidate = "synthetic-private-candidate"
+    request = _raw_request([(b"authorization", f"Bearer  {candidate}".encode("ascii"))])
+
+    with pytest.raises(ApplicationProblem) as exc_info:
+        extract_bearer_token(request)
+
+    rendered = f"{extract_bearer_token!r} {exc_info.value!s} {exc_info.value!r}"
+    assert candidate not in rendered
+    assert "authorization" not in vars(exc_info.value)
 
 
 @pytest.mark.parametrize(
