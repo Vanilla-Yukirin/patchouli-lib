@@ -14,13 +14,20 @@ dependencies = [
 secret-store = [
   "keyring>=25,<26",
 ]
+mcp = [
+  "jsonschema>=4.26,<5",
+  "mcp>=1.29,<2",
+]
 
 [project.scripts]
 patchouli = "patchouli_cli.main:entrypoint"
+patchouli-mcp = "patchouli_mcp.entrypoint:entrypoint"
 
 [dependency-groups]
 dev = [
   "hatchling>=1.27,<2",
+  "jsonschema>=4.26,<5",
+  "mcp>=1.29,<2",
   "mypy>=1.16,<2",
   "pytest>=8.4,<10",
   "pytest-cov>=6.2,<8",
@@ -31,8 +38,11 @@ dev = [
 requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+exclude = ["/.venv*", "/dist"]
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/patchouli_client", "src/patchouli_cli"]
+packages = ["src/patchouli_client", "src/patchouli_cli", "src/patchouli_mcp"]
 
 [tool.ruff]
 line-length = 100
@@ -47,6 +57,7 @@ addopts = [
   "--strict-markers",
   "--cov=patchouli_client",
   "--cov=patchouli_cli",
+  "--cov=patchouli_mcp",
   "--cov-branch",
   "--cov-report=term-missing",
   "--cov-fail-under=95",
@@ -60,9 +71,10 @@ files = ["src", "tests", "scripts"]
 
 [tool.coverage.run]
 branch = true
-source = ["patchouli_client", "patchouli_cli"]
+source = ["patchouli_client", "patchouli_cli", "patchouli_mcp"]
 omit = [
   "src/patchouli_cli/__main__.py",
+  "src/patchouli_mcp/__main__.py",
   "src/patchouli_cli/_posix_fs.py",
   "src/patchouli_cli/_windows_fs.py",
 ]

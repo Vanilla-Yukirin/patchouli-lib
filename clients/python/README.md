@@ -15,8 +15,9 @@ The alpha surface covers:
 
 The typed wire accepts a call-scoped bearer token. The included CLI adds a
 non-secret profile, safe credential-input abstraction, deterministic output and
-exit codes, and a permission-restricted mutation journal. MCP, Agent Skill, and
-live-network end-to-end support remain later layers.
+exit codes, and a permission-restricted mutation journal. The optional MCP
+adapter exposes the same client and journal semantics over local stdio. Agent
+Skill and live-network end-to-end support remain later layers.
 
 ## CLI
 
@@ -124,6 +125,45 @@ Exit statuses are deterministic:
 | 19 | wire/application protocol failure |
 | 70 | fail-closed internal error |
 | 130 | interrupted operation |
+
+## MCP
+
+Install `patchouli-client[mcp]` and configure the same non-secret profile and
+environment or operating-system keyring credential used by the CLI. Then point
+an MCP host at the `patchouli-mcp` executable. It accepts no command-line
+arguments and uses stdio exclusively; it never opens a TCP listener.
+
+The adapter exposes these tools:
+
+```text
+capabilities
+whoami
+sections_list
+books_list
+section_search
+page_current
+page_revision
+archive_create
+archive_revise
+```
+
+Tools never accept credentials, endpoints, journal paths, idempotency keys, or
+local file paths. Search query and Markdown content are bounded in-memory JSON
+strings. Archive creation and revision are distinct tools; revision requires a
+strong `if_match`. A returned non-secret `operation_id` may be supplied to the
+same write tool for an exact replay. The caller-independent journal binding is
+checked locally before `whoami`, and the stable caller is checked before the
+mutation. Raw operation keys remain private journal state.
+
+One `PatchouliClient` is shared for the stdio session and closed at session end.
+The adapter delegates HTTP, authentication headers, retries, multipart encoding,
+response validation, and write orchestration to the merged client/application
+layers. Tool failures return stable redacted MCP errors without response bodies,
+queries, content, source locators, endpoints, or low-level exception details.
+
+The MCP extra uses the official MIT-licensed Python SDK stable v1 line, bounded
+below v2. All stdout bytes belong to MCP framing; sanitized startup diagnostics
+use stderr.
 
 ## Development
 
