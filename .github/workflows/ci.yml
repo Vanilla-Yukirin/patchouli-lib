@@ -91,6 +91,29 @@ jobs:
       - name: Verify distribution license metadata
         run: uv run --frozen python scripts/verify_artifacts.py
 
+      - name: Verify MCP package and console metadata
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheels = list(Path("dist").glob("*.whl"))
+          assert len(wheels) == 1
+          with ZipFile(wheels[0]) as archive:
+              names = archive.namelist()
+              metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
+              entry_name = next(
+                  name for name in names if name.endswith(".dist-info/entry_points.txt")
+              )
+              metadata = archive.read(metadata_name).decode("utf-8")
+              entries = archive.read(entry_name).decode("utf-8")
+          assert "patchouli_mcp/server.py" in names
+          assert "patchouli-mcp = patchouli_mcp.entrypoint:entrypoint" in entries
+          assert "Provides-Extra: mcp" in metadata
+          assert "Requires-Dist: mcp<2,>=1.29; extra == 'mcp'" in metadata
+          PY
+
   client-python-windows-safety:
     name: Python client Windows safety
     runs-on: windows-latest
@@ -112,8 +135,10 @@ jobs:
       - name: Install locked client dependencies
         run: uv sync --frozen --all-groups
 
-      - name: Test Windows handle, reparse, ACL, and durability safety
-        run: uv run --frozen pytest --no-cov tests/cli/test_secure_fs.py
+      - name: Test Windows filesystem and MCP stdio safety
+        run: >-
+          uv run --frozen pytest --no-cov
+          tests/cli/test_secure_fs.py tests/mcp
 
   container:
     name: Container

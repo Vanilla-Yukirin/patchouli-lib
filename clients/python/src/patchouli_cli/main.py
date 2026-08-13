@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import BinaryIO, Never, TextIO, cast
 
+from patchouli_cli.application import ArchiveApplication
 from patchouli_cli.config import Profile, default_state_path, resolve_profile
 from patchouli_cli.credentials import KeyringSecretStore, SecretStore, resolve_token
 from patchouli_cli.errors import (
@@ -26,11 +27,7 @@ from patchouli_cli.files import (
     open_input_root,
     read_stdin,
 )
-from patchouli_cli.journal import (
-    OperationJournal,
-    content_digest,
-    operation_fingerprint,
-)
+from patchouli_cli.journal import OperationJournal
 from patchouli_cli.render import emit_error, emit_success
 from patchouli_client import (
     ArchiveCreateMetadata,
@@ -386,79 +383,40 @@ def _archive_operation(
         metadata: ArchiveCreateMetadata | ArchiveRevisionMetadata = _create_metadata(
             metadata_object
         )
-        fingerprint_data: dict[str, object] = {
-            "kind": operation,
-            "endpoint": profile.endpoint,
-            "api_version": profile.api_version,
-            "section_id": args.section,
-            "book_id": args.book,
-            "metadata": metadata.to_wire(),
-            "content_sha256": content_digest(content.body),
-        }
     else:
         metadata = _revision_metadata(metadata_object)
-        fingerprint_data = {
-            "kind": operation,
-            "endpoint": profile.endpoint,
-            "api_version": profile.api_version,
-            "section_id": args.section,
-            "page_id": args.page,
-            "if_match": args.if_match,
-            "metadata": metadata.to_wire(),
-            "content_sha256": content_digest(content.body),
-        }
 
     caller_token = cast(BearerToken, token)
-    fingerprint = operation_fingerprint(fingerprint_data)
 
     with OperationJournal(default_state_path(environ), profile.name) as journal:
-        if args.operation_id is None:
-            caller_id = client.whoami(token=caller_token).value.caller_id
-            record = journal.prepare(
-                caller_id=caller_id,
-                kind=operation,
-                fingerprint=fingerprint,
-                operation_id=None,
-            )
-        else:
-            record = journal.preflight(
-                kind=operation,
-                fingerprint=fingerprint,
-                operation_id=args.operation_id,
-            )
-            caller_id = client.whoami(token=caller_token).value.caller_id
-            record = journal.validate_caller(record, caller_id=caller_id)
-        state.operation_id = record.operation_id
-        response: ClientResponse[object]
-        if operation == "archive.create":
-            create_metadata = cast(ArchiveCreateMetadata, metadata)
-            response = cast(
-                ClientResponse[object],
-                client.create_archive(
+        application = ArchiveApplication(
+            endpoint=profile.endpoint,
+            api_version=profile.api_version,
+            client=client,
+            token=caller_token,
+            journal=journal,
+        )
+        try:
+            if operation == "archive.create":
+                result = application.create_archive(
                     args.section,
                     args.book,
-                    create_metadata,
+                    cast(ArchiveCreateMetadata, metadata),
                     content,
-                    token=caller_token,
-                    idempotency_key=record.idempotency_key,
-                ),
-            )
-        else:
-            revision_metadata = cast(ArchiveRevisionMetadata, metadata)
-            response = cast(
-                ClientResponse[object],
-                client.revise_archive(
+                    operation_id=args.operation_id,
+                )
+            else:
+                result = application.revise_archive(
                     args.section,
                     args.page,
-                    revision_metadata,
+                    cast(ArchiveRevisionMetadata, metadata),
                     content,
-                    token=caller_token,
-                    idempotency_key=record.idempotency_key,
                     if_match=args.if_match,
-                ),
-            )
-        journal.complete(record, request_id=response.metadata.request_id)
-        return response, record.operation_id
+                    operation_id=args.operation_id,
+                )
+        finally:
+            state.operation_id = application.operation_id
+        return cast(ClientResponse[object], result.response), result.operation_id
 
 
 def _read_sensitive(
