@@ -28,15 +28,16 @@ ENV PATH=/app/.venv/bin:$PATH \
     PATCHOULI_LOG_LEVEL=info \
     PYTHONUNBUFFERED=1
 
-RUN groupadd --system patchouli \
-    && useradd --system --gid patchouli --home-dir /app patchouli \
-    && install -d -o patchouli -g patchouli /app /data
+RUN groupadd --gid 10001 patchouli \
+    && useradd --uid 10001 --gid 10001 --no-create-home \
+        --home-dir /app --shell /usr/sbin/nologin patchouli \
+    && install -d -o 10001 -g 10001 /app /data /backups
 
 WORKDIR /app
-COPY --from=builder --chown=patchouli:patchouli /app /app
-COPY --chown=patchouli:patchouli docker/entrypoint.sh /app/docker/entrypoint.sh
+COPY --from=builder --chown=10001:10001 /app /app
+COPY --chown=10001:10001 docker/entrypoint.sh /app/docker/entrypoint.sh
 
-USER patchouli
+USER 10001:10001
 EXPOSE 8000
 VOLUME ["/data"]
 
