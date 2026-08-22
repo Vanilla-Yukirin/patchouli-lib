@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 patchouli-backup = "patchouli_lib.backup_cli:main"
+patchouli-admin-password = "patchouli_lib.admin_password_cli:main"
 patchouli-operator = "patchouli_lib.operator_cli:main"
 
 [dependency-groups]
