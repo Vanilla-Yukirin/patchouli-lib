@@ -86,8 +86,8 @@ python scripts/validate.py --container
 ```
 
 See [development, validation, and delivery](docs/development-and-delivery.md)
-for source startup, Compose, CI, image publishing, and the generic private
-deployment contract.
+for source startup, Compose, CI, image publishing, and the operator-initiated
+private update contract.
 
 ## Contributing
 

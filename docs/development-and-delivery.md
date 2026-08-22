@@ -123,31 +123,50 @@ dispatch against a trusted ref, publishes a `linux/amd64` image to GHCR with:
 - semantic-version tags for `vX.Y.Z` Git tags;
 - a registry-backed build provenance attestation.
 
-Deployment and release jobs depend on all validation jobs.
+Image publishing and release jobs depend on all validation jobs. GitHub Actions
+stops after publishing the verified artifacts; it does not connect to a private
+runtime.
 
-## Private deployment contract
+## Manual private update contract
 
-Private deployment is disabled unless the repository variable
-`PRIVATE_DEPLOY_ENABLED` is exactly `true`. The `private-deployment` GitHub
-Environment supplies these secrets:
+Private updates are operator-initiated. After a trusted workflow run publishes
+an image, an operator obtains its exact `repository@sha256:digest` identity from
+the registry or workflow evidence, logs in to the private runtime through an
+operator-controlled path, and runs:
 
-- `DEPLOY_HOST`
-- `DEPLOY_PORT`
-- `DEPLOY_USER`
-- `DEPLOY_SSH_KEY`
-- `DEPLOY_KNOWN_HOSTS`
+```sh
+sh deploy/manual-update.sh \
+  ghcr.io/example/patchouli-lib@sha256:<64-lowercase-hex-characters>
+```
 
-The workflow sends only the exact GHCR image digest over SSH. A restricted
-remote controller validates the configured image repository, pulls it, waits
-for Compose health checks, records the successful digest atomically, and tries
-the previous digest when health checks fail.
+The example repository is synthetic. Do not copy a private registry name,
+runtime path, account, or access method into tracked files or public logs.
 
-Forks can use the same public workflow without deploying anywhere because the
-enable variable and private Environment are absent by default.
+The local helper requires `PATCHOULI_DEPLOY_ROOT` and
+`PATCHOULI_IMAGE_REPOSITORY` in the operator's local environment. Optional
+`PATCHOULI_COMPOSE_FILE`, `PATCHOULI_RUNTIME_ENV_FILE`, and
+`PATCHOULI_STATE_FILE` values can override the local filenames. The helper:
 
-A manual workflow dispatch deploys only when it targets `main` and the same
-enable variable and private Environment are present. This provides an explicit
-redeploy path without weakening pull-request isolation.
+1. accepts exactly one image identity as a command-line argument;
+2. rejects a different repository or a non-canonical SHA-256 digest;
+3. validates the local Compose configuration;
+4. pulls and starts only the `api` service, then waits for its health check;
+5. atomically records the successful image identity.
+
+It does not read `SSH_ORIGINAL_COMMAND` and does not provide a GitHub-to-runtime
+connection. A failed health check does not trigger automatic image rollback:
+database migrations can make an older application image incompatible, so an
+operator must inspect both application and database state before choosing a
+recovery action.
+
+Any future web administration panel must not receive container runtime,
+registry, or image-update authority in its first release. Its initial scope is
+local application administration, documentation, Agent instructions, and MCP
+guidance.
+
+After the workflow change is merged into the default branch, obsolete GitHub
+deployment variables, secrets, and Environments may be removed manually. Do
+not remove them while a still-active workflow references them.
 
 ## Releases
 
