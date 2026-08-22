@@ -89,6 +89,11 @@ See [development, validation, and delivery](docs/development-and-delivery.md)
 for source startup, Compose, CI, image publishing, and the operator-initiated
 private update contract.
 
+An optional password-protected [web administration console](docs/admin-web-console.md)
+provides initialization, credential lifecycle forms, and Agent/MCP guidance.
+It is disabled by default and has no deployment, Docker, shell, or backup
+restore controls.
+
 ## Contributing
 
 Design feedback is useful now, especially when it includes a concrete use case
