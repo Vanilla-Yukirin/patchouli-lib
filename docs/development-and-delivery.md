@@ -103,6 +103,17 @@ $env:PATCHOULI_PORT = 18765
 docker compose up --build --wait
 ```
 
+## Optional web administration
+
+The FastAPI administration console is disabled by default. Enable it only
+behind an HTTPS reverse proxy by configuring a generated password verifier, a
+distinct session signing secret, and the exact browser origin. The public
+Compose file passes these values only when the operator supplies them.
+
+See [Web administration console](admin-web-console.md) for password-verifier
+generation, the target-neutral Nginx example, session and CSRF boundaries,
+supported local actions, and the explicit absence of deployment authority.
+
 ## Database migrations
 
 - Every schema change requires an Alembic revision and tests.
