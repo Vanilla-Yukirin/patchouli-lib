@@ -21,9 +21,11 @@ questions. They must not contain private deployment details or operator data.
 ## Engineering documents
 
 - [Development, validation, and delivery](development-and-delivery.md)
+- [Web administration console](admin-web-console.md) / [网页管理面板](admin-web-console.zh-CN.md)
 - [Agent contribution workflow](agent-contribution-workflow.md)
 - [ADR 0001: implementation and delivery baseline](decisions/0001-implementation-baseline.md)
 - [ADR 0002: operator-initiated private updates](decisions/0002-manual-private-updates.md)
+- [ADR 0003: bounded web administration console](decisions/0003-admin-web-console.md)
 
 ## Status vocabulary
 

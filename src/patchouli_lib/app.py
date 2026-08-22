@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import Engine
 
 from patchouli_lib import __version__
+from patchouli_lib.admin.router import create_admin_router
 from patchouli_lib.api.archive_routes import create_archive_router
 from patchouli_lib.api.auth_contracts import CapabilityConfiguration
 from patchouli_lib.api.auth_routes import create_auth_router
@@ -68,6 +69,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             create_retrieval_router(
                 engine,
                 cursor_codec=CursorCodec(cursor_secret.get_secret_value().encode("utf-8")),
+            )
+        )
+    if resolved_settings.admin_enabled:
+        application.include_router(
+            create_admin_router(
+                engine,
+                resolved_settings,
             )
         )
 
