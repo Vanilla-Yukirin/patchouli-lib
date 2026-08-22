@@ -94,7 +94,7 @@ def main() -> None:
         "-n",
         "docker/entrypoint.sh",
         "scripts/validate.sh",
-        "deploy/remote-deploy.sh",
+        "deploy/manual-update.sh",
     )
     validate_migrations()
     if not args.skip_docs:

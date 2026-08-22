@@ -58,6 +58,8 @@ python scripts/validate.py
 
 Docker 启动后，可用 `python scripts/validate.py --container` 追加镜像构建和回环健康烟测。完整说明见 [开发、验证与交付](docs/development-and-delivery.md)。
 
+GitHub Actions 只负责验证代码和发布带有准确摘要的容器镜像，不会登录私有服务器。更新私有实例时，管理员需要先登录服务器，再手动拉取并启动已验证的准确镜像；具体边界见同一份交付文档。
+
 ## 许可证
 
 PatchouliLib 使用 [MIT License](LICENSE)。

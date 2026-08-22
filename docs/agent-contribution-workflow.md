@@ -112,6 +112,9 @@ Before a pull request or merge, the coordinator must:
 6. record any skipped check and its reason in the pull request;
 7. wait for required independent CI checks before merge.
 
-Private deployment configuration is supplied only by the operator-owned secret
-store. Agents must not copy those values into source, logs, issues, pull
-requests, or handoff examples.
+GitHub workflows do not connect to private runtimes. A private update is a
+separate, operator-initiated action using local configuration after an exact
+published image digest has passed the required gates. Agents must not copy
+private runtime values into source, logs, issues, pull requests, or handoff
+examples, and must not perform the update without explicit deployment
+authorization.
