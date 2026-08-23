@@ -89,6 +89,31 @@ def test_password_cli_reads_confirmation_from_stdin_and_emits_only_hash(
     assert stderr.getvalue() == ""
 
 
+def test_password_cli_accepts_maximum_length_with_windows_line_endings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    password = "x" * 1_024
+    observed: list[str] = []
+
+    def record_password(value: str) -> str:
+        observed.append(value)
+        return "synthetic-password-hash"
+
+    monkeypatch.setattr(admin_password_cli, "hash_password", record_password)
+    stdout = StringIO()
+
+    exit_code = admin_password_cli.main(
+        [],
+        stdin=StringIO(f"{password}\r\n{password}\r\n"),
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+
+    assert exit_code == 0
+    assert observed == [password]
+    assert stdout.getvalue() == "synthetic-password-hash\n"
+
+
 class _InteractiveInput(StringIO):
     def isatty(self) -> bool:
         return True

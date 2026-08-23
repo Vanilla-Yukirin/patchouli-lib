@@ -14,7 +14,8 @@ The console is absent unless all three values are configured:
 - `PATCHOULI_ADMIN_SESSION_SIGNING_SECRET`: a distinct random value containing
   at least 32 UTF-8 bytes;
 - `PATCHOULI_ADMIN_ORIGIN`: the one exact browser origin, such as the synthetic
-  `https://admin.example.invalid`.
+  `https://admin.example.invalid`. Its hostname must already use ASCII or
+  Punycode form; raw Unicode hostnames are rejected.
 
 Generate the password verifier locally:
 

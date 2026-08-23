@@ -73,9 +73,12 @@ def test_session_rejects_tampering_wrong_key_and_expiry() -> None:
     [
         {"v": 1, "exp": 2_000, "csrf": "c" * 32, "extra": True},
         {"v": 2, "exp": 2_000, "csrf": "c" * 32},
+        {"v": True, "exp": 2_000, "csrf": "c" * 32},
+        {"v": 1.0, "exp": 2_000, "csrf": "c" * 32},
         {"v": 1, "exp": True, "csrf": "c" * 32},
         {"v": 1, "exp": "2000", "csrf": "c" * 32},
         {"v": 1, "exp": 2_000, "csrf": 42},
+        {"v": 1, "exp": 2_000, "csrf": "界" * 32},
         {"v": 1, "exp": 2_000, "csrf": "short"},
         ["not", "an", "object"],
     ],

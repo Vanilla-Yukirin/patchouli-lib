@@ -87,7 +87,7 @@ class AdminSessionCodec:
             return None
         if not isinstance(decoded, dict) or set(decoded) != {"csrf", "exp", "v"}:
             return None
-        if decoded["v"] != _SESSION_VERSION:
+        if type(decoded["v"]) is not int or decoded["v"] != _SESSION_VERSION:
             return None
         expires_at = decoded["exp"]
         csrf_token = decoded["csrf"]
@@ -96,6 +96,7 @@ class AdminSessionCodec:
             or not isinstance(expires_at, int)
             or expires_at <= int(self._clock())
             or not isinstance(csrf_token, str)
+            or not csrf_token.isascii()
             or len(csrf_token) < 32
             or len(csrf_token) > 128
         ):

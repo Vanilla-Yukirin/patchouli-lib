@@ -123,6 +123,18 @@ def test_admin_origin_is_normalized_to_browser_serialization(
     assert settings.admin_origin == expected_origin
 
 
+def test_admin_origin_rejects_non_ascii_hostname() -> None:
+    with pytest.raises(ValidationError, match="ASCII"):
+        Settings.model_validate(
+            {
+                "environment": "test",
+                "admin_password_hash": _ADMIN_PASSWORD_HASH,
+                "admin_session_signing_secret": "s" * 32,
+                "admin_origin": "https://bücher.example.invalid",
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "values",
     [

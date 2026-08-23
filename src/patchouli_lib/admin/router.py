@@ -150,7 +150,7 @@ def create_admin_router(
                 repeatable_fields=repeatable_fields,
             )
             _require_csrf(values, session)
-            result = action(values)
+            result = await run_in_threadpool(action, values)
         except _FormError as exc:
             return html(
                 dashboard_page(session.csrf_token, message=exc.safe_message),
@@ -383,9 +383,7 @@ async def _read_form(
             raise _FormError(413, "The submitted form is too large.")
     body = bytearray()
     async for chunk in request.stream():
-        body.extend(chunk)
-        if len(body) > _MAX_FORM_BYTES:
-            raise _FormError(413, "The submitted form is too large.")
+        _extend_form_body(body, chunk)
     try:
         decoded = body.decode("utf-8")
         pairs = parse_qsl(
@@ -413,11 +411,22 @@ async def _read_form(
     return values
 
 
+def _extend_form_body(body: bytearray, chunk: bytes) -> None:
+    if len(body) + len(chunk) > _MAX_FORM_BYTES:
+        raise _FormError(413, "The submitted form is too large.")
+    body.extend(chunk)
+
+
 def _require_csrf(values: FormValues, session: AdminSession) -> None:
     presented = values.pop("csrf_token", None)
-    if not isinstance(presented, str) or not hmac.compare_digest(
-        presented,
-        session.csrf_token,
+    if (
+        not isinstance(presented, str)
+        or not presented.isascii()
+        or not session.csrf_token.isascii()
+        or not hmac.compare_digest(
+            presented,
+            session.csrf_token,
+        )
     ):
         raise _FormError(403, "The form expired or failed its safety check.")
 

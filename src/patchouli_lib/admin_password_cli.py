@@ -15,12 +15,12 @@ _SAFE_OUTPUT_ERROR = "Password hash output failed."
 
 def _read_line(stream: TextIO) -> str:
     value = stream.readline(_MAX_PASSWORD_CHARACTERS + 2)
-    if len(value) > _MAX_PASSWORD_CHARACTERS + 1:
-        raise ValueError
     if value.endswith("\r\n"):
         value = value[:-2]
     elif value.endswith("\n"):
         value = value[:-1]
+    if len(value) > _MAX_PASSWORD_CHARACTERS:
+        raise ValueError
     return value
 
 

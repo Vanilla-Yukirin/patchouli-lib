@@ -9,7 +9,9 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, select
+from starlette.concurrency import run_in_threadpool as starlette_run_in_threadpool
 
+import patchouli_lib.admin.router as admin_router
 from patchouli_lib.admin.passwords import hash_password
 from patchouli_lib.app import create_app
 from patchouli_lib.auth.models import Caller
@@ -274,6 +276,15 @@ def test_tampered_session_and_oversized_form_are_rejected(admin_web: AdminWeb) -
     assert oversized.status_code == 413
 
 
+def test_oversized_form_chunk_is_rejected_before_buffer_growth() -> None:
+    body = bytearray(b"existing")
+
+    with pytest.raises(ValueError, match="form is too large"):
+        admin_router._extend_form_body(body, b"x" * 16_384)
+
+    assert body == b"existing"
+
+
 def test_csrf_rejection_happens_before_bootstrap(admin_web: AdminWeb) -> None:
     _login(admin_web)
 
@@ -286,6 +297,53 @@ def test_csrf_rejection_happens_before_bootstrap(admin_web: AdminWeb) -> None:
     assert response.status_code == 403
     with admin_web.engine.connect() as connection:
         assert connection.execute(select(Caller.id)).first() is None
+
+
+def test_non_ascii_csrf_fails_closed_for_logout_and_actions(admin_web: AdminWeb) -> None:
+    _login(admin_web)
+
+    logout = _post(
+        admin_web.client,
+        "/admin/logout",
+        data={"csrf_token": "界"},
+    )
+    bootstrap = _post(
+        admin_web.client,
+        "/admin/bootstrap",
+        data=_bootstrap_data("界"),
+    )
+
+    assert logout.status_code == 403
+    assert bootstrap.status_code == 403
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(Caller.id)).first() is None
+
+
+def test_admin_actions_use_the_worker_thread_boundary(
+    admin_web: AdminWeb,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    csrf = _login(admin_web)
+    calls: list[Any] = []
+
+    async def record_threadpool_call(
+        function: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        calls.append(function)
+        return await starlette_run_in_threadpool(function, *args, **kwargs)
+
+    monkeypatch.setattr(admin_router, "run_in_threadpool", record_threadpool_call)
+
+    response = _post(
+        admin_web.client,
+        "/admin/bootstrap",
+        data=_bootstrap_data(csrf),
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 1
 
 
 def test_admin_actions_require_session_and_exact_origin(admin_web: AdminWeb) -> None:

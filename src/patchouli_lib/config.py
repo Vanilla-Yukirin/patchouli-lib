@@ -107,6 +107,9 @@ class Settings(BaseSettings):
             message = "The admin origin must be one exact HTTP(S) origin without credentials."
             raise ValueError(message)
         host = parsed.hostname.casefold()
+        if not host.isascii():
+            message = "The admin origin hostname must contain ASCII characters only."
+            raise ValueError(message)
         if ":" in host:
             host = f"[{host}]"
         default_port = 443 if scheme == "https" else 80

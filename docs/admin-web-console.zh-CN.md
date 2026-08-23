@@ -11,7 +11,8 @@
 - `PATCHOULI_ADMIN_SESSION_SIGNING_SECRET`：单独生成、至少包含 32 个
   UTF-8 字节的随机值；
 - `PATCHOULI_ADMIN_ORIGIN`：浏览器访问面板时唯一、准确的来源地址，
-  例如仅作示例的 `https://admin.example.invalid`。
+  例如仅作示例的 `https://admin.example.invalid`。主机名必须已使用 ASCII
+  或 Punycode 形式；原始 Unicode 主机名会被拒绝。
 
 在本机生成密码校验值：
 
