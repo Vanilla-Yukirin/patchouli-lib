@@ -73,9 +73,9 @@ def run_update(
 
     bin_directory = tmp_path / "bin"
     if bin_directory.is_dir():
-        environment["PATH"] = ":".join(
-            (shell_path(bin_directory), environment.get("PATH", ""))
-        )
+        bin_path = shell_path(bin_directory)
+        inherited_path = environment.get("PATH", "")
+        environment["PATH"] = f"{bin_path}:{inherited_path}"
         environment["FAKE_DOCKER_LOG"] = shell_path(tmp_path / "docker.log")
     if fake_docker_failure is not None:
         environment["FAKE_DOCKER_FAIL_ON"] = fake_docker_failure
