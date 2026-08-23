@@ -93,6 +93,10 @@ class _InteractiveInput(StringIO):
     def isatty(self) -> bool:
         return True
 
+    def read(self, size: int | None = -1) -> str:
+        del size
+        raise AssertionError("interactive password input must not wait for trailing data")
+
 
 def test_password_cli_suppresses_interactive_echo(
     monkeypatch: pytest.MonkeyPatch,
@@ -122,6 +126,25 @@ def test_password_cli_suppresses_interactive_echo(
         "Confirm administration password: ",
     ]
     assert _PASSWORD not in stdout.getvalue()
+
+
+def test_password_cli_handles_interactive_eof_without_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    interactive_input = _InteractiveInput()
+
+    def end_of_input(prompt: str) -> str:
+        del prompt
+        raise EOFError
+
+    monkeypatch.setattr(sys, "stdin", interactive_input)
+    monkeypatch.setattr(admin_password_cli, "getpass", end_of_input)
+    stderr = StringIO()
+
+    exit_code = admin_password_cli.main([], stdout=StringIO(), stderr=stderr)
+
+    assert exit_code == 2
+    assert stderr.getvalue() == "Invalid password input.\n"
 
 
 @pytest.mark.parametrize(

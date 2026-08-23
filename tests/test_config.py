@@ -99,6 +99,31 @@ def test_admin_console_requires_complete_redacted_configuration() -> None:
 
 
 @pytest.mark.parametrize(
+    ("configured_origin", "expected_origin"),
+    [
+        ("HTTPS://Admin.Example.Invalid/", "https://admin.example.invalid"),
+        ("https://admin.example.invalid:443", "https://admin.example.invalid"),
+        ("http://Admin.Example.Invalid:80/", "http://admin.example.invalid"),
+        ("https://Admin.Example.Invalid:8443/", "https://admin.example.invalid:8443"),
+    ],
+)
+def test_admin_origin_is_normalized_to_browser_serialization(
+    configured_origin: str,
+    expected_origin: str,
+) -> None:
+    settings = Settings.model_validate(
+        {
+            "environment": "test",
+            "admin_password_hash": _ADMIN_PASSWORD_HASH,
+            "admin_session_signing_secret": "s" * 32,
+            "admin_origin": configured_origin,
+        }
+    )
+
+    assert settings.admin_origin == expected_origin
+
+
+@pytest.mark.parametrize(
     "values",
     [
         {"admin_password_hash": _ADMIN_PASSWORD_HASH},
