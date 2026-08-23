@@ -50,7 +50,7 @@ _SECURITY_HEADERS: Final[dict[str, str]] = {
         "default-src 'none'; style-src 'self'; form-action 'self'; "
         "frame-ancestors 'none'; base-uri 'none'"
     ),
-    "Referrer-Policy": "no-referrer",
+    "Referrer-Policy": "same-origin",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
