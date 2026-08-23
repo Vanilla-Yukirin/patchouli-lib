@@ -18,6 +18,9 @@ it publishes a supported implementation.
 - Cross-platform source, test, migration, documentation, and container checks.
 - GHCR image publishing, provenance, releases, and an operator-initiated
   private update helper.
+- An opt-in password-protected FastAPI administration console for bootstrap,
+  operator recovery, scoped Agent provisioning, revocation, and Agent/MCP
+  guidance, plus a target-neutral Nginx TLS example.
 
 ### Changed
 
