@@ -13,9 +13,6 @@ fi
 : "${PATCHOULI_DEPLOY_ROOT:?PATCHOULI_DEPLOY_ROOT is required}"
 : "${PATCHOULI_IMAGE_REPOSITORY:?PATCHOULI_IMAGE_REPOSITORY is required}"
 
-compose_file="${PATCHOULI_COMPOSE_FILE:-$PATCHOULI_DEPLOY_ROOT/compose.yaml}"
-runtime_env="${PATCHOULI_RUNTIME_ENV_FILE:-$PATCHOULI_DEPLOY_ROOT/runtime.env}"
-state_file="${PATCHOULI_STATE_FILE:-$PATCHOULI_DEPLOY_ROOT/current-image}"
 requested_image="$1"
 digest_prefix="$PATCHOULI_IMAGE_REPOSITORY@sha256:"
 
@@ -39,12 +36,38 @@ if [ "${#digest}" -ne 64 ]; then
   exit 64
 fi
 
+if ! cd "$PATCHOULI_DEPLOY_ROOT" 2>/dev/null; then
+  echo "Manual update configuration is unavailable." >&2
+  exit 78
+fi
+
+if ! deploy_root="$(pwd -P)"; then
+  echo "Manual update configuration is unavailable." >&2
+  exit 78
+fi
+
+compose_file="${PATCHOULI_COMPOSE_FILE:-compose.yaml}"
+runtime_env="${PATCHOULI_RUNTIME_ENV_FILE:-runtime.env}"
+state_file="${PATCHOULI_STATE_FILE:-current-image}"
+
+case "$compose_file" in
+  /*) ;;
+  *) compose_file="$deploy_root/$compose_file" ;;
+esac
+case "$runtime_env" in
+  /*) ;;
+  *) runtime_env="$deploy_root/$runtime_env" ;;
+esac
+case "$state_file" in
+  /*) ;;
+  *) state_file="$deploy_root/$state_file" ;;
+esac
+
 if [ ! -r "$compose_file" ] || [ ! -r "$runtime_env" ]; then
   echo "Manual update configuration is unavailable." >&2
   exit 78
 fi
 
-cd "$PATCHOULI_DEPLOY_ROOT"
 export PATCHOULI_IMAGE="$requested_image"
 
 if ! docker compose \

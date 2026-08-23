@@ -55,12 +55,14 @@ def run_update(
     tmp_path: Path,
     *arguments: str,
     fake_docker_failure: str | None = None,
+    deploy_root: str | None = None,
     ssh_original_command: str | None = None,
+    working_directory: Path = REPOSITORY_ROOT,
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment.update(
         {
-            "PATCHOULI_DEPLOY_ROOT": shell_path(tmp_path),
+            "PATCHOULI_DEPLOY_ROOT": deploy_root or shell_path(tmp_path),
             "PATCHOULI_IMAGE_REPOSITORY": IMAGE_REPOSITORY,
         }
     )
@@ -71,14 +73,20 @@ def run_update(
 
     bin_directory = tmp_path / "bin"
     if bin_directory.is_dir():
-        environment["PATH"] = os.pathsep.join((str(bin_directory), environment.get("PATH", "")))
+        environment["PATH"] = ":".join(
+            (shell_path(bin_directory), environment.get("PATH", ""))
+        )
         environment["FAKE_DOCKER_LOG"] = shell_path(tmp_path / "docker.log")
     if fake_docker_failure is not None:
         environment["FAKE_DOCKER_FAIL_ON"] = fake_docker_failure
 
     return subprocess.run(
-        [find_posix_shell(), "deploy/manual-update.sh", *arguments],
-        cwd=REPOSITORY_ROOT,
+        [
+            find_posix_shell(),
+            shell_path(REPOSITORY_ROOT / "deploy" / "manual-update.sh"),
+            *arguments,
+        ],
+        cwd=working_directory,
         env=environment,
         check=False,
         text=True,
@@ -165,6 +173,22 @@ def test_manual_update_validates_pulls_starts_and_records_exact_image(
     assert commands[0].endswith("config --quiet")
     assert commands[1].endswith("pull api")
     assert commands[2].endswith("up --detach --no-build --wait --wait-timeout 90 api")
+
+
+def test_manual_update_resolves_relative_deploy_root_before_local_paths(
+    tmp_path: Path,
+) -> None:
+    prepare_runtime(tmp_path)
+
+    result = run_update(
+        tmp_path,
+        VALID_IMAGE,
+        deploy_root=tmp_path.name,
+        working_directory=tmp_path.parent,
+    )
+
+    assert result.returncode == 0
+    assert (tmp_path / "current-image").read_text(encoding="utf-8") == VALID_IMAGE + "\n"
 
 
 @pytest.mark.parametrize(

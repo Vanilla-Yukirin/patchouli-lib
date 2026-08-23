@@ -145,7 +145,9 @@ runtime path, account, or access method into tracked files or public logs.
 The local helper requires `PATCHOULI_DEPLOY_ROOT` and
 `PATCHOULI_IMAGE_REPOSITORY` in the operator's local environment. Optional
 `PATCHOULI_COMPOSE_FILE`, `PATCHOULI_RUNTIME_ENV_FILE`, and
-`PATCHOULI_STATE_FILE` values can override the local filenames. The helper:
+`PATCHOULI_STATE_FILE` values can override the local filenames. Relative
+override paths are resolved from `PATCHOULI_DEPLOY_ROOT`; absolute paths remain
+absolute. The helper:
 
 1. accepts exactly one image identity as a command-line argument;
 2. rejects a different repository or a non-canonical SHA-256 digest;
