@@ -16,4 +16,11 @@ it publishes a supported implementation.
 - Python/FastAPI service bootstrap with liveness and readiness endpoints.
 - SQLite/FTS5 validation and reversible Alembic migration plumbing.
 - Cross-platform source, test, migration, documentation, and container checks.
-- GHCR image publishing, provenance, releases, and opt-in private deployment.
+- GHCR image publishing, provenance, releases, and an operator-initiated
+  private update helper.
+
+### Changed
+
+- GitHub Actions no longer stores private SSH deployment settings or connects
+  to private targets; an operator must log in separately and select an exact
+  published image digest.

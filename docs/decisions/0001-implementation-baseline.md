@@ -3,6 +3,10 @@
 - Status: Accepted
 - Date: 2026-08-10
 
+The private-update transport and rollback clauses in this baseline are
+superseded by [ADR 0002](0002-manual-private-updates.md). The remaining
+implementation baseline is unchanged.
+
 ## Context
 
 PatchouliLib needs a small, reproducible implementation substrate before domain
@@ -25,8 +29,8 @@ the public repository.
 - Ruff, strict MyPy, pytest, and coverage are required validation layers.
 - OCI images are the supported deployment artifact.
 - GitHub Actions validates pull requests and publishes immutable image digests.
-- Private deployments receive only an exact image digest through operator-owned
-  secrets and infrastructure.
+- Private deployments receive only an exact image digest through
+  operator-owned infrastructure.
 
 This decision establishes implementation plumbing, not the unresolved domain
 API, authorization policy, identifier grammar, backup policy, or model provider.
@@ -47,7 +51,7 @@ API, authorization policy, identifier grammar, backup policy, or model provider.
 - Containers run as a non-root user and bind through operator configuration.
 - The sample Compose configuration exposes the API on loopback by default.
 - Public workflows contain no real host, account, path, port, domain, or key.
-- A deployment controller must validate the requested repository and digest,
-  wait for health, and restore the previous image if health checks fail.
+- A deployment helper must validate the requested repository and digest and
+  wait for health. Its invocation and failure policy are defined by ADR 0002.
 - Database changes must remain backward-compatible with the previous image until
   a tested database rollback policy is accepted.
