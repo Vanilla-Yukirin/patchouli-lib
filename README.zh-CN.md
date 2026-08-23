@@ -60,6 +60,8 @@ Docker 启动后，可用 `python scripts/validate.py --container` 追加镜像�
 
 GitHub Actions 只负责验证代码和发布带有准确摘要的容器镜像，不会登录私有服务器。更新私有实例时，管理员需要先登录服务器，再手动拉取并启动已验证的准确镜像；具体边界见同一份交付文档。
 
+项目还提供一个默认关闭、必须通过 HTTPS 反向代理访问的[网页管理面板](docs/admin-web-console.zh-CN.md)。它使用密码登录，可完成首次初始化、operator 凭据恢复、Agent 授权与吊销，并内置 Agent/MCP 使用说明；第一版不能控制部署、Docker、主机命令或备份恢复。
+
 ## 许可证
 
 PatchouliLib 使用 [MIT License](LICENSE)。
