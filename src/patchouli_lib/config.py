@@ -85,16 +85,18 @@ class Settings(BaseSettings):
     def require_exact_admin_origin(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        parsed = urlsplit(value)
         try:
-            _ = parsed.port
+            parsed = urlsplit(value)
+            port = parsed.port
         except ValueError:
             raise ValueError(
                 "The admin origin must be one exact HTTP(S) origin without credentials."
             ) from None
+        scheme = parsed.scheme.casefold()
         if (
             value != value.strip()
-            or parsed.scheme not in {"http", "https"}
+            or any(character.isspace() for character in value)
+            or scheme not in {"http", "https"}
             or parsed.hostname is None
             or parsed.username is not None
             or parsed.password is not None
@@ -104,7 +106,13 @@ class Settings(BaseSettings):
         ):
             message = "The admin origin must be one exact HTTP(S) origin without credentials."
             raise ValueError(message)
-        return value.removesuffix("/")
+        host = parsed.hostname.casefold()
+        if ":" in host:
+            host = f"[{host}]"
+        default_port = 443 if scheme == "https" else 80
+        if port is not None and port != default_port:
+            host = f"{host}:{port}"
+        return f"{scheme}://{host}"
 
     @model_validator(mode="after")
     def validate_environment_secrets(self) -> "Settings":

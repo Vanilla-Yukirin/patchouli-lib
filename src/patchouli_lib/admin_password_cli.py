@@ -45,15 +45,16 @@ def main(
     input_stream = sys.stdin if stdin is None else stdin
     output_stream = sys.stdout if stdout is None else stdout
     error_stream = sys.stderr if stderr is None else stderr
+    interactive_input = input_stream is sys.stdin and input_stream.isatty()
     if arguments:
         error_stream.write(f"{_SAFE_INPUT_ERROR}\n")
         return 2
     try:
         password, confirmation = _read_password_pair(input_stream)
-        if password != confirmation or input_stream.read(1):
+        if password != confirmation or (not interactive_input and input_stream.read(1)):
             raise ValueError
         encoded = hash_password(password)
-    except (UnicodeError, ValueError):
+    except (EOFError, UnicodeError, ValueError):
         error_stream.write(f"{_SAFE_INPUT_ERROR}\n")
         return 2
     try:

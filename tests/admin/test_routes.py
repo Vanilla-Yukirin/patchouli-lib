@@ -131,6 +131,32 @@ def test_admin_routes_are_absent_when_configuration_is_disabled(client: TestClie
     assert response.status_code == 404
 
 
+def test_canonical_browser_origin_works_for_noncanonical_configuration(
+    tmp_path: Path,
+) -> None:
+    database_path = (tmp_path / "canonical-origin.db").as_posix()
+    settings = Settings.model_validate(
+        {
+            "environment": "test",
+            "database_url": f"sqlite:///{database_path}",
+            "admin_password_hash": _ADMIN_PASSWORD_HASH,
+            "admin_session_signing_secret": "s" * 32,
+            "admin_origin": "HTTPS://Admin.Example.Invalid:443/",
+        }
+    )
+    application = create_app(settings)
+
+    with TestClient(application, base_url=_ORIGIN, follow_redirects=False) as client:
+        response = _post(
+            client,
+            "/admin/login",
+            data={"password": _ADMIN_PASSWORD},
+        )
+
+    assert settings.admin_origin == _ORIGIN
+    assert response.status_code == 303
+
+
 def test_login_fails_closed_for_wrong_host_origin_password_and_form_shape(
     admin_web: AdminWeb,
 ) -> None:
