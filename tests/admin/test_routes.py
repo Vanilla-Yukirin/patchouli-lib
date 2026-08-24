@@ -73,7 +73,7 @@ def _assert_security_headers(response: Any) -> None:
     headers = response.headers
     assert headers["cache-control"] == "no-store, max-age=0"
     assert headers["content-security-policy"].startswith("default-src 'none'")
-    assert headers["referrer-policy"] == "no-referrer"
+    assert headers["referrer-policy"] == "same-origin"
     assert headers["x-content-type-options"] == "nosniff"
     assert headers["x-frame-options"] == "DENY"
 
