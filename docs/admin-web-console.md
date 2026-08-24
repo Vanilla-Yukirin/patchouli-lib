@@ -69,6 +69,14 @@ bypass the TLS and login-rate boundary.
 Open `/admin/login` and enter the administration password. The short-lived
 session cookie contains only an expiry and random CSRF value.
 
+Use the `中文 / English` control in the upper-right corner to switch the
+console, including validation and error messages. The selection is remembered
+in a separate, non-sensitive, HttpOnly, SameSite=Strict cookie scoped to
+`/admin`. It contains only `zh-CN` or `en`, persists across sign-out, and never
+contains or replaces an administration session or bearer credential. The
+control is intentionally hidden on a one-time credential response so changing
+language cannot accidentally discard the only displayed copy.
+
 The first release provides:
 
 1. one-time Library, Section, Book, and operator initialization;

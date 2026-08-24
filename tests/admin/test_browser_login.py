@@ -169,7 +169,7 @@ def _observed_login_origin(events: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def test_real_browser_can_submit_same_origin_login(tmp_path: Path) -> None:
+def test_real_browser_can_switch_language_and_submit_same_origin_login(tmp_path: Path) -> None:
     browser = _browser_executable()
     debug_port = _available_port()
 
@@ -206,6 +206,59 @@ def test_real_browser_can_submit_same_origin_login(tmp_path: Path) -> None:
                 time.sleep(0.05)
             assert form_ready is True
 
+            switched = devtools.evaluate(
+                """
+                (() => {
+                  const link = document.querySelector(
+                    'a[href="/admin/login?lang=zh-CN"]'
+                  );
+                  if (link === null) return false;
+                  link.click();
+                  return true;
+                })()
+                """
+            )
+            assert switched is True
+
+            deadline = time.monotonic() + 10
+            chinese_ready = False
+            while time.monotonic() < deadline:
+                try:
+                    chinese_ready = bool(
+                        devtools.evaluate(
+                            "document.documentElement.lang === 'zh-CN' && "
+                            "document.querySelector('button[type=\"submit\"]')?.textContent "
+                            "=== '登录'"
+                        )
+                    )
+                except TimeoutError:
+                    time.sleep(0.05)
+                    continue
+                if chinese_ready:
+                    break
+                time.sleep(0.05)
+            assert chinese_ready is True
+
+            devtools.command("Page.navigate", {"url": f"{origin}/admin/login"})
+            deadline = time.monotonic() + 10
+            language_persisted = False
+            while time.monotonic() < deadline:
+                try:
+                    language_persisted = bool(
+                        devtools.evaluate(
+                            "window.location.search === '' && "
+                            "document.documentElement.lang === 'zh-CN' && "
+                            "document.querySelector('input[name=\"password\"]') !== null"
+                        )
+                    )
+                except TimeoutError:
+                    time.sleep(0.05)
+                    continue
+                if language_persisted:
+                    break
+                time.sleep(0.05)
+            assert language_persisted is True
+
             password_literal = json.dumps(_ADMIN_PASSWORD)
             submitted = devtools.evaluate(
                 f"""
@@ -234,6 +287,8 @@ def test_real_browser_can_submit_same_origin_login(tmp_path: Path) -> None:
                 time.sleep(0.05)
 
             assert path == "/admin"
+            assert devtools.evaluate("document.documentElement.lang") == "zh-CN"
+            assert devtools.evaluate("document.querySelector('h1')?.textContent") == "管理面板"
             assert _observed_login_origin(devtools.events) == origin
         finally:
             if devtools is not None:

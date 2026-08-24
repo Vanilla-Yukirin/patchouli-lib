@@ -28,6 +28,7 @@ _ADMIN_PASSWORD_HASH = hash_password(
     iterations=300_000,
 )
 _SESSION_COOKIE = "patchouli_admin_session"
+_LOCALE_COOKIE = "patchouli_admin_locale"
 
 
 @dataclass(frozen=True)
@@ -209,6 +210,94 @@ def test_login_fails_closed_for_wrong_host_origin_password_and_form_shape(
     ):
         assert _ADMIN_PASSWORD not in response.text
         assert _SESSION_COOKIE not in response.cookies
+        _assert_security_headers(response)
+
+
+def test_language_switch_is_scoped_persistent_and_localizes_errors(
+    admin_web: AdminWeb,
+) -> None:
+    chinese = admin_web.client.get("/admin/login?lang=zh-CN")
+
+    assert chinese.status_code == 200
+    assert chinese.headers["content-language"] == "zh-CN"
+    assert '<html lang="zh-CN">' in chinese.text
+    assert "PatchouliLib 管理面板" in chinese.text
+    assert "管理密码" in chinese.text
+    assert 'href="/admin/login?lang=en"' in chinese.text
+    assert 'lang="zh-CN" aria-current="page"' in chinese.text
+    locale_cookie = chinese.headers["set-cookie"]
+    assert f"{_LOCALE_COOKIE}=zh-CN" in locale_cookie
+    assert "HttpOnly" in locale_cookie
+    assert "Secure" in locale_cookie
+    assert "SameSite=strict" in locale_cookie
+    assert "Path=/admin" in locale_cookie
+    assert _ADMIN_PASSWORD not in locale_cookie
+
+    wrong_password = _post(
+        admin_web.client,
+        "/admin/login",
+        data={"password": "incorrect synthetic password"},
+    )
+    assert wrong_password.status_code == 401
+    assert wrong_password.headers["content-language"] == "zh-CN"
+    assert "密码不正确。" in wrong_password.text
+
+    invalid_choice = admin_web.client.get("/admin/login?lang=not-a-locale")
+    assert invalid_choice.status_code == 200
+    assert invalid_choice.headers["content-language"] == "zh-CN"
+    assert "not-a-locale" not in invalid_choice.text
+    assert _LOCALE_COOKIE not in invalid_choice.headers.get("set-cookie", "")
+
+    english = admin_web.client.get("/admin/login?lang=en")
+    assert english.status_code == 200
+    assert english.headers["content-language"] == "en"
+    assert '<html lang="en">' in english.text
+    assert "Administration password" in english.text
+    assert f"{_LOCALE_COOKIE}=en" in english.headers["set-cookie"]
+
+
+def test_chinese_language_persists_across_dashboard_guides_and_form_errors(
+    admin_web: AdminWeb,
+) -> None:
+    switched = admin_web.client.get("/admin/login?lang=zh-CN")
+    assert switched.status_code == 200
+
+    csrf = _login(admin_web)
+    dashboard = admin_web.client.get("/admin")
+    guide = admin_web.client.get("/admin/guide")
+    agent = admin_web.client.get("/admin/agent")
+    mcp = admin_web.client.get("/admin/mcp")
+    invalid_form = _post(
+        admin_web.client,
+        "/admin/bootstrap",
+        data={**_bootstrap_data(csrf), "unknown": "must-not-be-accepted"},
+    )
+    initialized = _post(
+        admin_web.client,
+        "/admin/bootstrap",
+        data=_bootstrap_data(csrf),
+    )
+
+    assert dashboard.headers["content-language"] == "zh-CN"
+    assert "初始化知识库" in dashboard.text
+    assert "当前管理员凭据" in dashboard.text
+    assert "退出登录" in dashboard.text
+    assert "管理员指南" in guide.text
+    assert "恢复管理员凭据会使此前仍有效的管理员凭据失效" in guide.text
+    assert "Agent 使用说明" in agent.text
+    assert "MCP 配置" in mcp.text
+    assert "提交的表单包含未知字段。" in invalid_form.text
+    assert 'href="/admin?lang=en"' in invalid_form.text
+    assert "/admin/bootstrap?lang=" not in invalid_form.text
+    assert initialized.status_code == 200
+    assert "知识库已初始化" in initialized.text
+    assert "此值仅在本次响应中显示" in initialized.text
+    assert "知识库 ID" in initialized.text
+    assert "调用方 ID" in initialized.text
+    assert "凭据 ID" in initialized.text
+    assert 'class="language-switch"' not in initialized.text
+    assert "/admin/bootstrap?lang=" not in initialized.text
+    for response in (dashboard, guide, agent, mcp, invalid_form, initialized):
         _assert_security_headers(response)
 
 
