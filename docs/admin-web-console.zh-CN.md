@@ -60,6 +60,13 @@ pbkdf2_sha256$...
 访问 `/admin/login` 并输入管理密码。短期会话 Cookie 只包含到期时间和
 随机 CSRF 值，不包含管理密码、operator 凭据或 Agent 凭据。
 
+右上角的 `中文 / English` 可以切换整个面板，包括表单校验和错误提示。
+语言选择保存在另一个非敏感 Cookie 中；它仅限 `/admin` 路径，使用
+HttpOnly 和 SameSite=Strict，只包含 `zh-CN` 或 `en`，退出登录后仍会保留。
+它既不是管理会话，也不会包含或替代任何 bearer 凭据。
+一次性凭据结果页会有意隐藏语言切换，避免用户在保存唯一一份明文凭据前
+因切换语言而离开页面。
+
 第一版可以完成：
 
 1. 一次性创建 Library、Section、Book 和第一个本地 operator；

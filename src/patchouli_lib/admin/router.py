@@ -20,6 +20,7 @@ from patchouli_lib.admin.contracts import (
 )
 from patchouli_lib.admin.pages import (
     STYLESHEET,
+    AdminLocale,
     action_result_page,
     credential_page,
     dashboard_page,
@@ -41,6 +42,8 @@ from patchouli_lib.operator.service import (
 )
 
 _SESSION_COOKIE: Final[str] = "patchouli_admin_session"
+_LOCALE_COOKIE: Final[str] = "patchouli_admin_locale"
+_LOCALE_COOKIE_MAX_AGE: Final[int] = 31_536_000
 _MAX_FORM_BYTES: Final[int] = 16_384
 _MAX_FORM_FIELDS: Final[int] = 32
 _SECURITY_HEADERS: Final[dict[str, str]] = {
@@ -99,11 +102,36 @@ def create_admin_router(
     def current_session(request: Request) -> AdminSession | None:
         return codec.verify(request.cookies.get(_SESSION_COOKIE, ""))
 
-    def html(content: str, *, status_code: int = 200) -> HTMLResponse:
+    def requested_locale(request: Request) -> AdminLocale | None:
+        values = request.query_params.getlist("lang")
+        if len(values) != 1:
+            return None
+        value = values[0]
+        if value == "en":
+            return "en"
+        if value == "zh-CN":
+            return "zh-CN"
+        return None
+
+    def locale_for(request: Request) -> AdminLocale:
+        requested = requested_locale(request)
+        if requested is not None:
+            return requested
+        remembered = request.cookies.get(_LOCALE_COOKIE)
+        if remembered == "zh-CN":
+            return "zh-CN"
+        return "en"
+
+    def html(
+        content: str,
+        *,
+        locale: AdminLocale,
+        status_code: int = 200,
+    ) -> HTMLResponse:
         return HTMLResponse(
             content,
             status_code=status_code,
-            headers=_SECURITY_HEADERS,
+            headers={**_SECURITY_HEADERS, "Content-Language": locale},
         )
 
     def redirect(location: str) -> RedirectResponse:
@@ -113,21 +141,43 @@ def create_admin_router(
             headers=_SECURITY_HEADERS,
         )
 
-    def forbidden(message: str = "Request origin was rejected.") -> HTMLResponse:
-        return html(login_page(message=message), status_code=403)
+    def remember_requested_locale(response: Response, request: Request) -> None:
+        requested = requested_locale(request)
+        if requested is None:
+            return
+        response.set_cookie(
+            _LOCALE_COOKIE,
+            requested,
+            max_age=_LOCALE_COOKIE_MAX_AGE,
+            path="/admin",
+            secure=secure_cookie,
+            httponly=True,
+            samesite="strict",
+        )
+
+    def forbidden(
+        request: Request,
+        message: str = "Request origin was rejected.",
+    ) -> HTMLResponse:
+        locale = locale_for(request)
+        return html(login_page(locale=locale, message=message), locale=locale, status_code=403)
 
     def protected_page(
         request: Request,
-        render: Callable[[str], str],
+        render: Callable[[str, AdminLocale], str],
     ) -> Response:
         if not host_allowed(request):
-            return forbidden()
+            return forbidden(request)
+        locale = locale_for(request)
         session = current_session(request)
         if session is None:
-            response = redirect("/admin/login")
-            _clear_cookie(response, secure=secure_cookie)
-            return response
-        return html(render(session.csrf_token))
+            redirect_response = redirect("/admin/login")
+            _clear_cookie(redirect_response, secure=secure_cookie)
+            remember_requested_locale(redirect_response, request)
+            return redirect_response
+        page_response = html(render(session.csrf_token, locale), locale=locale)
+        remember_requested_locale(page_response, request)
+        return page_response
 
     async def protected_action(
         request: Request,
@@ -138,11 +188,16 @@ def create_admin_router(
         success_heading: str,
         success_message: str | None = None,
     ) -> Response:
+        locale = locale_for(request)
         if not post_origin_allowed(request):
-            return forbidden()
+            return forbidden(request)
         session = current_session(request)
         if session is None:
-            return html(login_page(message="Sign in again."), status_code=401)
+            return html(
+                login_page(locale=locale, message="Sign in again."),
+                locale=locale,
+                status_code=401,
+            )
         try:
             values = await _read_form(
                 request,
@@ -153,31 +208,42 @@ def create_admin_router(
             result = await run_in_threadpool(action, values)
         except _FormError as exc:
             return html(
-                dashboard_page(session.csrf_token, message=exc.safe_message),
+                dashboard_page(
+                    session.csrf_token,
+                    locale=locale,
+                    message=exc.safe_message,
+                ),
+                locale=locale,
                 status_code=exc.status_code,
             )
         except (ValidationError, ValueError):
             return html(
                 dashboard_page(
                     session.csrf_token,
+                    locale=locale,
                     message="Check the submitted fields and try again.",
                 ),
+                locale=locale,
                 status_code=422,
             )
         except (AuthenticationError, AuthorizationError):
             return html(
                 dashboard_page(
                     session.csrf_token,
+                    locale=locale,
                     message="The operator credential was rejected.",
                 ),
+                locale=locale,
                 status_code=403,
             )
         except ResourceNotFoundError:
             return html(
                 dashboard_page(
                     session.csrf_token,
+                    locale=locale,
                     message="The requested local resource was not found.",
                 ),
+                locale=locale,
                 status_code=404,
             )
         except (
@@ -191,16 +257,20 @@ def create_admin_router(
             return html(
                 dashboard_page(
                     session.csrf_token,
+                    locale=locale,
                     message="The action conflicts with current local state.",
                 ),
+                locale=locale,
                 status_code=409,
             )
         except Exception:
             return html(
                 dashboard_page(
                     session.csrf_token,
+                    locale=locale,
                     message="The action could not be completed.",
                 ),
+                locale=locale,
                 status_code=500,
             )
         if result is None:
@@ -209,14 +279,18 @@ def create_admin_router(
                     session.csrf_token,
                     heading=success_heading,
                     message=success_message or "The action completed.",
-                )
+                    locale=locale,
+                ),
+                locale=locale,
             )
         return html(
             credential_page(
                 session.csrf_token,
                 heading=success_heading,
                 result=result,
-            )
+                locale=locale,
+            ),
+            locale=locale,
         )
 
     def revoke_agent(values: FormValues) -> None:
@@ -224,20 +298,29 @@ def create_admin_router(
 
     @router.get("")
     def dashboard(request: Request) -> Response:
-        return protected_page(request, dashboard_page)
+        return protected_page(
+            request,
+            lambda csrf, locale: dashboard_page(csrf, locale=locale),
+        )
 
     @router.get("/login")
     def login(request: Request) -> Response:
         if not host_allowed(request):
-            return forbidden()
+            return forbidden(request)
+        locale = locale_for(request)
         if current_session(request) is not None:
-            return redirect("/admin")
-        return html(login_page())
+            redirect_response = redirect("/admin")
+            remember_requested_locale(redirect_response, request)
+            return redirect_response
+        page_response = html(login_page(locale=locale), locale=locale)
+        remember_requested_locale(page_response, request)
+        return page_response
 
     @router.post("/login")
     async def login_submit(request: Request) -> Response:
+        locale = locale_for(request)
         if not post_origin_allowed(request):
-            return forbidden()
+            return forbidden(request)
         try:
             values = await _read_form(
                 request,
@@ -245,9 +328,17 @@ def create_admin_router(
             )
             candidate = _single(values, "password")
         except _FormError as exc:
-            return html(login_page(message=exc.safe_message), status_code=exc.status_code)
+            return html(
+                login_page(locale=locale, message=exc.safe_message),
+                locale=locale,
+                status_code=exc.status_code,
+            )
         if not await run_in_threadpool(password_matches, candidate, password_hash):
-            return html(login_page(message="Invalid password."), status_code=401)
+            return html(
+                login_page(locale=locale, message="Invalid password."),
+                locale=locale,
+                status_code=401,
+            )
         encoded, _ = codec.issue()
         response = redirect("/admin")
         response.set_cookie(
@@ -263,11 +354,16 @@ def create_admin_router(
 
     @router.post("/logout")
     async def logout(request: Request) -> Response:
+        locale = locale_for(request)
         if not post_origin_allowed(request):
-            return forbidden()
+            return forbidden(request)
         session = current_session(request)
         if session is None:
-            return html(login_page(message="Sign in again."), status_code=401)
+            return html(
+                login_page(locale=locale, message="Sign in again."),
+                locale=locale,
+                status_code=401,
+            )
         try:
             values = await _read_form(
                 request,
@@ -275,7 +371,11 @@ def create_admin_router(
             )
             _require_csrf(values, session)
         except _FormError as exc:
-            return html(login_page(message=exc.safe_message), status_code=exc.status_code)
+            return html(
+                login_page(locale=locale, message=exc.safe_message),
+                locale=locale,
+                status_code=exc.status_code,
+            )
         response = redirect("/admin/login")
         _clear_cookie(response, secure=secure_cookie)
         return response
@@ -330,21 +430,21 @@ def create_admin_router(
     def guide(request: Request) -> Response:
         return protected_page(
             request,
-            lambda csrf: guide_page(csrf, "guide"),
+            lambda csrf, locale: guide_page(csrf, "guide", locale=locale),
         )
 
     @router.get("/agent")
     def agent_guide(request: Request) -> Response:
         return protected_page(
             request,
-            lambda csrf: guide_page(csrf, "agent"),
+            lambda csrf, locale: guide_page(csrf, "agent", locale=locale),
         )
 
     @router.get("/mcp")
     def mcp_guide(request: Request) -> Response:
         return protected_page(
             request,
-            lambda csrf: guide_page(csrf, "mcp"),
+            lambda csrf, locale: guide_page(csrf, "mcp", locale=locale),
         )
 
     @router.get("/style.css")
