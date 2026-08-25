@@ -279,7 +279,15 @@ def test_chinese_language_persists_across_dashboard_guides_and_form_errors(
     )
 
     assert dashboard.headers["content-language"] == "zh-CN"
-    assert "初始化知识库" in dashboard.text
+    assert "首次设置" in dashboard.text
+    assert "只有明确要新建另一个知识库时才再次填写" in dashboard.text
+    assert "个人使用通常一个知识库就够了" in dashboard.text
+    assert "Agent 权限的边界" in dashboard.text
+    assert "首次生成的管理员令牌可以使用多久" in dashboard.text
+    assert "管理员令牌有效期（秒）" in dashboard.text
+    assert 'aria-describedby="library_name-help"' in dashboard.text
+    assert 'class="field-help" id="library_name-help"' in dashboard.text
+    assert dashboard.text.count("可选。") >= 3
     assert "当前管理员凭据" in dashboard.text
     assert "退出登录" in dashboard.text
     assert "管理员指南" in guide.text
@@ -310,7 +318,10 @@ def test_login_session_protected_guides_and_logout(admin_web: AdminWeb) -> None:
 
     csrf = _login(admin_web)
     dashboard = admin_web.client.get("/admin")
-    assert "Initialize the library" in dashboard.text
+    assert "First-time setup" in dashboard.text
+    assert "One Library is usually enough for personal use" in dashboard.text
+    assert "only when you deliberately want another Library" in dashboard.text
+    assert "3600 seconds is one hour" in dashboard.text
     assert _ADMIN_PASSWORD not in dashboard.text
 
     guide = admin_web.client.get("/admin/guide")

@@ -85,6 +85,23 @@ The first release provides:
 4. Agent credential revocation; and
 5. read-only operator, Agent, and MCP guidance.
 
+The first-time setup creates the minimum content hierarchy required before a
+Page can be stored:
+
+- **Library** is the whole knowledge space. One Library is usually enough for
+  personal use. Multiple Libraries are useful when administration and access
+  must be separated, but they still share this deployment and database.
+- **Section** is a durable large category and the scope used for Agent
+  permissions.
+- **Book** is a smaller content container inside one Section. Every Page belongs
+  to one Book.
+
+Section descriptions and Book summaries are optional human-readable guidance.
+The operator name identifies the administrator; audit records link to that
+identity rather than using it as the web sign-in name. Credential lifetime
+controls the first operator bearer token only; it does not expire the Library
+or the web administration password. The default `3600` seconds is one hour.
+
 Operator credentials entered into an action form are used for that request
 only. New operator and Agent credentials are rendered once on a no-store page.
 Record the accompanying Library, caller, and credential IDs before leaving the
