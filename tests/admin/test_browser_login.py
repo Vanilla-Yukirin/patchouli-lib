@@ -289,6 +289,31 @@ def test_real_browser_can_switch_language_and_submit_same_origin_login(tmp_path:
             assert path == "/admin"
             assert devtools.evaluate("document.documentElement.lang") == "zh-CN"
             assert devtools.evaluate("document.querySelector('h1')?.textContent") == "管理面板"
+            setup_help = devtools.evaluate(
+                """
+                (() => {
+                  const field = document.querySelector('#library_name');
+                  const help = document.querySelector('#library_name-help');
+                  const label = document.querySelector('label[for="library_name"]');
+                  if (field === null || help === null || label === null) return null;
+                  const helpStyle = getComputedStyle(help);
+                  const labelStyle = getComputedStyle(label);
+                  return {
+                    describedBy: field.getAttribute('aria-describedby'),
+                    helpText: help.textContent,
+                    isSmaller:
+                      parseFloat(helpStyle.fontSize) < parseFloat(labelStyle.fontSize),
+                    isMuted: helpStyle.color !== labelStyle.color,
+                  };
+                })()
+                """
+            )
+            assert setup_help == {
+                "describedBy": "library_name-help",
+                "helpText": "整个知识空间的名称。个人使用通常一个知识库就够了。",
+                "isSmaller": True,
+                "isMuted": True,
+            }
             assert _observed_login_origin(devtools.events) == origin
         finally:
             if devtools is not None:

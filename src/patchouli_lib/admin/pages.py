@@ -78,6 +78,20 @@ pre { overflow-x: auto; background: #17231c; color: #dff6e6; padding: 1rem; }
 dt { font-weight: 700; }
 dd { margin: 0 0 .7rem; overflow-wrap: anywhere; }
 small { color: #526259; }
+.section-help {
+  color: #68766d;
+  font-size: .9rem;
+  line-height: 1.45;
+  margin: -.25rem 0 .8rem;
+}
+.field-help {
+  color: #68766d;
+  display: block;
+  font-size: .82rem;
+  font-weight: 400;
+  line-height: 1.4;
+  margin-top: .3rem;
+}
 @media (max-width: 40rem) {
   .nav-actions { width: 100%; margin-left: 0; justify-content: space-between; }
 }
@@ -106,8 +120,9 @@ _ZH_CN: dict[str, str] = {
     "Current operator credential": "当前管理员凭据",
     "Exact Section permissions": "分区权限（精确范围）",
     "Guide": "指南",
-    "Initialize": "初始化",
-    "Initialize the library": "初始化知识库",
+    "Finish setup": "完成首次设置",
+    "First-time setup": "首次设置",
+    "Initial operator token lifetime in seconds": "管理员令牌有效期（秒）",
     "Invalid password.": "密码不正确。",
     "Language": "语言",
     "Library ID": "知识库 ID",
@@ -143,6 +158,40 @@ _ZH_CN: dict[str, str] = {
     "The submitted form contains an unknown field.": "提交的表单包含未知字段。",
     "The submitted form is invalid.": "提交的表单无效。",
     "The submitted form is too large.": "提交的表单过大。",
+    (
+        "A large, durable category and the boundary used for Agent permissions, "
+        "such as Personal, Projects, or Research."
+    ): ("一个长期使用的大分类，也是 Agent 权限的边界，例如“个人资料”“项目”或“研究”。"),
+    (
+        "A stable name used to identify this administrator. Audit records are linked "
+        "to this identity. It is not the administration sign-in name."
+    ): ("用于标识这个管理员，操作记录会关联到这个身份；它不是网页登录账号。"),
+    (
+        "Complete this when setting up a Library for the first time. It creates the "
+        "starting structure and issues a temporary operator token. Do not use it to "
+        "edit an existing Library; submit it again only when you deliberately want "
+        "another Library."
+    ): (
+        "首次设置一个知识库时填写：创建基础结构，并生成一份临时管理员令牌。"
+        "它不能修改已有知识库；只有明确要新建另一个知识库时才再次填写。"
+    ),
+    (
+        "How long the first operator token remains valid. This is not a Library "
+        "lifetime. 3600 seconds is one hour."
+    ): ("首次生成的管理员令牌可以使用多久；不是知识库有效期。3600 秒就是 1 小时。"),
+    "Optional. Briefly explain what belongs in this Section.": (
+        "可选。简单说明这个分区收录什么内容。"
+    ),
+    "Optional. Briefly explain what this Book contains.": ("可选。简单说明这本书收录什么内容。"),
+    "Optional. Describe this administrator's purpose, such as Primary local administrator.": (
+        "可选。说明这个管理员的用途，例如“主要本地管理员”。"
+    ),
+    "The first topic container inside this Section. You can start with Inbox or General.": (
+        "这个分区里的第一组内容，可以先用“收件箱”或“综合资料”。"
+    ),
+    "The name of this whole knowledge space. One Library is usually enough for personal use.": (
+        "整个知识空间的名称。个人使用通常一个知识库就够了。"
+    ),
 }
 
 
@@ -208,9 +257,82 @@ def dashboard_page(
         )
     )
     initialize_description = (
-        "创建第一个知识库、分区、书籍和本地管理员。"
-        if locale == "zh-CN"
-        else "Creates the first Library, Section, Book, and local operator."
+        "Complete this when setting up a Library for the first time. It creates the "
+        "starting structure and issues a temporary operator token. Do not use it to edit "
+        "an existing Library; submit it again only when you deliberately want another "
+        "Library."
+    )
+    initialize_fields = "".join(
+        (
+            _text(
+                "library_name",
+                "Library name",
+                locale,
+                help_text=(
+                    "The name of this whole knowledge space. One Library is usually "
+                    "enough for personal use."
+                ),
+            ),
+            _text(
+                "section_name",
+                "Section name",
+                locale,
+                help_text=(
+                    "A large, durable category and the boundary used for Agent "
+                    "permissions, such as Personal, Projects, or Research."
+                ),
+            ),
+            _textarea(
+                "section_description",
+                "Section description",
+                locale,
+                help_text="Optional. Briefly explain what belongs in this Section.",
+            ),
+            _text(
+                "book_name",
+                "Book name",
+                locale,
+                help_text=(
+                    "The first topic container inside this Section. You can start with "
+                    "Inbox or General."
+                ),
+            ),
+            _textarea(
+                "book_summary",
+                "Book summary",
+                locale,
+                help_text="Optional. Briefly explain what this Book contains.",
+            ),
+            _text(
+                "operator_name",
+                "Operator name",
+                locale,
+                help_text=(
+                    "A stable name used to identify this administrator. Audit records "
+                    "are linked to this identity. It is not the administration sign-in "
+                    "name."
+                ),
+            ),
+            _textarea(
+                "operator_description",
+                "Operator description",
+                locale,
+                help_text=(
+                    "Optional. Describe this administrator's purpose, such as Primary "
+                    "local administrator."
+                ),
+            ),
+            _number(
+                "credential_ttl_seconds",
+                "Initial operator token lifetime in seconds",
+                3600,
+                locale,
+                help_text=(
+                    "How long the first operator token remains valid. This is not a "
+                    "Library lifetime. 3600 seconds is one hour."
+                ),
+            ),
+        )
     )
     recover_description = (
         "撤销当前有效的管理员凭据，并签发一个替代凭据。"
@@ -225,19 +347,12 @@ def dashboard_page(
   {notice}
   <div class="grid">
     <section class="card">
-      <h2>{localize(locale, "Initialize the library")}</h2>
-      <p>{initialize_description}</p>
+      <h2>{localize(locale, "First-time setup")}</h2>
+      <p class="section-help">{localize(locale, initialize_description)}</p>
       <form method="post" action="/admin/bootstrap" autocomplete="off">
         {_csrf(csrf)}
-        {_text("library_name", "Library name", locale)}
-        {_text("section_name", "Section name", locale)}
-        {_textarea("section_description", "Section description", locale)}
-        {_text("book_name", "Book name", locale)}
-        {_textarea("book_summary", "Book summary", locale)}
-        {_text("operator_name", "Operator name", locale)}
-        {_textarea("operator_description", "Operator description", locale)}
-        {_number("credential_ttl_seconds", "Credential lifetime in seconds", 3600, locale)}
-        <button type="submit">{localize(locale, "Initialize")}</button>
+        {initialize_fields}
+        <button type="submit">{localize(locale, "Finish setup")}</button>
       </form>
     </section>
     <section class="card">
@@ -505,12 +620,19 @@ def _csrf(value: str) -> str:
     return f'<input type="hidden" name="csrf_token" value="{value}">'
 
 
-def _text(name: str, label: str, locale: AdminLocale) -> str:
+def _text(
+    name: str,
+    label: str,
+    locale: AdminLocale,
+    *,
+    help_text: str | None = None,
+) -> str:
     escaped_name = escape(name, quote=True)
+    described_by, help_markup = _field_help(escaped_name, help_text, locale)
     return (
         f'<label for="{escaped_name}">{escape(localize(locale, label))}</label>'
         f'<input id="{escaped_name}" name="{escaped_name}" type="text" '
-        'maxlength="200" required>'
+        f'maxlength="200"{described_by} required>{help_markup}'
     )
 
 
@@ -523,22 +645,52 @@ def _secret(name: str, label: str, locale: AdminLocale) -> str:
     )
 
 
-def _textarea(name: str, label: str, locale: AdminLocale) -> str:
+def _textarea(
+    name: str,
+    label: str,
+    locale: AdminLocale,
+    *,
+    help_text: str | None = None,
+) -> str:
     escaped_name = escape(name, quote=True)
+    described_by, help_markup = _field_help(escaped_name, help_text, locale)
     return (
         f'<label for="{escaped_name}">{escape(localize(locale, label))}</label>'
         f'<textarea id="{escaped_name}" name="{escaped_name}" '
-        'maxlength="4000" rows="3"></textarea>'
+        f'maxlength="4000" rows="3"{described_by}></textarea>{help_markup}'
     )
 
 
-def _number(name: str, label: str, value: int, locale: AdminLocale) -> str:
+def _number(
+    name: str,
+    label: str,
+    value: int,
+    locale: AdminLocale,
+    *,
+    help_text: str | None = None,
+) -> str:
     escaped_name = escape(name, quote=True)
+    described_by, help_markup = _field_help(escaped_name, help_text, locale)
     return (
         f'<label for="{escaped_name}">{escape(localize(locale, label))}</label>'
         f'<input id="{escaped_name}" name="{escaped_name}" type="number" '
-        f'min="1" value="{value}" required>'
+        f'min="1" value="{value}"{described_by} required>{help_markup}'
     )
+
+
+def _field_help(
+    escaped_name: str,
+    help_text: str | None,
+    locale: AdminLocale,
+) -> tuple[str, str]:
+    if help_text is None:
+        return "", ""
+    help_id = f"{escaped_name}-help"
+    described_by = f' aria-describedby="{help_id}"'
+    help_markup = (
+        f'<small class="field-help" id="{help_id}">{escape(localize(locale, help_text))}</small>'
+    )
+    return described_by, help_markup
 
 
 __all__ = [
