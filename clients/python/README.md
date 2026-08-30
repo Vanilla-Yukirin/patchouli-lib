@@ -19,8 +19,8 @@ Alpha 阶段的接口范围包括：
 
 ## 命令行（CLI）
 
-安装软件包后运行 `patchouli --help`。配置档是带版本的 TOML，只包含 HTTPS 来源和
-兼容性版本：
+安装软件包后运行 `patchouli --help`。配置档是带版本的 TOML，只包含 HTTPS URL
+origin（源站）和兼容性版本。这里的 origin 只含 scheme、host 和可选 port：
 
 ```toml
 version = 1

@@ -13,7 +13,7 @@
 - `PATCHOULI_ADMIN_PASSWORD_HASH`：带盐的密码校验值；
 - `PATCHOULI_ADMIN_SESSION_SIGNING_SECRET`：单独生成、至少包含 32 个 UTF-8 字节
   的随机值；
-- `PATCHOULI_ADMIN_ORIGIN`：浏览器访问面板时唯一、准确的来源地址，例如仅作示例的
+- `PATCHOULI_ADMIN_ORIGIN`：浏览器访问面板时唯一且精确匹配的 Origin（源站），例如仅作示例的
   `https://admin.example.invalid`。主机名必须已使用 ASCII 或 Punycode 形式；
   原始 Unicode 主机名会被拒绝。
 
@@ -36,7 +36,7 @@ pbkdf2_sha256$...
 校验值、Agent 凭据、管理员凭据、检索游标签名密钥或 TLS 私钥。可选的
 `PATCHOULI_ADMIN_SESSION_TTL_SECONDS` 允许 300 到 86400 秒，默认是 1800 秒。
 
-生产环境只接受 HTTPS 来源地址。三个必需配置全部为空时面板保持关闭；只设置其中
+生产环境只接受 HTTPS Origin（源站）。三个必需配置全部为空时面板保持关闭；只设置其中
 一部分时，应用会拒绝启动。
 
 ## 在前面放置 TLS 入口
@@ -53,7 +53,7 @@ pbkdf2_sha256$...
 - 单独保留 Archive 接口所需的请求体上限；
 - 只转发到本机回环 API，不在公开仓库记录真实目标地址或证书位置。
 
-`PATCHOULI_ADMIN_ORIGIN` 必须与浏览器实际发送的来源完全一致。不要为了绕过 TLS 和
+`PATCHOULI_ADMIN_ORIGIN` 必须与浏览器实际发送的 Origin 完全一致。不要为了绕过 TLS 和
 登录限速边界而把回环 API 直接暴露到不可信网络。
 
 ## 使用面板

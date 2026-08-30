@@ -14,11 +14,11 @@
 ## 决定
 
 - 管理面板是可选功能，位于现有 FastAPI 应用的 `/admin` 下。只有密码校验值、独立
-  会话签名密钥和准确浏览器来源全部配置后，面板才会存在。
+  会话签名密钥和精确匹配的浏览器 Origin（源站）全部配置后，面板才会存在。
 - 服务器只存储带盐的 PBKDF2-SHA256 密码校验值，绝不存储管理密码。
   `patchouli-admin-password` 读取并确认密码，但不允许通过命令行参数传入。
 - 登录成功后创建短期、带签名、HttpOnly、SameSite=Strict 的 Cookie。Cookie 只
-  包含到期时间和随机 CSRF 值。生产配置要求 HTTPS 来源，并设置 Secure Cookie。
+  包含到期时间和随机 CSRF 值。生产配置要求 HTTPS Origin（源站），并设置 Secure Cookie。
 - 每个改变状态的请求都必须提供已配置的 Host 和 Origin、有效会话及匹配的 CSRF 值。
   表单正文和字段数有上限；未知字段和含糊的重复字段会按失败关闭处理。
 - 管理员和 Agent bearer 值只会出现在密码表单输入或禁止缓存的一次性结果页中，
@@ -27,7 +27,7 @@
   配置和 Agent 凭据吊销。
 - 面板包含只读的管理员、Agent 和 MCP 指引，但不控制镜像、Registry、更新、回滚、
   Docker、主机 Shell、备份恢复、机密基础设施或部署。
-- 与目标无关的 Nginx 示例负责 TLS 终止、保留准确 Host 与 Origin 契约、限制管理
+- 与目标无关的 Nginx 示例负责 TLS 终止、保持 Host 与 Origin 精确匹配、限制管理
   表单正文并限制登录请求频率。私有名称、证书、路径和网络暴露方式仍由管理员配置。
 
 ## 后果
