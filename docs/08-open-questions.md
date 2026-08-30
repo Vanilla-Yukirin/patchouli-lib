@@ -4,6 +4,29 @@ These decisions are unresolved. An implementation may prototype an answer, but
 it must not present that answer as a stable project contract without a public
 proposal.
 
+## How implementation evidence affects this ledger
+
+An unchecked item can have a bounded implementation and tests without being a
+stable compatibility promise. The current repository contains several such
+cases:
+
+- the HTTP service has structured errors, signed cursor pagination, and
+  idempotent create/revise routes, but the complete public API and compatibility
+  policy remain open;
+- Page ID generation and collision handling are implemented for the current
+  persistence path, while the compatibility-sensitive grammar in
+  [stable identifiers and references](06-identifiers-and-references.md) remains
+  partly open;
+- scoped Section grants, credential expiry, recovery, and revocation are
+  implemented, while broader policy dimensions and allow/deny precedence remain
+  open;
+- experimental SQLite backup, verification, and fresh-destination restore code
+  has automated evidence, while the
+  [backup, restore, and upgrade proposal](proposals/sqlite-backup-restore-and-upgrade-alpha.md)
+  remains Proposed and is not a supported recovery policy.
+
+The checkboxes below track public decisions, not whether any code exists.
+
 ## Blocking the first implementation contract
 
 - [x] Choose the implementation language and supported runtime versions:
