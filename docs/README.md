@@ -20,6 +20,7 @@ questions. They must not contain private deployment details or operator data.
 
 ## Engineering documents
 
+- [Implementation roadmap and current status](../ROADMAP.md)
 - [Development, validation, and delivery](development-and-delivery.md)
 - [Web administration console](admin-web-console.md) / [网页管理面板](admin-web-console.zh-CN.md)
 - [Agent contribution workflow](agent-contribution-workflow.md)

@@ -7,9 +7,11 @@ interfaces.
 
 > [!IMPORTANT]
 > PatchouliLib has a runnable engineering bootstrap, typed Agent client, CLI,
-> stdio MCP adapter, scoped archive mutation routes, and non-search retrieval
-> routes. Full-text search and a supported backup/restore policy are not
-> implemented yet.
+> stdio MCP adapter, scoped archive mutation routes, non-search retrieval
+> routes, and experimental local backup/verify/fresh-destination restore
+> tooling. Full-text search and a supported backup/restore policy are not
+> implemented yet. See the [current roadmap status](ROADMAP.md) for the exact
+> boundary between implemented, experimental, and deferred work.
 
 [简体中文](README.zh-CN.md)
 
