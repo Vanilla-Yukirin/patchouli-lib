@@ -1,60 +1,60 @@
-name: Design proposal
-description: Propose a change to an invariant, public interface, or open decision.
-title: "design: "
+name: 设计提案
+description: 提议修改不变量、公开接口或尚未决定的事项。
+title: "设计："
 labels:
   - design
 body:
   - type: textarea
     id: problem
     attributes:
-      label: Problem statement
-      description: State the problem independently of the proposed solution.
+      label: 问题陈述
+      description: 请独立于拟议方案说明问题。
     validations:
       required: true
 
   - type: textarea
     id: constraints
     attributes:
-      label: Constraints and invariants
-      description: Link affected public design documents and list what must remain true.
+      label: 约束与不变量
+      description: 请链接受影响的公开设计文档，并列出必须保持为真的条件。
     validations:
       required: true
 
   - type: textarea
     id: proposal
     attributes:
-      label: Proposed design
-      description: Include data flow, failure behavior, and compatibility impact.
+      label: 拟议设计
+      description: 请包括数据流、失败行为和兼容性影响。
     validations:
       required: true
 
   - type: textarea
     id: alternatives
     attributes:
-      label: Alternatives and trade-offs
+      label: 替代方案与权衡
     validations:
       required: true
 
   - type: textarea
     id: migration
     attributes:
-      label: Migration and rollout
-      description: Explain how existing data or callers would move to this design.
+      label: 迁移与推出方式
+      description: 请说明现有数据或调用方如何迁移到此设计。
     validations:
       required: false
 
   - type: textarea
     id: safety
     attributes:
-      label: Security and privacy impact
-      description: Cover authorization, data exposure, erasure, and provider boundaries.
+      label: 安全与隐私影响
+      description: 请涵盖授权、数据暴露、擦除和提供方边界。
     validations:
       required: true
 
   - type: checkboxes
     id: privacy
     attributes:
-      label: Privacy check
+      label: 隐私核对
       options:
-        - label: This proposal contains no private infrastructure or non-public source material.
+        - label: 本提案不含私有基础设施或非公开来源材料。
           required: true

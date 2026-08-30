@@ -1,29 +1,25 @@
-# Changelog
+# 变更日志
 
-All notable changes to PatchouliLib will be documented in this file.
+PatchouliLib 的所有重要变更都会记录在本文件中。
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and the project intends to use [Semantic Versioning](https://semver.org/) once
-it publishes a supported implementation.
+本文件格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)。
+项目发布受支持的实现后，计划采用[语义化版本](https://semver.org/)。
 
-## [Unreleased]
+## [尚未发布]
 
-### Added
+### 新增
 
-- Initial public product and architecture documentation.
-- Community governance, contribution, support, and security policies.
-- Documentation validation workflow and contribution templates.
-- Python/FastAPI service bootstrap with liveness and readiness endpoints.
-- SQLite/FTS5 validation and reversible Alembic migration plumbing.
-- Cross-platform source, test, migration, documentation, and container checks.
-- GHCR image publishing, provenance, releases, and an operator-initiated
-  private update helper.
-- An opt-in password-protected FastAPI administration console for bootstrap,
-  operator recovery, scoped Agent provisioning, revocation, and Agent/MCP
-  guidance, plus a target-neutral Nginx TLS example.
+- 初始公开产品与架构文档。
+- 社区治理、贡献、支持和安全策略。
+- 文档验证工作流与贡献模板。
+- 带存活和就绪端点的 Python/FastAPI 服务骨架。
+- SQLite/FTS5 验证及可逆的 Alembic 迁移基础设施。
+- 跨平台源码、测试、迁移、文档和容器检查。
+- GHCR 镜像发布、来源证明、版本发布，以及由管理员发起的私有更新辅助工具。
+- 可选启用、受密码保护的 FastAPI 管理面板，用于初始化、管理员恢复、限定范围的
+  Agent 配置、凭据吊销和 Agent/MCP 指引；另含与目标无关的 Nginx TLS 示例。
 
-### Changed
+### 变更
 
-- GitHub Actions no longer stores private SSH deployment settings or connects
-  to private targets; an operator must log in separately and select an exact
-  published image digest.
+- GitHub Actions 不再保存私有 SSH 部署设置，也不连接私有目标；管理员必须另行
+  登录，并选择已发布镜像的准确摘要。

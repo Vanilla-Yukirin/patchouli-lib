@@ -1,41 +1,35 @@
-# Agent contribution workflow
+# Agent 贡献工作流
 
-This workflow keeps parallel human and AI-assisted work reviewable without
-turning local context into an undocumented public requirement.
+本工作流让人类和 AI 辅助的并行工作保持可审查，同时避免把本地上下文变成未记录的
+公开需求。
 
-## Sources of truth
+## 事实源
 
-Use sources in this order:
+按以下顺序使用信息来源：
 
-1. tracked code, tests, and accepted ADRs define implemented behavior;
-2. `docs/` defines the public design direction and decision status;
-3. `docs/08-open-questions.md` identifies choices that implementations must not
-   silently freeze;
-4. issues and pull requests propose changes but are not accepted facts until
-   merged.
+1. 受跟踪代码、测试和已接受的 ADR 定义已实现行为；
+2. `docs/` 定义公开设计方向和决策状态；
+3. `docs/08-open-questions.md` 标明实现不得悄然固化的选择；
+4. Issue 和 Pull Request 用于提议改动，合并前不属于已接受事实。
 
-Private notes, conversations, deployment settings, and local archives are not
-public requirements. A contribution derived from private context must be
-rewritten as a target-neutral public problem statement and reviewed against the
-public design before it enters a tracked file.
+私有笔记、对话、部署设置和本地归档都不是公开需求。源自私有上下文的贡献必须改写
+为与目标无关的公开问题陈述，并在进入受跟踪文件前依据公开设计进行审查。
 
-## Roles
+## 角色
 
-One coordinator owns integration for an active change. The coordinator:
+每项进行中的改动由一名协调者负责集成。协调者：
 
-- maintains the plan and assigns non-overlapping scopes;
-- resolves cross-cutting decisions and file conflicts;
-- owns branch changes, staging, commits, pushes, merges, releases, and deployment;
-- inspects the complete integrated diff and accepts the final result.
+- 维护计划并分配互不重叠的范围；
+- 解决跨领域决定和文件冲突；
+- 负责分支切换、暂存、提交、推送、合并、发布和部署；
+- 检查完整的集成差异并验收最终结果。
 
-Workers receive bounded implementation or research tasks. Reviewers are
-read-only by default and report findings without modifying the worktree. A
-worker must stop and report when a discovered change exceeds its assigned files
-or alters a public contract.
+执行者接收范围有限的实现或研究任务。审查者默认只读，只报告发现而不修改
+worktree。如果发现的改动超出已分配文件或会改变公开契约，执行者必须停止并报告。
 
-## Delegation brief
+## 委派任务说明
 
-Every delegated task should include:
+每项委派任务都应包括：
 
 ```text
 Objective:
@@ -51,70 +45,58 @@ Expected handoff:
 Explicitly out of scope:
 ```
 
-The brief should be small enough that completion can be judged without relying
-on the original conversation. Do not include credentials or operator-specific
-infrastructure in a public task brief.
+任务说明应足够精简，使人无需依赖原始对话就能判断任务是否完成。公开任务说明中
+不得包含凭据或管理员专用基础设施。
 
-## Shared-worktree safety
+## 共享 worktree 安全
 
-- Assign one writer per file or directory for the duration of a task.
-- Workers do not switch branches or change Git state unless explicitly assigned.
-- Record the base commit and inspect `git status` before editing and before
-  handoff. Existing unrelated changes belong to another contributor and must be
-  preserved.
-- If an owned file changes after the recorded base, stop and report the drift.
-  Do not overwrite, revert, or resolve the overlap without reassignment.
-- Do not run formatters or mechanical rewrites outside owned files.
-- If scopes overlap, pause one writer and let the coordinator integrate the
-  first handoff before reassigning the second.
-- Workflow files, dependency manifests and lock files, migration chains, design
-  indexes, open-question ledgers, and changelogs belong to the coordinator by
-  default because they have high integration cost.
-- Infrastructure changes and external publication remain serialized even when
-  source analysis and testing run in parallel.
+- 一项任务期间，每个文件或目录只分配一名写入者。
+- 除非明确分配，否则执行者不得切换分支或改变 Git 状态。
+- 编辑前和交接前都要记录基线提交并检查 `git status`。已有的无关改动属于其他
+  贡献者，必须保留。
+- 如果负责的文件在记录基线后发生变化，应停止并报告偏移；未经重新分配，不得覆盖、
+  还原或解决重叠。
+- 不得在负责范围之外运行格式化工具或机械重写。
+- 如果范围重叠，应暂停一名写入者；待协调者集成第一份交接后再重新分配。
+- 工作流文件、依赖清单和锁文件、迁移链、设计索引、开放问题台账及变更日志默认由
+  协调者负责，因为这些文件的集成成本很高。
+- 即使源码分析和测试可以并行，基础设施变更和外部发布仍需串行执行。
 
-## Handoff contract
+## 交接契约
 
-A worker handoff must report:
+执行者交接时必须报告：
 
-- outcome and exact files changed;
-- base and head commits used for the work;
-- decisions made and the evidence used;
-- commands run and their results;
-- checks not run and the reason;
-- remaining failures, uncertainty, or follow-up work;
-- dependencies, detected drift, and the suggested next owner;
-- whether any source was private and how it was prevented from entering the
-  public diff.
+- 结果和准确的改动文件；
+- 工作所用的基线提交和头部提交；
+- 作出的决定和所用证据；
+- 运行过的命令及结果；
+- 未运行的检查及原因；
+- 剩余失败、不确定性或后续工作；
+- 依赖项、发现的偏移和建议的下一责任人；
+- 是否使用任何私有来源，以及如何防止其进入公开差异。
 
-The coordinator verifies the handoff against the actual worktree. A claim of
-completion is not a substitute for inspecting the diff and rerunning relevant
-checks. Reports should distinguish worker validation, integrated-tree
-validation, required CI, and deployment verification.
+协调者依据实际 worktree 验证交接。声称完成不能替代检查差异和重新运行相关检查。
+报告应分别说明执行者验证、集成树验证、所需 CI 和部署验证。
 
-## Design-state gate
+## 设计状态门槛
 
-Work touching an area marked **Partly open**, **Experimental direction**, or
-**Active** may produce a proposal, prototype, or testable experiment. It must
-not silently establish a public interface or compatibility promise. Changes to
-entities, persistence invariants, authorization, or public APIs require the
-design-proposal process described in `CONTRIBUTING.md`.
+涉及**部分开放（Partly open）**、**实验方向（Experimental direction）**或
+**活跃（Active）**领域的工作，可以产出提案、原型或可测试实验，但不得悄然确立
+公开接口或兼容性承诺。对实体、持久化不变量、授权或公开 API 的改动，必须遵循
+`CONTRIBUTING.md` 中的设计提案流程。
 
-## Integration gate
+## 集成门槛
 
-Before a pull request or merge, the coordinator must:
+提交 Pull Request 或合并前，协调者必须：
 
-1. inspect the complete staged or proposed diff;
-2. stage explicit public paths and confirm them against the ownership list;
-3. scan for credentials, personal identifiers, target hosts, paths, and topology;
-4. run `python scripts/validate.py`;
-5. run `python scripts/validate.py --container` for delivery or container changes;
-6. record any skipped check and its reason in the pull request;
-7. wait for required independent CI checks before merge.
+1. 检查完整的已暂存或待提交差异；
+2. 明确暂存公开路径，并对照所有权清单确认；
+3. 扫描凭据、个人标识、目标主机、路径和拓扑；
+4. 运行 `python scripts/validate.py`；
+5. 对交付或容器改动运行 `python scripts/validate.py --container`；
+6. 在 Pull Request 中记录任何跳过的检查及原因；
+7. 合并前等待所需的独立 CI 检查通过。
 
-GitHub workflows do not connect to private runtimes. A private update is a
-separate, operator-initiated action using local configuration after an exact
-published image digest has passed the required gates. Agents must not copy
-private runtime values into source, logs, issues, pull requests, or handoff
-examples, and must not perform the update without explicit deployment
-authorization.
+GitHub 工作流不会连接私有运行环境。私有更新是独立操作：准确的已发布镜像摘要
+通过所需门槛后，由管理员使用本地配置发起。Agent 不得把私有运行值复制到源码、
+日志、Issue、Pull Request 或交接示例中，也不得在没有明确部署授权时执行更新。

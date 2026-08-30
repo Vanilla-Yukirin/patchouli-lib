@@ -1,30 +1,27 @@
-# Security Policy
+# 安全策略
 
-## Supported versions
+## 受支持版本
 
-PatchouliLib does not yet publish a runnable implementation or supported
-release. Design flaws and threat-model gaps are still welcome as private
-reports when public disclosure could create risk for future adopters.
+PatchouliLib 尚未发布可运行实现或受支持版本。若公开披露可能给未来采用者带来风险，仍欢迎
+通过私密方式报告设计缺陷和威胁模型缺口。
 
-## Reporting a vulnerability
+## 报告漏洞
 
-Use GitHub's private vulnerability reporting flow from the repository's
-**Security** tab. Do not open a public issue for a suspected vulnerability.
+请从仓库的 **Security** 标签页使用 GitHub 私密漏洞报告流程。疑似漏洞不要提交
+公开 Issue。
 
-Include:
+请包括：
 
-- the affected design, component, or version;
-- the expected and observed behavior;
-- reproduction steps or a minimal proof of concept;
-- the likely impact and any known mitigations.
+- 受影响的设计、组件或版本；
+- 预期行为和实际行为；
+- 复现步骤或最小概念验证；
+- 可能的影响和已知缓解措施。
 
-Do not include real credentials, private user documents, or data copied from a
-system you do not own. Maintainers will acknowledge a complete report, assess
-its impact, and coordinate disclosure before a fix is published.
+不要提交真实凭据、私有用户文档或从不属于你的系统中复制的数据。维护者会确认
+收到完整报告、评估影响，并在修复发布前协调披露。
 
-## Security principles
+## 安全原则
 
-Future implementations are expected to use least privilege, encrypted
-transport, secret rotation, auditable writes, explicit administrative erasure,
-and tested backup restoration. Provider-specific deployment hardening belongs
-in separate, generic deployment guides rather than project defaults.
+后续实现应采用最小权限、加密传输、机密轮换、可审计写入、明确的管理性擦除，
+以及经过测试的备份恢复。特定提供方的部署加固应写在单独的通用部署指南中，不应
+成为项目默认设置。

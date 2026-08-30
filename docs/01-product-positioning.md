@@ -1,51 +1,44 @@
-# Product positioning: a durable knowledge library
+# 产品定位：持久的知识库
 
-## One sentence
+## 一句话说明
 
-PatchouliLib is a network-accessible, self-hostable knowledge backend that lets
-people and software agents write, retrieve, revise, and cite shared knowledge
-without turning private infrastructure into a product assumption.
+PatchouliLib 是一个可通过网络访问、可自托管的知识后端，让人类和软件 Agent 能够
+写入、检索、修订和引用共享知识，同时避免把私有基础设施变成产品前提。
 
-## Intended users
+## 目标用户
 
-- Individuals who use several tools or agents against one knowledge base.
-- Small teams that need auditable, scoped access to shared text knowledge.
-- Tool authors building CLI, MCP, or agent-skill adapters.
-- Researchers evaluating retrieval and knowledge-organization strategies.
+- 使用多个工具或 Agent 访问同一个知识库的个人。
+- 需要以可审计、限定范围的方式访问共享文本知识的小型团队。
+- 构建 CLI、MCP 或 Agent Skill 适配器的工具作者。
+- 评估检索和知识整理策略的研究者。
 
-## Goals
+## 目标
 
-- Provide one durable home for notes, project records, conversation archives,
-  research material, and other text-first sources.
-- Preserve original content and revision history while keeping current reads
-  simple.
-- Make citations stable enough for both humans and agents.
-- Support layered retrieval: structure, metadata, full text, summaries, and
-  optional derived indexes.
-- Keep access controlled, attributable, and exportable.
+- 为笔记、项目记录、对话归档、研究资料及其他以文本为主的来源提供一个持久归宿。
+- 保留原始内容和版本历史，同时让读取当前内容保持简单。
+- 让引用足够稳定，可供人类和 Agent 使用。
+- 支持分层检索：结构、元数据、全文、摘要和可选的派生索引。
+- 确保访问受控、行为可归属、数据可导出。
 
-## Non-goals for the first supported release
+## 首个受支持版本不追求的目标
 
-- A hosted public multi-tenant service.
-- General-purpose file synchronization.
-- Binary media storage and processing.
-- A model gateway or model-routing platform.
-- Unreviewed autonomous rewriting, moving, or deletion of source content.
-- A mandatory vector database, model provider, cloud provider, or web UI.
+- 托管式公开多租户服务。
+- 通用文件同步。
+- 二进制媒体存储与处理。
+- 模型网关或模型路由平台。
+- 未经审查，自主重写、移动或删除源内容。
+- 强制使用特定向量数据库、模型提供方、云提供方或 Web UI。
 
-## Deployment posture
+## 部署立场
 
-The public project defines portable service contracts and safe defaults. Each
-operator chooses where and how to run the service. Examples must use synthetic
-hosts and placeholder credentials; a contributor's real deployment topology is
-not part of the public design.
+公开项目定义可移植的服务契约和安全默认值。每位管理员自行选择服务的运行地点与
+方式。示例必须使用合成主机和占位凭据；贡献者的真实部署拓扑不属于公开设计。
 
-## Content posture
+## 内容立场
 
-All text content is represented as a Page, regardless of whether it began as a
-note, configuration explanation, project document, conversation archive, web
-capture, or paper analysis. Content types may add validation and presentation,
-but they do not create separate storage silos.
+所有文本内容都表示为 Page，无论最初来自笔记、配置说明、项目文档、对话归档、
+网页抓取还是论文分析。内容类型可以增加校验和展示方式，但不会形成彼此隔离的存储
+孤岛。
 
-In this design, an **archive** means a preserved agent or assistant conversation.
-It is one content type, not a synonym for every stored document.
+在本设计中，**归档（archive）** 指保存下来的 Agent 或助手对话。它是一种内容类型，
+不是所有已存文档的统称。

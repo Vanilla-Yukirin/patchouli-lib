@@ -1,22 +1,21 @@
-# Summary
+# 摘要
 
-Describe what changed and why.
+说明改了什么以及为何要改。
 
-## Design impact
+## 设计影响
 
-Identify the affected invariant, interface, or open question. Write “none” for
-changes that do not affect the design contract.
+指出受影响的不变量、接口或开放问题。不影响设计契约时填写“无”。
 
-## Validation
+## 验证
 
-List the commands or checks used to validate the change.
+列出用于验证改动的命令或检查。
 
-## Checklist
+## 核对清单
 
-- [ ] I kept this pull request focused on one coherent change.
-- [ ] I updated linked design documents and the changelog when needed.
-- [ ] I ran `python scripts/validate.py` for implementation or documentation changes.
-- [ ] I ran the container validation for release or delivery changes.
-- [ ] I reviewed the full diff for credentials, private content, personal
-      identifiers, hostnames, filesystem paths, and deployment details.
-- [ ] I used only synthetic or deliberately public examples and fixtures.
+- [ ] 此 Pull Request 只包含一项连贯改动。
+- [ ] 我已在需要时更新相关设计文档和变更日志。
+- [ ] 对实现或文档改动，我已运行 `python scripts/validate.py`。
+- [ ] 对发布或交付改动，我已运行容器验证。
+- [ ] 我已检查完整差异，确认不含凭据、私有内容、个人标识、主机名、文件系统路径
+      和部署细节。
+- [ ] 我只使用了合成示例或明确公开的示例与测试数据。

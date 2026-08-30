@@ -1,57 +1,49 @@
-# ADR 0001: implementation and delivery baseline
+# ADR 0001：实现与交付基线
 
-- Status: Accepted
-- Date: 2026-08-10
+- 状态：**已接受（Accepted）**
+- 日期：2026-08-10
 
-The private-update transport and rollback clauses in this baseline are
-superseded by [ADR 0002](0002-manual-private-updates.md). The remaining
-implementation baseline is unchanged.
+本基线中关于私有更新传输和回滚的条款已由
+[ADR 0002](0002-manual-private-updates.md) 取代，其余实现基线保持不变。
 
-## Context
+## 背景
 
-PatchouliLib needs a small, reproducible implementation substrate before domain
-APIs are added. The project is text-first, self-hostable, and currently expects
-one service instance with modest storage requirements. Retrieval experiments
-need SQLite full-text search, while future agent integrations benefit from a
-well-supported Python ecosystem.
+在添加领域 API 前，PatchouliLib 需要一个小型、可复现的实现基础。项目以文本为主、
+可自托管，当前预期每个服务实例只有适中的存储需求。检索实验需要 SQLite 全文检索，
+后续 Agent 集成则受益于支持完善的 Python 生态。
 
-The baseline must support Windows development, Linux CI, OCI containers, schema
-migrations, and deployments that do not expose an operator's private target in
-the public repository.
+基线必须支持 Windows 开发、Linux CI、OCI 容器、数据库结构迁移，以及不会在公开
+仓库中暴露管理员私有目标的部署方式。
 
-## Decision
+## 决定
 
-- Python 3.13 is the initial runtime.
-- FastAPI provides the HTTP application boundary.
-- SQLAlchemy 2 and Alembic provide persistence and schema migrations.
-- SQLite with FTS5 is the initial database and retrieval baseline.
-- uv manages locked Python dependencies and environments.
-- Ruff, strict MyPy, pytest, and coverage are required validation layers.
-- OCI images are the supported deployment artifact.
-- GitHub Actions validates pull requests and publishes immutable image digests.
-- Private deployments receive only an exact image digest through
-  operator-owned infrastructure.
+- 初始运行时为 Python 3.13。
+- FastAPI 提供 HTTP 应用边界。
+- SQLAlchemy 2 和 Alembic 提供持久化及数据库结构迁移。
+- 带 FTS5 的 SQLite 是初始数据库和检索基线。
+- uv 管理锁定的 Python 依赖和环境。
+- Ruff、严格 MyPy、pytest 和覆盖率是必需的验证层。
+- OCI 镜像是受支持的部署制品。
+- GitHub Actions 验证 Pull Request 并发布不可变镜像摘要。
+- 私有部署只通过管理员自有基础设施接收准确镜像摘要。
 
-This decision establishes implementation plumbing, not the unresolved domain
-API, authorization policy, identifier grammar, backup policy, or model provider.
+本决定只确立实现基础设施，不解决领域 API、授权策略、标识符语法、备份策略或模型
+提供方等开放问题。
 
-## Consequences
+## 后果
 
-- Contributors can run one cross-platform validation entry point.
-- Development and deployment use the same locked dependencies and container.
-- SQLite migrations and FTS5 availability can be tested before domain work.
-- Deployments can remain private while the implementation stays public.
-- Supporting another database or Python runtime requires a new compatibility
-  proposal and migration plan.
-- The initial published image targets `linux/amd64`; additional architectures
-  require CI and runtime validation before support is claimed.
+- 贡献者可以运行一个跨平台验证入口。
+- 开发和部署使用相同的锁定依赖与容器。
+- 可在领域工作开始前测试 SQLite 迁移和 FTS5 可用性。
+- 实现保持公开的同时，部署仍可保持私有。
+- 支持其他数据库或 Python 运行时需要新的兼容性提案和迁移计划。
+- 初始发布镜像面向 `linux/amd64`；声称支持其他架构前，需要 CI 和运行时验证。
 
-## Security and operations
+## 安全与运维
 
-- Containers run as a non-root user and bind through operator configuration.
-- The sample Compose configuration exposes the API on loopback by default.
-- Public workflows contain no real host, account, path, port, domain, or key.
-- A deployment helper must validate the requested repository and digest and
-  wait for health. Its invocation and failure policy are defined by ADR 0002.
-- Database changes must remain backward-compatible with the previous image until
-  a tested database rollback policy is accepted.
+- 容器以非 root 用户运行，并通过管理员配置进行绑定。
+- 示例 Compose 配置默认只在回环地址公开 API。
+- 公开工作流不含真实主机、账号、路径、端口、域名或密钥。
+- 部署辅助工具必须校验请求的仓库与摘要并等待健康状态；调用和失败策略由
+  ADR 0002 定义。
+- 在经过测试的数据库回滚策略被接受前，数据库改动必须与前一镜像保持向后兼容。

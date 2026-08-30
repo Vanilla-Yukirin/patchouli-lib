@@ -1,61 +1,55 @@
-# Authentication, authorization, and audit
+# 身份验证、授权与审计
 
-## Credential classes
+## 凭据类别
 
-The design distinguishes:
+本设计区分：
 
-- an administrative credential for credential management, policy changes,
-  export, and exceptional erasure;
-- scoped caller credentials for CLI tools, MCP clients, services, and agents.
+- 用于凭据管理、策略变更、导出和例外擦除的管理凭据；
+- 供 CLI 工具、MCP 客户端、服务和 Agent 使用的有作用域调用方凭据。
 
-Administrative credentials must not be used for ordinary reads and writes.
-Caller credentials need names and descriptions for auditability, but examples
-must use synthetic identities.
+管理凭据不得用于普通读写。调用方凭据需要名称和说明以便审计，但示例必须使用
+合成身份。
 
-## Credential handling
+## 凭据处理
 
-Future implementations must:
+后续实现必须：
 
-- accept credentials only over encrypted transport;
-- store verifiers rather than recoverable plaintext tokens;
-- show a token value only at creation time;
-- support expiry, rotation, revocation, and last-used metadata;
-- avoid logging raw authorization headers or secrets;
-- use constant-time verification where relevant.
+- 只通过加密传输接受凭据；
+- 存储校验值，而不是可还原的明文令牌；
+- 只在创建时显示一次令牌值；
+- 支持到期、轮换、吊销和最后使用时间元数据；
+- 避免记录原始授权头或机密；
+- 在适用场景使用常量时间校验。
 
-## Authorization scope
+## 授权作用域
 
-Section and Tag constraints are candidate policy dimensions. Book- and Page-level
-rules are intentionally deferred until concrete use cases justify the added
-complexity.
+Section 和 Tag 约束是候选策略维度。在具体使用场景证明额外复杂性合理之前，Book
+和 Page 层规则有意推迟。
 
-The recommended baseline is default-deny for new caller credentials: no content
-access until an explicit scope is assigned. The exact allow/deny precedence and
-behavior of untagged content remain open design questions.
+建议的基线是新调用方凭据默认拒绝：明确分配作用域前不能访问任何内容。准确的允许/
+拒绝优先级，以及无标签内容的行为，仍是开放设计问题。
 
-Authorization must be evaluated before retrieval, summary generation, derived
-fact access, reference traversal, and organization suggestions. Filtering only
-the final response is insufficient.
+检索、摘要生成、派生事实访问、引用遍历和整理建议都必须先进行授权评估。只过滤
+最终响应远远不够。
 
-## Audit events
+## 审计事件
 
-Every accepted mutation should record:
+每次被接受的变更都应记录：
 
-- actor identity and credential identifier;
-- action and affected resource;
-- request or correlation identifier;
-- timestamp and result;
-- previous and new Revision or policy version when applicable.
+- 操作者身份和凭据标识符；
+- 操作和受影响资源；
+- 请求或关联标识符；
+- 时间戳和结果；
+- 适用时记录之前和之后的 Revision 或策略版本。
 
-Audit data must not contain raw credentials or full private document bodies.
-Retention, export, and integrity guarantees require a dedicated proposal.
+审计数据不得包含原始凭据或完整私有文档正文。保留、导出和完整性保证需要专门提案。
 
-## Threat model topics
+## 威胁模型主题
 
-- stolen caller or administrative credentials;
-- prompt injection in stored content;
-- cross-Section data leakage during retrieval;
-- unauthorized provider calls during summarization;
-- malicious Markdown or reference expansion;
-- denial of service through expensive search, upload, or model requests;
-- backup leakage and incomplete administrative erasure.
+- 调用方凭据或管理凭据被盗；
+- 已存内容中的提示词注入；
+- 检索期间发生跨 Section 数据泄漏；
+- 摘要生成期间未经授权调用提供方；
+- 恶意 Markdown 或引用展开；
+- 通过昂贵搜索、上传或模型请求实施拒绝服务；
+- 备份泄漏和不完整的管理性擦除。

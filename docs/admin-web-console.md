@@ -1,23 +1,23 @@
-# Web administration console
+# 网页管理面板
 
-中文说明见[网页管理面板](admin-web-console.zh-CN.md)。
+> [简体中文兼容文件](admin-web-console.zh-CN.md)作为既有链接的入口保留；本文件是
+> 规范入口，两份文件的面向读者正文均使用简体中文。
 
-The optional console provides a small human-facing layer over existing local
-operator services. It is not a deployment dashboard and has no host, Docker,
-image, rollback, backup-restore, or shell authority.
+这个可选面板把现有的本地管理员功能放到一个简单网页中。它不是部署控制台，没有
+主机、Docker、镜像更新、回滚、备份恢复或 Shell 权限。
 
-## Enable it
+## 启用面板
 
-The console is absent unless all three values are configured:
+只有同时提供下面三个配置时，服务才会注册 `/admin` 页面：
 
-- `PATCHOULI_ADMIN_PASSWORD_HASH`: a salted password verifier;
-- `PATCHOULI_ADMIN_SESSION_SIGNING_SECRET`: a distinct random value containing
-  at least 32 UTF-8 bytes;
-- `PATCHOULI_ADMIN_ORIGIN`: the one exact browser origin, such as the synthetic
-  `https://admin.example.invalid`. Its hostname must already use ASCII or
-  Punycode form; raw Unicode hostnames are rejected.
+- `PATCHOULI_ADMIN_PASSWORD_HASH`：带盐的密码校验值；
+- `PATCHOULI_ADMIN_SESSION_SIGNING_SECRET`：单独生成、至少包含 32 个 UTF-8 字节
+  的随机值；
+- `PATCHOULI_ADMIN_ORIGIN`：浏览器访问面板时唯一、准确的来源地址，例如仅作示例的
+  `https://admin.example.invalid`。主机名必须已使用 ASCII 或 Punycode 形式；
+  原始 Unicode 主机名会被拒绝。
 
-Generate the password verifier locally:
+在本机生成密码校验值：
 
 ```text
 patchouli-admin-password
@@ -26,87 +26,69 @@ Confirm administration password:
 pbkdf2_sha256$...
 ```
 
-The command accepts no arguments and suppresses terminal echo when run
-interactively. Treat its output as sensitive configuration. Do not place the
-password or verifier in a shell argument, tracked file, screenshot, issue, or
-log.
+这个命令不接受命令行参数；在交互式终端中输入密码时不会显示字符。请把输出当作
+敏感配置。密码和校验值都不能放进 Shell 参数、受跟踪文件、截图、Issue 或日志。
 
-When a Compose `.env` file supplies the verifier, enclose the complete value in
-single quotes so its `$` separators remain literal. Keep that private `.env`
-file outside version control.
+如果通过 Compose 的 `.env` 文件提供校验值，要用单引号包住完整内容，避免其中的
+`$` 分隔符被解释；这个私有 `.env` 文件也不能加入版本控制。
 
-Generate the session signing secret independently with a cryptographic random
-number generator. Do not reuse the administration password, password verifier,
-Agent credential, operator credential, retrieval cursor key, or TLS private
-key. The optional `PATCHOULI_ADMIN_SESSION_TTL_SECONDS` is bounded from 300 to
-86400 seconds and defaults to 1800.
+会话签名密钥必须用密码学安全的随机数生成器单独生成。不要复用管理密码、密码
+校验值、Agent 凭据、管理员凭据、检索游标签名密钥或 TLS 私钥。可选的
+`PATCHOULI_ADMIN_SESSION_TTL_SECONDS` 允许 300 到 86400 秒，默认是 1800 秒。
 
-Production configuration requires an HTTPS origin. Empty values leave the
-console disabled, but setting only some values fails application startup.
+生产环境只接受 HTTPS 来源地址。三个必需配置全部为空时面板保持关闭；只设置其中
+一部分时，应用会拒绝启动。
 
-## Put TLS in front
+## 在前面放置 TLS 入口
 
-The public Compose service remains bound to loopback. Copy
-`deploy/nginx/patchouli-admin.conf.example` into private operator
-configuration, replace its synthetic server name and certificate locations,
-and validate Nginx before reloading it.
+公开的 Compose 服务仍然只监听本机回环地址。把
+`deploy/nginx/patchouli-admin.conf.example` 复制到管理员自己的私有配置，替换
+示例服务器名称与证书位置，并在重新加载前验证 Nginx 配置。
 
-The Nginx example:
+这个 Nginx 示例会：
 
-- terminates TLS and forwards the original Host;
-- rate-limits the login endpoint;
-- limits admin form bodies to 16 KiB;
-- keeps the existing Archive request allowance separate; and
-- proxies to the loopback API without publishing a target address or
-  certificate location in this repository.
+- 负责 TLS，并把原始 Host 转发给 FastAPI；
+- 限制登录端点的请求频率；
+- 把管理表单请求体限制为 16 KiB；
+- 单独保留 Archive 接口所需的请求体上限；
+- 只转发到本机回环 API，不在公开仓库记录真实目标地址或证书位置。
 
-The configured `PATCHOULI_ADMIN_ORIGIN` must exactly match what the browser
-sends. Do not expose the loopback API directly to an untrusted network to
-bypass the TLS and login-rate boundary.
+`PATCHOULI_ADMIN_ORIGIN` 必须与浏览器实际发送的来源完全一致。不要为了绕过 TLS 和
+登录限速边界而把回环 API 直接暴露到不可信网络。
 
-## Use the console
+## 使用面板
 
-Open `/admin/login` and enter the administration password. The short-lived
-session cookie contains only an expiry and random CSRF value.
+访问 `/admin/login` 并输入管理密码。短期会话 Cookie 只包含到期时间和随机 CSRF 值。
 
-Use the `中文 / English` control in the upper-right corner to switch the
-console, including validation and error messages. The selection is remembered
-in a separate, non-sensitive, HttpOnly, SameSite=Strict cookie scoped to
-`/admin`. It contains only `zh-CN` or `en`, persists across sign-out, and never
-contains or replaces an administration session or bearer credential. The
-control is intentionally hidden on a one-time credential response so changing
-language cannot accidentally discard the only displayed copy.
+右上角的 `中文 / English` 控件可以切换整个面板，包括表单校验和错误提示。语言选择
+保存在另一个非敏感的 HttpOnly、SameSite=Strict Cookie 中；它仅限 `/admin` 路径，
+只包含 `zh-CN` 或 `en`，退出登录后仍会保留。它既不是管理会话，也不会包含或替代
+任何 bearer 凭据。一次性凭据结果页会有意隐藏语言切换，避免用户因切换语言而丢失
+唯一显示的一份凭据。
 
-The first release provides:
+第一版可以完成：
 
-1. one-time Library, Section, Book, and operator initialization;
-2. operator credential recovery, which revokes prior active credentials;
-3. Agent creation with exact Section permissions and one credential;
-4. Agent credential revocation; and
-5. read-only operator, Agent, and MCP guidance.
+1. 一次性创建 Library、Section、Book 和第一个本地管理员；
+2. 恢复管理员凭据，同时吊销此前仍有效的管理员凭据；
+3. 为一个明确的 Section 创建 Agent、精确权限和一份凭据；
+4. 吊销指定的 Agent 凭据；
+5. 查看只读的管理员、Agent 和 MCP 使用说明。
 
-The first-time setup creates the minimum content hierarchy required before a
-Page can be stored:
+“首次设置”会创建保存 Page 前必须具备的最小内容结构：
 
-- **Library** is the whole knowledge space. One Library is usually enough for
-  personal use. Multiple Libraries are useful when administration and access
-  must be separated, but they still share this deployment and database.
-- **Section** is a durable large category and the scope used for Agent
-  permissions.
-- **Book** is a smaller content container inside one Section. Every Page belongs
-  to one Book.
+- **知识库（Library）** 是整个知识空间。个人使用通常一个就够了；需要分开管理和
+  授权时可以创建多个，但同一次部署中的知识库仍共享服务和数据库，并不是物理上
+  完全分开的系统。
+- **分区（Section）** 是长期使用的大分类，也是给 Agent 划定权限的范围。
+- **书籍（Book）** 是一个分区内更小的内容集合。每个 Page 只属于一本书。
 
-Section descriptions and Book summaries are optional human-readable guidance.
-The operator name identifies the administrator; audit records link to that
-identity rather than using it as the web sign-in name. Credential lifetime
-controls the first operator bearer token only; it does not expire the Library
-or the web administration password. The default `3600` seconds is one hour.
+分区说明和书籍摘要都是可选的文字说明。管理员名称用于标识管理员，审计记录会关联
+到这个身份；它不是网页登录账号。“管理员令牌有效期”只决定首次生成的管理员
+bearer 令牌多久过期，不会让 Library 或网页管理密码失效；默认 `3600` 秒即一小时。
 
-Operator credentials entered into an action form are used for that request
-only. New operator and Agent credentials are rendered once on a no-store page.
-Record the accompanying Library, caller, and credential IDs before leaving the
-page. A lost response cannot reveal the same token again.
+操作表单中的管理员凭据只用于当前请求。新管理员或 Agent 凭据只会在禁止缓存的结果
+页面显示一次。离开页面前，应记录 Library、caller 和 credential ID。丢失响应后
+无法再次显示同一个令牌。
 
-The console does not store bearer values in its cookie or other browser
-storage. Do not install browser extensions or logging middleware that captures
-form bodies or rendered secrets.
+面板不会把 bearer 值写入 Cookie 或其他浏览器存储。不要安装会捕获表单内容或页面
+机密的浏览器扩展，也不要添加记录请求体或响应体的中间件。

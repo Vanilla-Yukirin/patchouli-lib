@@ -1,100 +1,82 @@
-# Open questions
+# 开放问题
 
-These decisions are unresolved. An implementation may prototype an answer, but
-it must not present that answer as a stable project contract without a public
-proposal.
+以下决定尚未解决。实现可以试验一种答案，但在没有公开提案的情况下，不得把该答案
+描述为稳定的项目契约。
 
-## How implementation evidence affects this ledger
+## 实现证据如何影响本台账
 
-An unchecked item can have a bounded implementation and tests without being a
-stable compatibility promise. The current repository contains several such
-cases:
+未勾选事项可以已有范围有限的实现和测试，但这并不构成稳定的兼容性承诺。当前仓库
+包含若干此类情况：
 
-- the HTTP service has structured errors, signed cursor pagination, and
-  idempotent create/revise routes, but the complete public API and compatibility
-  policy remain open;
-- Page ID generation and collision handling are implemented for the current
-  persistence path, while the compatibility-sensitive grammar in
-  [stable identifiers and references](06-identifiers-and-references.md) remains
-  partly open;
-- scoped Section grants, credential expiry, recovery, and revocation are
-  implemented, while broader policy dimensions and allow/deny precedence remain
-  open;
-- experimental SQLite backup, verification, and fresh-destination restore code
-  has automated evidence, while the
-  [backup, restore, and upgrade proposal](proposals/sqlite-backup-restore-and-upgrade-alpha.md)
-  remains Proposed and is not a supported recovery policy.
+- HTTP 服务已有结构化错误、签名游标分页和幂等创建/修订接口，但完整公开 API 和
+  兼容性策略仍然开放；
+- 当前持久化路径已经实现 Page ID 生成和冲突处理，但
+  [稳定标识符与引用](06-identifiers-and-references.md)中影响兼容性的语法仍有部分开放；
+- 已实现限定 Section 的授权、凭据到期、恢复和吊销，但更广泛的策略维度及允许/拒绝
+  优先级仍然开放；
+- 实验性 SQLite 备份、校验和“恢复到全新目标”代码已有自动化证据，但
+  [备份、恢复与升级提案](proposals/sqlite-backup-restore-and-upgrade-alpha.md)
+  仍处于 **提案中（Proposed）**，并非受支持的恢复策略。
 
-The checkboxes below track public decisions, not whether any code exists.
+以下复选框记录公开决定，而不是是否已有代码。
 
-## Blocking the first implementation contract
+## 阻塞首个实现契约的问题
 
-- [x] Choose the implementation language and supported runtime versions:
-  Python 3.13, recorded in [ADR 0001](decisions/0001-implementation-baseline.md).
-- [x] Select an initial database: SQLite with FTS5, recorded in
-  [ADR 0001](decisions/0001-implementation-baseline.md).
-- [ ] Publish transaction, migration, backup, and restore invariants beyond the
-  bootstrap migration checks.
-- [ ] Define the HTTP or RPC API, error model, pagination, and idempotency keys.
-- [ ] Specify the stable-ID timestamp encoding, timezone, normalization, and
-  collision behavior.
-- [ ] Define credential scope representation, default policy, and allow/deny
-  precedence.
-- [ ] Define administrative erasure across current data, history, indexes,
-  exports, and backups.
+- [x] 选择实现语言和受支持的运行时版本：Python 3.13，记录于
+  [ADR 0001](decisions/0001-implementation-baseline.md)。
+- [x] 选择初始数据库：带 FTS5 的 SQLite，记录于
+  [ADR 0001](decisions/0001-implementation-baseline.md)。
+- [ ] 发布超出工程骨架迁移检查范围的事务、迁移、备份和恢复不变量。
+- [ ] 定义 HTTP 或 RPC API、错误模型、分页和幂等键。
+- [ ] 明确稳定 ID 的时间戳编码、时区、规范化和冲突行为。
+- [ ] 定义凭据作用域表示、默认策略和允许/拒绝优先级。
+- [ ] 定义跨当前数据、历史、索引、导出和备份的管理性擦除。
 
-## Revision and concurrency
+## 版本与并发
 
-- [ ] Is optimistic concurrency required by default for Page revisions?
-- [ ] How are rejected writes represented without losing the submitted body?
-- [ ] Should restore operations use a dedicated endpoint or ordinary revision
-  creation with structured metadata?
+- [ ] Page 修订是否默认要求乐观并发控制？
+- [ ] 如何表示被拒绝的写入，同时又不丢失提交的正文？
+- [ ] 恢复操作应使用专用端点，还是携带结构化元数据的普通 Revision 创建？
 
-## Summaries and derived facts
+## 摘要与派生事实
 
-- [ ] Which events create, invalidate, regenerate, or remove derived facts?
-- [ ] How are generator versions and stale derived data exposed to callers?
-- [ ] Which derived artifacts survive a Page move, soft deletion, or erasure?
-- [ ] What size and quality constraints apply to summaries?
+- [ ] 哪些事件会创建、使派生事实失效、重新生成或移除派生事实？
+- [ ] 如何向调用方公开生成器版本和过期的派生数据？
+- [ ] Page 移动、软删除或擦除后，哪些派生内容继续保留？
+- [ ] 摘要应满足哪些大小和质量约束？
 
-## Retrieval
+## 检索
 
-- [ ] Which baseline ranking function and evaluation metrics become normative?
-- [ ] Is cross-Section search needed, and which credential may request it?
-- [ ] When do embeddings provide enough measured value to justify their cost
-  and privacy surface?
-- [ ] How should prompt-injection content be isolated from retrieval-agent
-  instructions?
+- [ ] 哪种基线排序函数和评估指标应成为规范？
+- [ ] 是否需要跨 Section 搜索，哪种凭据可以请求该操作？
+- [ ] 嵌入检索何时能提供足够的可衡量价值，以抵消其成本和隐私风险面？
+- [ ] 如何隔离含提示词注入的内容与检索 Agent 指令？
 
-## Shelves and organization
+## Shelf 与整理
 
-- [ ] Are Shelves user-authored saved searches, automatically maintained
-  projections, or both?
-- [ ] Which signals and thresholds make a Book a split or merge candidate?
-- [ ] How do Derived Facts follow Page moves and Book reorganizations?
-- [ ] What user interface should present, reject, or postpone suggestions?
+- [ ] Shelf 是用户编写的已保存搜索、自动维护的投影视图，还是两者兼有？
+- [ ] 哪些信号和阈值会使 Book 成为拆分或合并候选？
+- [ ] Page 移动和 Book 重组时，Derived Fact 如何跟随？
+- [ ] 应用什么用户界面展示、拒绝或推迟建议？
 
-## Content and interoperability
+## 内容与互操作性
 
-- [ ] Is the first release text-only, or does it support attachment metadata?
-- [ ] Which Markdown profile and reference grammar are supported?
-- [ ] What export format preserves IDs, Revisions, Tags, Sources, and audit data?
-- [ ] Which import metadata is required to make retries idempotent?
+- [ ] 首个版本只支持文本，还是也支持附件元数据？
+- [ ] 支持哪种 Markdown 配置和引用语法？
+- [ ] 哪种导出格式可以保留 ID、Revision、Tag、Source 和审计数据？
+- [ ] 为使重试具备幂等性，导入时必须提供哪些元数据？
 
-## Hosted-agent integration
+## 托管 Agent 集成
 
-- [ ] What provider interface supports local and remote models without exposing
-  content contrary to operator policy?
-- [ ] Which actions may a hosted agent perform directly, and which always need
-  approval?
-- [ ] How are model cost, latency, prompts, and citations observed without
-  logging private content unnecessarily?
+- [ ] 哪种提供方接口既支持本地和远程模型，又不会违反管理员策略暴露内容？
+- [ ] 托管 Agent 可以直接执行哪些操作，哪些始终需要批准？
+- [ ] 如何观测模型成本、延迟、提示词和引用，同时避免不必要地记录私有内容？
 
-## Accepted directions
+## 已接受方向
 
-- [x] Page bodies have immutable Revisions; restore creates a new Revision.
-- [x] A Page belongs to one Book at a time and can move without copying history.
-- [x] Tags and Shelves are retrieval projections, not content owners.
-- [x] Model providers and deployment locations are operator configuration.
-- [x] Automatic organization produces reviewable suggestions by default.
-- [x] Public examples and workflows contain no maintainer-specific infrastructure.
+- [x] Page 正文使用不可变 Revision；恢复会创建新 Revision。
+- [x] Page 在任意时刻属于一个 Book，移动时无需复制历史。
+- [x] Tag 和 Shelf 是检索投影，不是内容所有者。
+- [x] 模型提供方和部署位置由管理员配置。
+- [x] 自动整理默认生成可供审查的建议。
+- [x] 公开示例和工作流不含维护者专用基础设施。
