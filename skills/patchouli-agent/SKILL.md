@@ -102,9 +102,10 @@ patchouli --output json archive create --section SECTION_ID --book BOOK_ID --met
 客户端会在变更前持久化准备受权限限制的操作日志。保留返回的非机密
 `operation_id`。遇到结果不确定的失败后，只重放完全相同的 CLI 命令并添加
 `--operation-id OPERATION_ID`，或重放完全相同的 MCP 工具输入并添加
-`operation_id`。省略操作 ID 会开始新操作。路由、元数据、准确内容字节、调用方或
-配置档来源有任何不同，都必须开始新操作。不要声称可以跨设备恢复，也不要按标题、
-Source 定位值、时间戳或内容对另一个键去重。如果结果丢失且调用方没有收到操作 ID，
+`operation_id`。省略操作 ID 会开始新操作。只要路由、元数据、内容字节、调用方，
+或配置档中服务 endpoint 的 origin（源站）不是完全相同，就必须开始新操作。
+不要声称可以跨设备恢复，也不要按标题、Source 定位值、时间戳或内容对另一个键去重。
+如果结果丢失且调用方没有收到操作 ID，
 应停止：随附接口不能发现日志项，再次写入可能产生重复内容。
 
 ## 明确修订归档
@@ -122,12 +123,12 @@ patchouli --output json archive revise --section SECTION_ID --page PAGE_ID --if-
 ```
 
 对应的 MCP 工具是 `page_current` 和 `archive_revise`；传入 `if_match`、
-`source_kind`、可选的 `source_locator` 和完整 `content`。准确保留 ETag，包括它的
+`source_kind`、可选的 `source_locator` 和完整 `content`。原样保留 ETag，包括它的
 强引号。请求归档 Revision 前，确认所取得的 Page 属于归档类型。
 
 收到明确的 412 或 428 响应时，Revision 没有被应用。不要重放失败操作，也不要悄然
 改变输入后重试。重新获取当前状态、审查它，再用新的强 ETag 有意开始新操作。只有
-结果不确定、且原操作 ID 和每项原参数仍可用时，才进行准确重放。报告最终的准确引用。
+结果不确定、且原操作 ID 和每项原参数仍可用时，才进行原样重放。报告最终的准确引用。
 
 ## 安全报告
 
