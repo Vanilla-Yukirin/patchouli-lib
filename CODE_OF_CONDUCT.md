@@ -1,35 +1,32 @@
-# Code of Conduct
+# 行为准则
 
-## Our commitment
+## 我们的承诺
 
-We are committed to a respectful, harassment-free community for everyone,
-regardless of background, identity, experience level, or preferred tools.
+我们致力于为所有人建设一个彼此尊重、免受骚扰的社区，不因背景、身份、经验水平
+或偏好的工具而区别对待。
 
-## Expected behavior
+## 期望的行为
 
-- Be specific, constructive, and kind.
-- Critique ideas and changes, not people.
-- Make room for questions and different levels of experience.
-- Respect privacy and never repost another person's private data.
-- Disclose conflicts of interest that could affect a project decision.
+- 表达具体、具有建设性并保持友善。
+- 讨论观点和改动，不针对个人。
+- 为提问和不同经验水平留出空间。
+- 尊重隐私，绝不转发他人的私有数据。
+- 披露可能影响项目决定的利益冲突。
 
-## Unacceptable behavior
+## 不可接受的行为
 
-- Harassment, threats, discrimination, or personal attacks.
-- Publishing private information without explicit permission.
-- Deliberate disruption, repeated bad-faith argument, or spam.
-- Sexualized language, imagery, or attention in project spaces.
+- 骚扰、威胁、歧视或人身攻击。
+- 未经明确许可发布私有信息。
+- 故意干扰、反复恶意争辩或发送垃圾内容。
+- 在项目空间中使用带有性意味的语言、图像或关注行为。
 
-## Enforcement
+## 执行
 
-Maintainers may edit or remove contributions, comments, commits, issues, or
-other material that violates this policy. They may also issue warnings or
-temporarily or permanently restrict participation.
+维护者可以编辑或移除违反本准则的贡献、评论、提交、Issue 或其他材料，也可以
+发出警告，或临时、永久限制参与。
 
-For platform-level abuse, use GitHub's private reporting tools. For other
-conduct concerns, open a minimal issue asking for private maintainer contact;
-do not include sensitive evidence in the public issue. Reports will be handled
-as confidentially as the available project tools allow.
+对于平台层面的滥用，请使用 GitHub 的私密举报工具。其他行为问题可提交一个内容
+最少的 Issue，请求与维护者私下联系；不要在公开 Issue 中附上敏感证据。维护者会
+在项目现有工具允许的范围内对报告保密。
 
-This policy applies in all project spaces and when someone represents the
-project in public.
+本准则适用于所有项目空间，也适用于任何人公开代表本项目的场合。

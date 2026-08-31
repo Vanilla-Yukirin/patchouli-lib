@@ -1,36 +1,29 @@
-# Governance
+# 治理
 
-PatchouliLib uses a maintainer-led, proposal-driven governance model during its
-design and bootstrap stages.
+在设计和工程骨架阶段，PatchouliLib 采用维护者主导、提案驱动的治理模式。
 
-## Roles
+## 角色
 
-- **Contributors** report problems, propose designs, improve documentation, and
-  submit code.
-- **Reviewers** provide sustained, technically grounded review in one or more
-  project areas.
-- **Maintainers** merge changes, manage releases, enforce community policy, and
-  protect the project's compatibility and security commitments.
+- **贡献者**报告问题、提出设计、改进文档并提交代码。
+- **审查者**在一个或多个项目领域持续提供有技术依据的审查。
+- **维护者**合并改动、管理发布、执行社区策略，并维护项目的兼容性和安全承诺。
 
-Roles are based on sustained public contribution and may change as the community
-grows. No role grants ownership of contributor data or private deployments.
+角色取决于持续的公开贡献，也可能随社区发展而调整。任何角色都不获得贡献者数据
+或私有部署的所有权。
 
-## Decisions
+## 决策
 
-- Small, reversible changes are decided through pull-request review.
-- Changes to the domain model, storage invariants, security boundaries, or
-  public interfaces require a design proposal and a reasonable public comment
-  period.
-- Decisions should document alternatives, trade-offs, and follow-up work.
-- When consensus is not possible, maintainers make the final call and record the
-  reasoning publicly.
+- 小型且可逆的改动通过 Pull Request 审查决定。
+- 领域模型、存储不变量、安全边界或公开接口的改动，需要设计提案和合理的公开
+  征求意见期。
+- 决策应记录备选方案、权衡和后续工作。
+- 无法形成共识时，由维护者作最终决定，并公开记录理由。
 
-## Releases and compatibility
+## 发布与兼容性
 
-There are no supported releases yet. Before the first supported release, the
-project will publish versioning, deprecation, and data-migration policies.
+项目目前没有受支持的版本。首次发布受支持版本前，项目会公布版本、弃用和数据
+迁移策略。
 
-## Policy changes
+## 策略变更
 
-Material changes to governance or community policy follow the same proposal and
-review process as architecture changes.
+治理或社区策略的重大变更，遵循与架构变更相同的提案和审查流程。

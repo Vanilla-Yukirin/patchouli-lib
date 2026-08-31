@@ -1,22 +1,21 @@
-# Page revisions, history, and recovery
+# Page 版本、历史与恢复
 
-## Invariants
+## 不变量
 
-- A normal edit creates a new immutable Revision.
-- A Page has one current Revision pointer.
-- Default reads and searches use only the current Revision.
-- Historical Revisions are available only through explicit history operations.
-- Revision creation and the current-pointer update occur in one transaction.
+- 普通编辑会创建新的不可变 Revision。
+- 一个 Page 只有一个当前 Revision 指针。
+- 默认读取和搜索只使用当前 Revision。
+- 历史 Revision 只能通过明确的历史操作访问。
+- 创建 Revision 和更新当前指针必须在同一事务中完成。
 
-## Revision numbers
+## 版本号
 
-Revision numbers increase within a Page: `1`, `2`, `3`, and so on. They are
-human-friendly local sequence numbers, not global identifiers or timestamps.
+Revision 编号在一个 Page 内递增：`1`、`2`、`3`，依此类推。它们是方便人类阅读的
+局部序号，不是全局标识符或时间戳。
 
-## Recovery
+## 恢复
 
-Recovery creates a new Revision from an earlier body rather than moving the
-current pointer backward.
+恢复会依据早期正文创建一个新 Revision，而不是把当前指针向后移动。
 
 ```text
 Revision 2 (historical content)
@@ -26,38 +25,34 @@ Revision 2 (historical content)
 Revision 6 (new current revision)
 ```
 
-This keeps history linear and records that a restore occurred.
+这样既能保持历史线性，也会记录恢复操作确实发生过。
 
-## Concurrent writes
+## 并发写入
 
-The service serializes writes through one API and never discards a committed
-Revision. A later accepted write can become current while earlier writes remain
-in history.
+服务通过单一 API 对写入进行串行化处理，绝不丢弃已提交的 Revision。后续被接受的
+写入可以成为当前版本，较早的写入则继续保留在历史中。
 
-The API should support an optional expected-current value, such as a Revision
-number or entity tag. A mismatch can produce a conflict response instead of
-silently accepting a write based on stale input. The exact default is tracked
-in [08-open-questions.md](08-open-questions.md).
+API 应支持可选的预期当前值，例如 Revision 编号或实体标签。值不匹配时可返回冲突，
+而不是悄然接受基于过期输入的写入。具体默认行为记录在
+[08-open-questions.md](08-open-questions.md) 中。
 
-## Moving content
+## 移动内容
 
-Moving a Page to another Book changes Page metadata; it does not create a new
-copy or rewrite Revision bodies. The move itself is an audit event.
+把 Page 移到另一个 Book 只改变 Page 元数据，不会创建副本或重写 Revision 正文。
+移动本身是一条审计事件。
 
-## Soft deletion
+## 软删除
 
-Normal deletion sets a tombstone such as `deleted_at`. Deleted Pages are hidden
-from default reads and search but can be restored by an authorized actor.
+普通删除会设置 `deleted_at` 等墓碑标记。已删除的 Page 不出现在默认读取和搜索中，
+但获授权的操作者可以恢复它。
 
-## Administrative erasure
+## 管理性擦除
 
-Immutable history cannot mean that leaked credentials, illegal content, or
-personal data are impossible to remove. A future implementation must provide a
-rare, strongly authorized erasure path with impact preview, audit metadata, and
-backup guidance. Erasure semantics must be settled before a supported release.
+不可变历史不应意味着泄漏的凭据、非法内容或个人数据永远无法删除。后续实现必须
+提供少见且严格授权的擦除路径，包含影响预览、审计元数据和备份指引。发布受支持
+版本前必须确定擦除语义。
 
-## Backup and export
+## 备份与导出
 
-Application-level export and tested restore are required. Version-control tools
-may store exported text snapshots, but they are not the database transaction
-engine and must not be presented as the only disaster-recovery mechanism.
+必须提供应用层导出和经过测试的恢复。版本控制工具可以保存导出的文本快照，但它们
+不是数据库事务引擎，也不能被描述为唯一的灾难恢复机制。

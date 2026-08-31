@@ -1,62 +1,52 @@
-# Stable identifiers and references
+# 稳定标识符与引用
 
-## Page identifier
+## Page 标识符
 
-The current design direction uses a sortable occurrence-time component and a
-short ASCII slug:
+当前设计方向使用一个可排序的事件发生时间部分和一个简短 ASCII slug：
 
 ```text
 <occurrence-time>-<short-english-slug>
 ```
 
-An exact example is intentionally omitted until the timestamp encoding,
-timezone, collision handling, and normalization rules are decided. These are
-compatibility-sensitive details, not formatting trivia.
+在时间戳编码、时区、冲突处理和规范化规则确定前，本文有意不提供准确示例。这些是
+影响兼容性的细节，不只是格式偏好。
 
-## Time semantics
+## 时间语义
 
-Occurrence time describes when the documented event happened or was assigned,
-not when the database row was created or last updated. A caller may provide it
-during initial ingestion. The service also records independent creation and
-update timestamps.
+事件发生时间表示所记录事件发生或被指定的时间，不是数据库行创建或最后更新的时间。
+调用方可在首次摄取时提供该值。服务还会另外记录创建和更新时间戳。
 
-## Stability
+## 稳定性
 
-A Page ID is intended to remain stable for the Page's lifetime. Changing it is
-an exceptional administrative migration that must:
+Page ID 应在 Page 的整个生命周期内保持稳定。更改 ID 是例外的管理迁移，必须：
 
-- detect collisions before writing;
-- update derived reference indexes transactionally;
-- preserve an alias or redirect when practical;
-- emit an audit event;
-- never rewrite historical Revision bodies in place.
+- 写入前检测冲突；
+- 在一个事务中更新派生引用索引；
+- 在可行时保留别名或重定向；
+- 生成审计事件；
+- 绝不原地重写历史 Revision 正文。
 
-Whether source Markdown references are rewritten or old aliases remain valid is
-an open migration decision.
+是否重写源 Markdown 中的引用，或继续让旧别名有效，仍是开放的迁移决定。
 
-## Human title
+## 供人阅读的标题
 
-The human-readable title is a separate field and can use any supported language.
-Changing the title does not normally change the Page ID.
+供人阅读的标题是单独字段，可以使用任何受支持语言。更改标题通常不会改变 Page ID。
 
-## Content reference syntax
+## 内容引用语法
 
-Page bodies reference other Pages with wiki-style syntax:
+Page 正文使用 Wiki 风格语法引用其他 Page：
 
 ```text
 [[stable-page-id]]
 ```
 
-A future extension may add optional display text or a specific Revision target.
-The parser must define escaping and malformed-reference behavior before the
-syntax becomes a compatibility contract.
+后续扩展可以增加可选显示文字或指定 Revision 目标。在该语法成为兼容性契约前，
+解析器必须定义转义和格式错误引用的处理行为。
 
-## Reference index
+## 引用索引
 
-Reference relationships are derived from Revision content. The service may
-materialize a reverse index for queries such as “what links here?”, but the
-index is rebuildable and never replaces source Markdown.
+引用关系派生自 Revision 内容。服务可以为“哪些内容链接到这里？”之类的查询生成
+反向索引，但索引必须可重建，且绝不替代源 Markdown。
 
-Other domain relationships that require their own lifecycle or authorization
-may still deserve structured fields. The wiki reference syntax should not be
-used to avoid modeling essential invariants.
+需要独立生命周期或授权的其他领域关系，仍可能适合使用结构化字段。不能用 Wiki
+引用语法来回避对关键不变量建模。

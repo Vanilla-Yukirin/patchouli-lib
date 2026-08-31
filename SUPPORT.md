@@ -1,12 +1,10 @@
-# Support
+# 支持
 
-PatchouliLib is currently a design-stage community project.
+PatchouliLib 当前仍是设计阶段的社区项目。
 
-- Use **Issues** for reproducible defects and scoped feature requests.
-- Use **Discussions** for architecture questions, use cases, and open-ended
-  design exploration.
-- Use GitHub private vulnerability reporting for security issues.
+- 使用 **Issues** 报告可复现缺陷和范围明确的功能请求。
+- 使用 **Discussions** 讨论架构问题、使用场景和开放式设计探索。
+- 安全问题请使用 GitHub 私密漏洞报告。
 
-Before posting, search existing threads and remove credentials, private content,
-personal infrastructure details, and production data. There are no guaranteed
-response times or commercial support commitments.
+发布内容前，请搜索现有主题，并移除凭据、私有内容、个人基础设施细节和生产数据。
+项目不保证响应时间，也不提供商业支持承诺。

@@ -1,73 +1,63 @@
-# Retrieval interfaces and hosted-agent responsibilities
+# 检索接口与托管 Agent 的职责
 
-## Retrieval boundary
+## 检索边界
 
-Queries should normally select a Section first. This keeps policy evaluation,
-result interpretation, and resource use predictable. Cross-Section search may
-be added later as an explicit privileged operation.
+查询通常应先选择一个 Section。这样能让策略评估、结果解释和资源使用保持可预测。
+跨 Section 搜索以后可以作为明确的特权操作加入。
 
-## Direct query interface
+## 直接查询接口
 
-The access layer should support structured operations such as:
+访问层应支持以下结构化操作：
 
-- list Sections and Books;
-- list Pages in a Book, optionally with summaries;
-- search Page metadata and current Revision text within a Section;
-- filter by Tag, type, status, or time;
-- fetch a Page or an explicitly requested Revision by ID;
-- return stable citations with every result.
+- 列出 Section 和 Book；
+- 列出 Book 中的 Page，并可选择包含摘要；
+- 在一个 Section 内搜索 Page 元数据和当前 Revision 文本；
+- 按 Tag、类型、状态或时间过滤；
+- 按 ID 获取 Page 或明确指定的 Revision；
+- 每项结果都返回稳定引用。
 
-Regular expressions, full-text syntax, and semantic queries need distinct input
-fields and resource limits. User input must not be interpolated into a database
-or shell expression.
+正则表达式、全文检索语法和语义查询需要不同的输入字段与资源限制。不得把用户输入
+插入数据库或 Shell 表达式中。
 
-## Retrieval pipeline
+## 检索流水线
 
-A baseline pipeline can combine:
+基线流水线可以组合：
 
-1. Section and authorization filtering;
-2. title, Tag, and full-text candidate recall;
-3. summary or Derived Fact recall;
-4. deterministic ranking and result limits;
-5. optional model-assisted synthesis with source citations.
+1. Section 和授权过滤；
+2. 标题、Tag 和全文候选召回；
+3. 摘要或 Derived Fact 召回；
+4. 确定性排序和结果数量限制；
+5. 可选的模型辅助综合，并附来源引用。
 
-Embedding retrieval is an optional extension. It must demonstrate measurable
-value over the baseline and must not require an external provider by design.
+嵌入检索属于可选扩展。它必须证明比基线有可衡量的价值，且在设计上不得强制依赖
+外部提供方。
 
-## Hosted agent
+## 托管 Agent
 
-A deployment may configure a hosted retrieval agent. Its responsibilities are:
+部署可以配置托管检索 Agent，其职责包括：
 
-- plan and execute bounded searches;
-- request additional source content only when needed;
-- produce short answers with Page or Revision citations;
-- generate summaries or organization suggestions;
-- expose which provider and retrieval steps were used.
+- 规划并执行范围有限的搜索；
+- 只在需要时请求额外源内容；
+- 生成带 Page 或 Revision 引用的简短回答；
+- 生成摘要或整理建议；
+- 说明使用了哪个提供方和哪些检索步骤。
 
-The public contract is provider-neutral. No model name, account, endpoint, or
-deployment region is a project-wide requirement.
+公开契约与提供方无关。任何模型名称、账号、端点或部署区域都不是项目范围的要求。
 
-## Calling agents
+## 调用方 Agent
 
-Local tools, MCP clients, and agent skills act as authenticated callers. They
-can create Pages, append Revisions, search, download, and respond to suggestions
-within their assigned scopes.
+本地工具、MCP 客户端和 Agent Skill 以通过身份验证的调用方身份工作。它们可以在
+获授作用域内创建 Page、追加 Revision、搜索、下载和回应建议。
 
-Large text should be uploaded from a file or stream rather than embedded in
-multiple layers of command-line JSON. Credentials belong in an operating-system
-secret store or injected environment variable, never in request examples or
-tracked configuration.
+大段文本应从文件或数据流上传，而不是嵌套在多层命令行 JSON 中。凭据应放在操作
+系统机密存储中或通过环境变量注入，绝不能出现在请求示例或受跟踪配置中。
 
-## Import
+## 导入
 
-The core API should expose idempotent, observable single-item writes. Bulk
-imports can initially be client-side orchestration over those primitives. A
-dedicated bulk protocol should be added only when measurements show it is
-needed.
+核心 API 应提供幂等、可观测的单项写入。初期可由客户端在这些原语之上编排批量导入。
+只有指标证明有必要时，才应添加专用批量协议。
 
-## Evaluation
+## 评估
 
-Retrieval quality needs a versioned evaluation corpus containing synthetic or
-redistributable documents, questions, relevant-source judgments, latency, and
-resource measurements. Ranking changes should be evaluated against this corpus
-before they become defaults.
+检索质量需要一套带版本的评估语料，其中包含合成或可再分发文档、问题、相关来源
+判断、延迟和资源测量。排序变更成为默认方案前，应先在该语料上评估。

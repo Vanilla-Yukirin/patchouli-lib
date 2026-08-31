@@ -1,35 +1,30 @@
 # PatchouliLib
 
-PatchouliLib is a self-hostable knowledge library for people and software
-agents. It is designed to collect durable source material, preserve revision
-history, and expose retrieval and citation primitives through agent-friendly
-interfaces.
+PatchouliLib 是一个面向人类与软件 Agent 的可自托管知识库。它用于收拢可长期保存的
+原始资料、保留版本历史，并通过适合 Agent 调用的接口提供检索与引用能力。
 
 > [!IMPORTANT]
-> PatchouliLib has a runnable engineering bootstrap, typed Agent client, CLI,
-> stdio MCP adapter, scoped archive mutation routes, non-search retrieval
-> routes, and experimental local backup/verify/fresh-destination restore
-> tooling. Full-text search and a supported backup/restore policy are not
-> implemented yet. See the [current roadmap status](ROADMAP.md) for the exact
-> boundary between implemented, experimental, and deferred work.
+> PatchouliLib 已具备可运行的工程骨架、类型化 Agent 客户端、CLI、stdio MCP
+> 适配器、限定范围的归档写入接口、非搜索读取接口，以及实验性的本地备份、校验和
+> “恢复到全新目标”工具。全文检索与受支持的备份恢复策略仍未实现。各项能力究竟
+> 属于“已实现”“实验中”还是“尚未实现”，以[当前路线图状态](ROADMAP.md)为准。
 
-[简体中文](README.zh-CN.md)
+[简体中文兼容入口](README.zh-CN.md)
 
-## Why PatchouliLib?
+## 为什么做 PatchouliLib？
 
-Files and chat archives are easy to create but difficult to reuse across tools
-and machines. A plain repository provides storage, but it does not provide
-stable identities, scoped retrieval, revision-aware citations, or controlled
-access for multiple agents.
+文件和对话归档很容易产生，却很难跨工具、跨设备复用。普通仓库能保存文件，但不
+提供稳定身份、限定范围的检索、带版本语义的引用，也不解决多个 Agent 的受控访问
+问题。
 
-PatchouliLib explores a small set of durable primitives:
+PatchouliLib 围绕一组尽量稳定的小型原语展开：
 
-- a `Library / Section / Book / Page / Revision` content model;
-- immutable revisions, soft deletion, and explicit recovery;
-- summaries, tags, full-text search, and optional derived facts;
-- stable page identifiers and wiki-style `[[page-id]]` references;
-- scoped agent credentials and auditable writes;
-- organization suggestions that never move content without approval.
+- `Library / Section / Book / Page / Revision` 内容模型；
+- 不可变版本、软删除与显式恢复；
+- 摘要、标签、全文检索与可选的信息点提炼；
+- 稳定的 Page 标识符和 Wiki 风格的 `[[page-id]]` 引用；
+- 有作用域的 Agent 凭据和可审计写入；
+- 只给建议、未经批准不移动内容的自动整理机制。
 
 ```mermaid
 flowchart LR
@@ -41,75 +36,66 @@ flowchart LR
     S --> X["Answers with citations"]
 ```
 
-## Design principles
+## 设计原则
 
-1. **The operator owns the data.** The project must remain self-hostable and
-   exportable.
-2. **History is data.** Normal edits create revisions instead of overwriting
-   source material.
-3. **Retrieval is layered.** Start with metadata and full-text search; add
-   embeddings only when they improve measured outcomes.
-4. **Agents are callers, not authorities.** Automated organization produces
-   reviewable suggestions by default.
-5. **Infrastructure is replaceable.** Public design and workflows must not
-   depend on a maintainer's private hosts, accounts, or deployment topology.
+1. **数据属于部署者。** 项目必须可自托管、可导出。
+2. **历史本身就是数据。** 普通修改创建新 Revision，不覆盖原始资料。
+3. **分层检索。** 先从元数据和全文检索开始；只有在指标证明有效时才引入嵌入检索。
+4. **Agent 是调用方，不是最终裁决者。** 自动整理默认只生成可审核的建议。
+5. **基础设施可替换。** 公共设计和工作流不依赖维护者的私有主机、账号或部署拓扑。
 
-## Documentation
+## 文档
 
-The public design source of truth is [docs/README.md](docs/README.md).
+公共设计事实源位于 [docs/README.md](docs/README.md)。
 
-| Area | Document |
+| 领域 | 文档 |
 | --- | --- |
-| Product scope | [Product positioning](docs/01-product-positioning.md) |
-| Core entities | [Library domain model](docs/02-library-domain-model.md) |
-| Data safety | [Page revisions and history](docs/03-page-revision-and-history.md) |
-| Retrieval context | [Distillation and summaries](docs/04-distillation-and-summary.md) |
-| Query interfaces | [Retrieval and hosted agents](docs/05-retrieval-and-cloud-agent.md) |
-| Agent workflow | [Bundled Agent Skill](skills/patchouli-agent/SKILL.md) |
-| Linking | [Identifiers and references](docs/06-identifiers-and-references.md) |
-| Access control | [Authentication and audit](docs/07-authentication-and-audit.md) |
-| Decisions needed | [Open questions](docs/08-open-questions.md) |
-| Organization | [Automatic organization](docs/09-automatic-organization.md) |
+| 产品范围 | [产品定位](docs/01-product-positioning.md) |
+| 核心实体 | [知识库领域模型](docs/02-library-domain-model.md) |
+| 数据安全 | [Page 版本与历史](docs/03-page-revision-and-history.md) |
+| 检索上下文 | [提炼与摘要](docs/04-distillation-and-summary.md) |
+| 查询接口 | [检索与托管 Agent](docs/05-retrieval-and-cloud-agent.md) |
+| Agent 工作流 | [内置 Agent Skill](skills/patchouli-agent/SKILL.md) |
+| 内容链接 | [标识符与引用](docs/06-identifiers-and-references.md) |
+| 访问控制 | [身份验证、授权与审计](docs/07-authentication-and-audit.md) |
+| 待决事项 | [开放问题](docs/08-open-questions.md) |
+| 内容整理 | [自动整理](docs/09-automatic-organization.md) |
 
-The implementation sequence is tracked in [ROADMAP.md](ROADMAP.md).
+实施顺序记录在 [ROADMAP.md](ROADMAP.md) 中。
 
-## Development bootstrap
+## 开发环境验证
 
-With Python 3.13, uv, Node.js 24, and npm installed:
+安装 Python 3.13、uv、Node.js 24 和 npm 后运行：
 
 ```sh
 python scripts/validate.py
 ```
 
-With Docker running, add the image and health smoke test:
+Docker 启动后，可追加镜像构建和回环健康烟雾测试：
 
 ```sh
 python scripts/validate.py --container
 ```
 
-See [development, validation, and delivery](docs/development-and-delivery.md)
-for source startup, Compose, CI, image publishing, and the operator-initiated
-private update contract.
+源码启动、Compose、CI、镜像发布，以及由管理员发起的私有更新契约，见
+[开发、验证与交付](docs/development-and-delivery.md)。
 
-An optional password-protected [web administration console](docs/admin-web-console.md)
-provides initialization, credential lifecycle forms, and Agent/MCP guidance.
-It is disabled by default and has no deployment, Docker, shell, or backup
-restore controls.
+项目还提供一个可选、受密码保护的[网页管理面板](docs/admin-web-console.md)，用于
+初始化、凭据生命周期操作和 Agent/MCP 指引。面板默认关闭，不具备部署、Docker、
+Shell 或备份恢复控制能力。
 
-## Contributing
+## 参与贡献
 
-Design feedback is useful now, especially when it includes a concrete use case
-or failure mode. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening an issue
-or pull request. Community decisions follow [GOVERNANCE.md](GOVERNANCE.md), and
-all participation is covered by the [Code of Conduct](CODE_OF_CONDUCT.md).
+现阶段尤其欢迎带有明确使用场景或失败方式的设计反馈。提交 Issue 或 Pull Request
+前，请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。社区决策遵循
+[GOVERNANCE.md](GOVERNANCE.md)，所有参与者都应遵守
+[行为准则](CODE_OF_CONDUCT.md)。
 
-Please do not include credentials, private documents, personal hostnames, or
-deployment details in issues, discussions, examples, fixtures, or pull
-requests. See [SECURITY.md](SECURITY.md) for private vulnerability reports.
+不要在 Issue、Discussion、示例、测试数据或 Pull Request 中提交凭据、私有文档、
+个人主机名和部署细节。安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。
 
-## License
+## 许可证
 
-PatchouliLib is available under the [MIT License](LICENSE).
+PatchouliLib 使用 [MIT License](LICENSE)。
 
-PatchouliLib is an independent project and is not affiliated with other
-projects or products that use a similar name.
+PatchouliLib 是独立项目，与其他使用相似名称的项目或产品没有从属关系。

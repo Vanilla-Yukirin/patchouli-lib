@@ -1,6 +1,6 @@
-# Domain model: Library, Section, Book, Page, and Revision
+# 领域模型：Library、Section、Book、Page 与 Revision
 
-## Overview
+## 概览
 
 ```text
 Library
@@ -14,79 +14,69 @@ Library
 └── Derived Fact
 ```
 
-## Library
+## 知识库（Library）
 
-A Library is one logical knowledge service. The first implementation may expose
-one Library per deployment, but the data model should not make future export or
-multiple-library tooling impossible.
+Library 表示一个逻辑知识服务。首个实现可以让每次部署只提供一个 Library，但数据
+模型不应阻碍未来的导出或多 Library 工具。
 
-## Section
+## 分区（Section）
 
-A Section is a stable policy and navigation boundary. Examples include projects,
-research, journals, or conversation archives.
+Section 是稳定的策略和导航边界，例如项目、研究、日志或对话归档。
 
-- Every Book belongs to exactly one Section.
-- Queries should normally select a Section before searching.
-- A Section can define retention, authorization, indexing, and organization
-  policy.
-- Sections are durable categories, not transient search results.
+- 每个 Book 只属于一个 Section。
+- 查询通常应先选择 Section，再执行搜索。
+- Section 可以定义保留、授权、索引和整理策略。
+- Section 是持久分类，不是临时搜索结果。
 
-## Book
+## 书籍（Book）
 
-A Book is a stable context container.
+Book 是稳定的上下文容器。
 
-- A Page belongs to exactly one Book at a time.
-- The target Book must exist before a Page can be created.
-- Moving a Page changes its Book membership without copying or rewriting its
-  Revision history.
-- Book creation is inexpensive, but existing Book identity remains stable.
-- Split and merge operations are explicit, auditable workflows.
+- Page 在任意时刻只属于一个 Book。
+- 创建 Page 前，目标 Book 必须已经存在。
+- 移动 Page 只改变其 Book 归属，不复制或重写 Revision 历史。
+- 创建 Book 的成本较低，但已有 Book 的身份保持稳定。
+- 拆分和合并是明确、可审计的工作流。
 
-## Page
+## 页面（Page）
 
-A Page is the smallest independently addressable document. Proposed fields
-include:
+Page 是可单独寻址的最小文档。建议字段包括：
 
-- stable ID and human-readable title;
-- owning Book and content type;
-- lifecycle status and current Revision;
-- summary, Tags, and Source metadata;
-- created and updated timestamps.
+- 稳定 ID 和便于人类阅读的标题；
+- 所属 Book 和内容类型；
+- 生命周期状态和当前 Revision；
+- 摘要、Tag 和 Source 元数据；
+- 创建与更新时间戳。
 
-## Revision
+## 版本（Revision）
 
-A Revision is an immutable Page body plus change metadata. The Page points to
-its current Revision; old Revisions remain addressable through explicit history
-operations. See [03-page-revision-and-history.md](03-page-revision-and-history.md).
+Revision 是不可变的 Page 正文及其变更元数据。Page 指向当前 Revision；旧 Revision
+仍可通过明确的历史操作访问。详见
+[03-page-revision-and-history.md](03-page-revision-and-history.md)。
 
-## Tag
+## 标签（Tag）
 
-Tags are many-to-many retrieval hints. They do not replace Section or Book
-membership, and they must not be treated as an authorization mechanism unless
-the access-control design explicitly evaluates them.
+Tag 是多对多的检索提示，不能替代 Section 或 Book 归属。除非访问控制设计明确评估
+过，否则不得把 Tag 当作授权机制。
 
-Tag recommendation may be automated. Applying a recommended Tag is a separate,
-auditable write.
+Tag 推荐可以自动生成。应用一个推荐 Tag 是另外一次可审计写入。
 
-## Shelf
+## 书架（Shelf）
 
-A Shelf is a saved projection over Books. It owns no source content. Deleting a
-Shelf cannot delete a Book or Page. Manual versus automatically maintained
-Shelves remains an open product decision.
+Shelf 是保存下来的 Book 投影视图，不拥有任何源内容。删除 Shelf 不能删除 Book 或
+Page。Shelf 应由用户手动维护还是自动维护，仍是开放的产品问题。
 
-## Source
+## 来源（Source）
 
-Source records describe provenance such as an original URL, import identifier,
-or capture time. Source metadata must not silently grant permission to copy or
-redistribute the referenced material.
+Source 记录描述来源，例如原始 URL、导入标识符或抓取时间。Source 元数据不得暗示
+用户已经获得复制或再分发所引用材料的许可。
 
-## Derived Fact
+## 派生事实（Derived Fact）
 
-A Derived Fact is a short, rebuildable statement extracted from one or more
-Pages. It keeps explicit source links and is never the canonical replacement
-for its source Revisions.
+Derived Fact 是从一个或多个 Page 中提取的简短、可重新生成的陈述。它保留明确的
+来源链接，绝不会成为其源 Revision 的规范替代品。
 
-## Relational sketch
+## 关系模型草图
 
 ```text
 sections(id, name, description, policy, created_at, updated_at)
@@ -104,5 +94,4 @@ shelves(id, name, query_spec, updated_at)
 audit_events(id, actor_id, action, resource_type, resource_id, created_at)
 ```
 
-This sketch is not a migration or implementation contract. Types, constraints,
-and indexes require a public storage proposal.
+这份草图不是迁移或实现契约。数据类型、约束和索引仍需通过公开存储提案确定。

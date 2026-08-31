@@ -1,114 +1,99 @@
-# Roadmap
+# 路线图
 
-PatchouliLib is design-first. Milestones describe capability order, not delivery
-dates or promises.
+PatchouliLib 以设计为先。里程碑描述能力的先后顺序，不代表交付日期或承诺。
 
-## How to read this roadmap
+## 如何阅读本路线图
 
-This status describes the public repository at commit
-`1581709d857b6e0c1a64197e649e382779145b2a`. It deliberately separates three
-states:
+这里的状态描述提交 `1581709d857b6e0c1a64197e649e382779145b2a` 时的公开仓库。
+文档有意区分三种状态：
 
-- **implemented**: code and automated validation exist in the repository;
-- **experimental or Proposed**: evidence or bounded tooling exists, but it is
-  not yet a supported compatibility or recovery promise;
-- **not implemented**: the capability is absent or deliberately returns an
-  unavailable response.
+- **已实现（implemented）**：仓库中已有代码和自动验证；
+- **实验中或提案中（Proposed）**：已有证据或范围有限的工具，但尚未形成受支持的
+  兼容性或恢复承诺；
+- **尚未实现（not implemented）**：该能力不存在，或会有意返回不可用响应。
 
-Implementation does not accept a public proposal. Accepted decisions remain
-listed under `docs/decisions/`; the FTS and backup/restore documents under
-`docs/proposals/` remain Proposed.
+实现某项功能并不等于接受公开提案。已接受的决策仍列在 `docs/decisions/` 下；
+`docs/proposals/` 下的 FTS 和备份恢复文档仍处于 **提案中（Proposed）**。
 
-## Milestone 0: design contract
+## 里程碑 0：设计契约
 
-**Status: in progress.**
+**状态：进行中。**
 
-- Resolve the blocking questions in [docs/08-open-questions.md](docs/08-open-questions.md).
-- Define storage invariants and threat model.
-- Publish an initial API contract and compatibility policy.
-- Implement the accepted runtime, database, validation, and delivery baseline.
+- 解决 [docs/08-open-questions.md](docs/08-open-questions.md) 中的阻塞问题。
+- 定义存储不变量和威胁模型。
+- 发布初始 API 契约和兼容性策略。
+- 实现已接受的运行时、数据库、验证和交付基线。
 
-Implemented evidence includes Python 3.13, FastAPI, SQLite, Alembic migrations,
-locked local validation, OCI publishing, an operator-initiated private update
-helper, RFC 9457-style errors, request IDs, signed retrieval cursors, and
-idempotent create/revise operations. The current HTTP behavior is tested, but a
-supported-version compatibility policy and several data-safety decisions remain
-Milestone 0 work.
+现有实现证据包括 Python 3.13、FastAPI、SQLite、Alembic 迁移、锁定依赖的本地验证、
+OCI 发布、由管理员发起的私有更新辅助工具、RFC 9457 风格错误、请求 ID、签名检索
+游标，以及幂等的创建和修订操作。当前 HTTP 行为已有测试，但受支持版本的兼容性
+策略和若干数据安全决定仍属于里程碑 0 的工作。
 
-## Milestone 1: durable core
+## 里程碑 1：持久核心
 
-**Status: partially implemented.**
+**状态：部分实现。**
 
-- Implement Section, Book, Page, Revision, Tag, and Source persistence.
-- Support create, read, revise, move, soft-delete, export, and restore flows.
-- Add transactional audit records and administrative data erasure.
-- Prove backup and restore behavior with automated tests.
+- 实现 Section、Book、Page、Revision、Tag 和 Source 的持久化。
+- 支持创建、读取、修订、移动、软删除、导出和恢复流程。
+- 添加事务性审计记录和管理性数据擦除。
+- 用自动测试证明备份和恢复行为。
 
-Implemented now:
+当前已实现：
 
-- Library, Section, Book, Page, immutable Revision, stable Page identifier, and
-  Source persistence;
-- protected Page creation and revision append routes with optimistic
-  concurrency, exact citations, idempotent replay, and audit records;
-- protected non-search reads for Sections, Books, Page listings, current Page
-  content, and Revision history.
+- Library、Section、Book、Page、不可变 Revision、稳定 Page 标识符和 Source 持久化；
+- 受保护的 Page 创建和 Revision 追加接口，包含乐观并发、准确引用、幂等重放和
+  审计记录；
+- 对 Section、Book、Page 列表、当前 Page 内容和 Revision 历史的受保护非搜索读取。
 
-Still incomplete:
+尚未完成：
 
-- Tag persistence;
-- Page move, soft-delete, content restore, and export flows;
-- administrative erasure across live data, history, indexes, exports, and
-  backups.
+- Tag 持久化；
+- Page 移动、软删除、内容恢复和导出流程；
+- 跨在线数据、历史、索引、导出和备份的管理性擦除。
 
-Experimental backup creation, verification, and restore into a new empty
-destination have unit and Linux container-smoke evidence. The proposal remains
-Proposed, so real-data restore, in-place replacement, point-in-time recovery,
-and migration activation are not supported operations.
+实验性备份创建、校验和“恢复到新的空目标”已有单元测试和 Linux 容器烟雾测试
+证据。相关提案仍处于 **提案中（Proposed）**，因此真实数据恢复、原地替换、
+时间点恢复和迁移启用都不是受支持操作。
 
-## Milestone 2: agent access
+## 里程碑 2：Agent 访问
 
-**Status: the bounded access path is implemented.**
+**状态：范围有限的访问路径已实现。**
 
-- Publish a CLI and an MCP-compatible adapter.
-- Add scoped credentials, rotation, and revocation.
-- Provide idempotent import primitives and structured error responses.
+- 发布 CLI 和兼容 MCP 的适配器。
+- 添加有作用域的凭据、轮换和吊销。
+- 提供幂等导入原语和结构化错误响应。
 
-The repository now includes a typed Python client, Agent CLI, stdio MCP adapter,
-bundled Agent Skill, local operator CLI, password-protected administration
-console, scoped Section grants, credential expiry/recovery/revocation, and
-structured client-side protocol validation. Packaged synthetic end-to-end tests
-exercise the supported create, replay, revise, list, current, and history path.
+仓库目前包含类型化 Python 客户端、Agent CLI、stdio MCP 适配器、内置 Agent Skill、
+本地管理员 CLI、受密码保护的管理面板、限定 Section 的授权、凭据到期/恢复/吊销，
+以及结构化客户端协议验证。使用安装后软件包的合成端到端测试覆盖了受支持的创建、
+重放、修订、列表、当前内容和历史路径。
 
-This does not yet establish a stable external release or complete every future
-credential-policy question.
+这些实现尚未形成稳定的对外版本，也没有解决所有后续凭据策略问题。
 
-## Milestone 3: retrieval
+## 里程碑 3：检索
 
-**Status: exact non-search retrieval is implemented; full-text search is not.**
+**状态：准确的非搜索读取已实现；全文检索尚未实现。**
 
-- Add Section-scoped full-text search, tags, and summaries.
-- Establish a relevance evaluation corpus and measurable baselines.
-- Add provider-neutral agent-assisted retrieval behind explicit configuration.
+- 添加限定 Section 的全文检索、标签和摘要。
+- 建立相关性评估语料和可衡量的基线。
+- 在明确配置后添加与提供方无关的 Agent 辅助检索。
 
-Five protected non-search read routes and integrity-protected cursor pagination
-are implemented. A redistributable FTS5 evaluator and a detailed alpha proposal
-exist, but the proposal remains Proposed. The protected search route therefore
-fails explicitly as `search_unavailable`; there is no production FTS migration,
-tag retrieval, summary generation, embedding retrieval, or model-provider call.
+五个受保护的非搜索读取接口和受完整性保护的游标分页已经实现。仓库中已有可再分发
+的 FTS5 评估器和详细的 Alpha 提案，但该提案仍处于 **提案中（Proposed）**。
+因此受保护的搜索接口会明确返回 `search_unavailable`；目前没有生产 FTS 迁移、
+标签检索、摘要生成、嵌入检索或模型提供方调用。
 
-## Milestone 4: derived knowledge
+## 里程碑 4：派生知识
 
-**Status: not implemented.**
+**状态：尚未实现。**
 
-- Add traceable facts and source links as rebuildable derived data.
-- Evaluate optional vector retrieval against the baseline.
-- Add reviewable organization suggestions with cooldown and audit semantics.
+- 添加可追溯事实及来源链接，并允许重新生成这些派生数据。
+- 依据基线评估可选向量检索。
+- 添加带冷却期和审计语义、可供审查的整理建议。
 
-## Not scheduled
+## 暂未安排
 
-- Hosted multi-tenant service.
-- Automatic content moves without approval.
-- Binary asset storage.
-- A general content browsing and editing web interface. The bounded
-  administration console is implemented, but it is not a reader or editor for
-  stored knowledge.
+- 托管式多租户服务。
+- 未经批准自动移动内容。
+- 二进制资源存储。
+- 通用的内容浏览和编辑网页界面。已实现的受限管理面板不用于阅读或编辑所存知识。

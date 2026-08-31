@@ -1,52 +1,38 @@
-# ADR 0002: operator-initiated private updates
+# ADR 0002：由管理员发起的私有更新
 
-- Status: Accepted
-- Date: 2026-08-23
+- 状态：**已接受（Accepted）**
+- 日期：2026-08-23
 
-## Context
+## 背景
 
-GitHub Actions can validate the repository and publish a verifiable container
-image without knowing how or where a private instance runs. Connecting from a
-public workflow to a private runtime adds long-lived SSH material, target
-metadata, another remote execution path, and failure states that are unrelated
-to whether the image itself is valid.
+GitHub Actions 无需知道私有实例如何运行或位于何处，就能验证仓库并发布可校验的
+容器镜像。从公开工作流连接私有运行环境，会引入长期 SSH 材料、目标元数据、额外的
+远程执行路径，以及与镜像本身是否有效无关的失败状态。
 
-The service also owns a database with schema migrations. Automatically starting
-an older image after a failed update is not a safe general rollback: the
-database may already have moved beyond what that image understands.
+服务还拥有包含数据库结构迁移的数据库。更新失败后自动启动旧镜像并不是普遍安全的
+回滚方式：数据库可能已经迁移到旧镜像无法理解的状态。
 
-## Decision
+## 决定
 
-- GitHub Actions validates the repository, builds the supported container
-  image, publishes exact digests to GHCR, and records provenance. It does not
-  connect to a private runtime.
-- A private update begins only after an operator separately logs in to the
-  runtime and explicitly selects an accepted `repository@sha256:digest`.
-- `deploy/manual-update.sh` is a local helper. It accepts exactly one image
-  argument, validates the configured repository and canonical digest, validates
-  local Compose configuration, pulls and starts the API with health checks, and
-  records the successful image identity.
-- The helper does not read an SSH forced-command variable and does not contain
-  target addresses, accounts, paths, credentials, or deployment topology.
-- A failed update does not automatically start the previously recorded image.
-  Recovery requires an operator to inspect application, migration, and database
-  state and to follow an accepted recovery procedure.
-- The first release of any web administration panel may expose application
-  initialization, local administrative actions, public documentation, Agent
-  instructions, and MCP guidance. It must not control the container runtime,
-  registry authentication, image selection, update, rollback, or host shell.
+- GitHub Actions 验证仓库、构建受支持容器镜像、向 GHCR 发布准确摘要并记录来源
+  证明；它不连接私有运行环境。
+- 只有管理员另行登录运行环境，并明确选择已接受的 `repository@sha256:digest` 后，
+  私有更新才会开始。
+- `deploy/manual-update.sh` 是本地辅助工具。它只接受一个镜像参数，校验已配置仓库和
+  规范摘要，验证本地 Compose 配置，拉取并启动 API、执行健康检查，最后记录成功的
+  镜像身份。
+- 辅助工具不读取 SSH 强制命令变量，也不包含目标地址、账号、路径、凭据或部署拓扑。
+- 更新失败时不会自动启动之前记录的镜像。管理员必须检查应用、迁移和数据库状态；
+  恢复操作必须使用另行审查并接受的流程。
+- 任何网页管理面板的首个版本都可以公开应用初始化、本地管理操作、公开文档、Agent
+  指令和 MCP 指引，但不得控制容器运行时、Registry 身份验证、镜像选择、更新、
+  回滚或主机 Shell。
 
-## Consequences
+## 后果
 
-- The public workflow needs no private SSH key, host fingerprint, target
-  account, port, or deployment enable switch.
-- A passing workflow or published image is not proof that a private instance was
-  updated. Publication and private operation must be reported as separate
-  states.
-- Operators perform fewer updates automatically, but each update has an
-  explicit human-selected digest and a clear authority boundary.
-- Existing GitHub deployment settings become unused only after this change
-  reaches the default branch; removal is a separate manual repository
-  administration action.
-- Database rollback, point-in-time recovery, and live cutover remain governed
-  by separately accepted recovery decisions.
+- 公开工作流不需要私有 SSH 密钥、主机指纹、目标账号、端口或部署启用开关。
+- 工作流通过或镜像已发布，不代表私有实例已经更新；发布与私有运行必须分别报告。
+- 管理员自动执行的更新更少，但每次更新都有明确的人为选择摘要和清晰的权限边界。
+- 只有此改动进入默认分支后，现有 GitHub 部署设置才不再使用；移除它们是独立的
+  手动仓库管理操作。
+- 数据库回滚、时间点恢复和在线切换仍受需要另行接受的恢复决定约束。

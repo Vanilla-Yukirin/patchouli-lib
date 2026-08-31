@@ -1,59 +1,53 @@
-# Distillation, derived facts, and summaries
+# 提炼、派生事实与摘要
 
-## Motivation
+## 动机
 
-Repeatedly loading every full document is expensive and often unnecessary.
-PatchouliLib separates canonical source text from smaller retrieval aids.
+反复加载每份完整文档成本很高，而且往往没有必要。PatchouliLib 将规范源文本与
+体量更小的检索辅助数据分开处理。
 
-## Page summary
+## Page 摘要
 
-A summary is a short Page attribute used during recall.
+摘要是用于召回的简短 Page 属性。
 
-- A caller may provide a summary with a new Revision.
-- When absent, a configured background worker may generate one asynchronously.
-- Generation state must be explicit: pending, ready, or failed.
-- Failed generation can be retried without blocking access to source content.
-- A summary is derived data and can be rebuilt.
+- 调用方可以随新 Revision 提供摘要。
+- 未提供摘要时，配置好的后台工作进程可以异步生成。
+- 生成状态必须明确：等待中、已就绪或失败。
+- 生成失败可以重试，且不能阻塞对源内容的访问。
+- 摘要是派生数据，可以重新生成。
 
-Implementations must retain the generator identity, configuration version, and
-source Revision so stale summaries can be detected.
+实现必须保留生成器身份、配置版本和源 Revision，以便识别过期摘要。
 
-## Derived facts
+## 派生事实
 
-A Derived Fact is a concise statement extracted from one or more source
-Revisions.
+Derived Fact 是从一个或多个源 Revision 中提取的简洁陈述。
 
-- It has its own identifier and lifecycle.
-- Every fact links to the exact source Revisions that support it.
-- It is a cache and navigation aid, not canonical evidence.
-- Source changes mark dependent facts stale before they are regenerated.
-- Deleting or hiding a source must update retrieval visibility for its facts.
+- 它有自己的标识符和生命周期。
+- 每项事实都链接到支持它的准确源 Revision。
+- 它是缓存和导航辅助，不是规范证据。
+- 来源变化后，相关事实应先标记为过期，再重新生成。
+- 删除或隐藏来源时，必须同步更新其事实的检索可见性。
 
-The triggers for create, update, invalidation, and deletion remain open.
+创建、更新、失效和删除的触发条件仍是开放问题。
 
-## Retrieval layers
+## 检索层
 
-Candidate recall inputs include:
+候选召回输入包括：
 
-- Section and Book context;
-- titles and summaries;
-- Tags;
-- full-text search;
-- Derived Facts;
-- optional embeddings evaluated against a measured baseline.
+- Section 和 Book 上下文；
+- 标题和摘要；
+- Tag；
+- 全文检索；
+- Derived Fact；
+- 依据可衡量基线评估的可选嵌入检索。
 
-No one layer should be described as authoritative. Responses that synthesize
-knowledge must cite Pages or exact Revisions.
+任何一层都不应被描述为权威来源。综合知识的响应必须引用 Page 或准确 Revision。
 
-## References
+## 引用
 
-Page bodies can contain `[[stable-page-id]]` references. A reference index is
-derived by scanning content after an accepted write. See
-[06-identifiers-and-references.md](06-identifiers-and-references.md).
+Page 正文可以包含 `[[stable-page-id]]` 引用。一次写入被接受后，系统扫描内容以生成
+引用索引。详见 [06-identifiers-and-references.md](06-identifiers-and-references.md)。
 
-## Safety and privacy
+## 安全与隐私
 
-Generated summaries and facts inherit the visibility of their source content.
-A background model must not receive content unless the deployment's configured
-data policy permits that provider and request. Provider calls must be explicit,
-auditable, and replaceable.
+生成的摘要和事实继承其源内容的可见性。只有部署的数据策略允许相应提供方和请求时，
+后台模型才能接收内容。提供方调用必须明确、可审计且可替换。

@@ -1,347 +1,265 @@
-# FTS5 current-Revision retrieval for alpha
+# Alpha 阶段基于 FTS5 的当前 Revision 检索
 
-Status: **Proposed**
+状态：**提案中（Proposed）**
 
-## Decision request and gate
+## 待决定事项与门槛
 
-Adopt an application-tokenized SQLite FTS5 index as the alpha candidate-recall
-baseline for Section-scoped search over current Revisions. Caller text is always
-literal data, never FTS5 syntax. The index is derived state and may be rebuilt
-from authoritative Page and Revision rows.
+建议采用由应用生成词元的 SQLite FTS5 索引，作为 Alpha 阶段对当前 Revision 进行
+限定 Section 搜索的候选召回基线。调用方文本始终是字面数据，绝不是 FTS5 语法。
+索引属于派生状态，可以从权威的 Page 和 Revision 行重新构建。
 
-**No FTS migration may land while this proposal remains Proposed.** Acceptance
-requires a public maintainer-reviewed change of this status to **Accepted**.
-Merging an evaluation script, opening a pull request, or passing CI does not by
-itself accept the production choice.
+**本提案仍为 Proposed 时，不得合入 FTS 迁移。** 接受本方案需要维护者公开审查并
+把状态改为 **已接受（Accepted）**。合并评估脚本、发起 Pull Request 或通过 CI，
+本身都不代表生产方案已被接受。
 
-This proposal chooses an alpha index representation and a bounded operational
-query path. It does not make ranking scores, linguistic relevance, or snippet
-format a stable public compatibility promise.
+本提案选择 Alpha 索引表示和资源受限的运行查询路径，不会把排序分数、语言相关性
+或摘要片段格式变成稳定的公开兼容性承诺。
 
-## Accepted invariants
+## 已接受的不变量
 
-This proposal preserves decisions that are already public:
+本提案保留已有公开决定：
 
-- a query selects and authorizes one Section before recall;
-- search considers only each Page's current Revision;
-- every result identifies the exact Page and Revision that was searched;
-- the current pointer, derived search row, mutation audit event, and successful
-  idempotency record change in one transaction;
-- caller input is never interpolated into SQL or an FTS expression;
-- query text stays in a POST body and out of ordinary logs;
-- result ordering is deterministic for an unchanged dataset; and
-- the public contract remains independent of deployment target and model
-  provider.
+- 查询会在召回前选择并授权一个 Section；
+- 搜索只考虑每个 Page 的当前 Revision；
+- 每项结果都标明被搜索的准确 Page 和 Revision；
+- 当前指针、派生搜索行、变更审计事件和成功的幂等记录在同一事务中变化；
+- 调用方输入绝不插入 SQL 或 FTS 表达式；
+- 查询文字保存在 POST 正文中，不进入普通日志；
+- 数据集不变时，结果顺序具有确定性；
+- 公开契约与部署目标和模型提供方无关。
 
-The accepted Agent MVP remains the source for authorization, hidden-resource,
-pagination, and citation behavior. This proposal does not widen those scopes.
+已接受的 Agent MVP 仍是授权、隐藏资源、分页和引用行为的事实源。本提案不会扩大
+这些作用域。
 
-## Evidence
+## 证据
 
-### Method
+### 方法
 
-The redistributable evaluator compares three SQLite FTS5 candidates on six
-original synthetic Chinese/English documents and 15 relevance judgments:
+可再分发的评估器使用 6 份原创合成中英文文档和 15 项相关性判断，对比三种 SQLite
+FTS5 候选方案：
 
-- plain `unicode61` over original text;
-- SQLite's built-in `trigram` tokenizer; and
-- application-generated tokens stored in a `unicode61` table.
+- 对原文使用普通 `unicode61`；
+- 使用 SQLite 内置的 `trigram` 分词器；
+- 把应用生成的词元存入 `unicode61` 表。
 
-The fixture covers one-, two-, and three-or-more-character Han queries, mixed
-English/Han input, an English phrase, punctuation, and FTS-looking text such as
-`AND`, `prefix*`, column selectors, quotes, parentheses, and `NEAR`. It also
-checks replacement of old current content, repeated-query ordering, and a
-stable Page-ID tie break. Unicode 15.1 regressions separately exercise
-multi-character runs from Extensions I, G, and H and verify generation of
-one-, two-, and three-character grams.
+测试数据覆盖单个、两个和三个及以上汉字的查询、中英混合输入、英文短语、标点，
+以及 `AND`、`prefix*`、列选择器、引号、括号和 `NEAR` 等看起来像 FTS 的文字。
+测试还检查替换旧的当前内容、重复查询排序和稳定的 Page ID 决胜排序。Unicode 15.1
+回归测试另外覆盖扩展区 I、G 和 H 的多字符连续文本，并验证一元、二元和三元词组生成。
 
-Every synthetic document carries a Section identity. The isolation probe first
-ranks two same-term documents in the authorized Section, then adds 12 stronger
-same-term documents in a different Section. It verifies that the authorized
-result count and rank order are unchanged, `LIMIT 1` still returns the same
-authorized Page, and no other-Section Page appears. A separate query against the
-other synthetic Section proves those decoys were present and searchable, rather
-than accidentally absent from the index.
+每份合成文档都带有 Section 身份。隔离探针先对已授权 Section 中两份含相同词项的
+文档排序，再向另一个 Section 添加 12 份相关性更强、包含相同词项的文档。探针验证
+已授权结果的数量和顺序不变、`LIMIT 1` 仍返回同一个已授权 Page，且不会出现其他
+Section 的 Page。另一次针对该合成 Section 的查询证明这些干扰项确实存在并可被搜索，
+而不是意外缺失于索引。
 
-For a small resource comparison, the evaluator deterministically replicates the
-fixture to 384 documents. It records compacted database size above an identical
-non-FTS baseline and wall-clock build, current-document update, and query
-latency. Timings are diagnostic observations, not release thresholds or
-cross-machine guarantees.
+为进行小规模资源比较，评估器以确定方式把测试数据复制到 384 份文档。它记录相对
+相同非 FTS 基线的压缩数据库增量，以及构建、更新当前文档和查询的实际耗时。耗时只
+是诊断观察值，不是发布阈值或跨机器保证。
 
-Reproduce the complete report with:
+运行以下命令复现完整报告：
 
 ```sh
 uv run python scripts/evaluate_fts.py --format markdown
 ```
 
-### Quality result
+### 质量结果
 
-On Python 3.13.3, SQLite 3.47.1, and Unicode data 15.1.0, the fixture produced:
+在 Python 3.13.3、SQLite 3.47.1 和 Unicode 数据 15.1.0 上，测试结果如下：
 
-| Candidate | Mean recall | Mean precision | Han 1 | Han 2 | Han 3+ | Mixed | Literal syntax |
+| 候选方案 | 平均召回率 | 平均精确率（precision） | 汉字 1 | 汉字 2 | 汉字 3+ | 混合 | 字面语法 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | `unicode61` | 0.667 | 0.633 | 0.000 | 0.000 | 0.000 | 0.000 | 1.000 |
 | `trigram` | 0.800 | 0.800 | 0.000 | 0.000 | 1.000 | 0.000 | 1.000 |
 | `application_cjk_ngrams` | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
 
-The per-dimension cells are recall. All three candidates replaced an old
-current-document row and produced the same deterministic order on repeated
-queries. The explicit equal-score probe ordered `ranking-a` before
-`ranking-z`. Every candidate also passed the Section-isolation probe: the two
-authorized results retained their original count and order after the 12 stronger
-other-Section rows were added, and the authorized `LIMIT 1` remained unchanged.
+各维度单元格表示召回率。三种候选方案都能替换旧的当前文档行，并在重复查询时给出
+相同的确定性顺序。明确的同分探针把 `ranking-a` 排在 `ranking-z` 前。三种方案也都
+通过 Section 隔离探针：加入其他 Section 中 12 个更强结果后，两个已授权结果仍保持
+原数量和顺序，已授权的 `LIMIT 1` 也没有变化。
 
-The application candidate's literal-syntax precision depends on encoding
-non-whitespace punctuation as data tokens. For example, `prefix*` requires both
-the encoded word and encoded `*`; it does not execute a prefix query or match
-the unpunctuated `prefixable` decoy.
+这套方案在字面语法上的精确率（precision），取决于是否把非空白标点编码为数据词元。例如，`prefix*` 同时
+要求已编码的单词和已编码的 `*`；它不会执行前缀查询，也不会匹配不含标点的
+`prefixable` 干扰项。
 
-### Resource result
+### 资源结果
 
-One representative 384-document run with Section-scoped FTS tokens and the
-precomputed rank-token projection produced the following indicative values.
-Use the command above for the exact current run rather than treating this table
-as a capacity baseline.
+一次具有代表性的 384 文档运行使用限定 Section 的 FTS 词元和预计算排序词元投影，
+得到以下参考值。准确的当前结果应运行上述命令，不要把本表当作容量基线。
 
-| Candidate | Index overhead | Bytes/document | Build median | Update median | Query median | Query p95 |
+| 候选方案 | 索引增量 | 每文档字节数 | 构建中位数 | 更新中位数 | 查询中位数 | 查询 p95 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | `unicode61` | 5,718,016 B | 14,890.667 B | 555.5 ms | 12.3 ms | 2.1 ms | 4.2 ms |
 | `trigram` | 5,951,488 B | 15,498.667 B | 576.3 ms | 13.9 ms | 2.6 ms | 4.7 ms |
 | `application_cjk_ngrams` | 8,622,080 B | 22,453.333 B | 1,032.9 ms | 15.5 ms | 1.3 ms | 4.0 ms |
 
-All candidates include the same precomputed ranking projection, so these values
-measure the complete proposed query path rather than isolated FTS bytes. The
-application candidate used about 1.5 times the bytes per document of
-`unicode61` in this deliberately small corpus. The sample is too small and
-repetitive for capacity planning, but it exposes the direction of the storage
-and build-cost trade-off. Larger representative public corpora and release
-thresholds remain follow-up work.
+所有候选方案都包含相同的预计算排序投影，因此这些值衡量完整的拟议查询路径，而非
+孤立的 FTS 字节。在这个有意设计得很小的语料中，应用方案每文档字节数约为
+`unicode61` 的 1.5 倍。样本过小且重复度太高，不能用于容量规划，但能显示存储和
+构建成本的权衡方向。更大的代表性公开语料和发布阈值属于后续工作。
 
-The resource guardrail probe additionally indexed and queried an exact 2 MiB
-low-entropy synthetic body. A separate exact 2 MiB high-entropy Han body
-crossed the 65,536-derived-token ceiling and failed before any document or
-index row became durable. The probe served a 256-candidate authorized broad
-match while 1,024 same-term candidates existed in another Section, and failed
-closed when that other Section was queried because its own candidate set
-exceeded 256. The recall SQL has no ordering step before `LIMIT 257`; its query
-plan uses no temporary sort, and SQLite VM evidence places the limit counter's
-`DecrJumpZero` before `VNext`, so it stops rather than sorting the complete
-selected-Section match set.
+资源护栏探针还为准确的 2 MiB 低熵合成正文建立索引并执行查询。另一份准确的 2 MiB
+高熵汉字正文超过 65,536 个派生词元上限，在文档或索引行持久化前失败。已授权范围
+返回 256 个候选宽泛匹配，同时另一个 Section 存在 1,024 个同词候选；查询另一个
+Section 时，因它自己的候选集超过 256 而按失败关闭处理。召回 SQL 在 `LIMIT 257`
+之前没有排序步骤，查询计划也不使用临时排序；SQLite VM 证据显示限制计数器的
+`DecrJumpZero` 位于 `VNext` 前，因此会停止，而不是对所选 Section 的完整匹配集排序。
 
-Queries above 2,048 code points or 4,096 UTF-8 bytes failed before
-normalization and token generation. A separate 65-unique-token query failed
-before FTS execution. Query-time ranking read only the bounded candidate IDs
-and precomputed token rows, not original bodies. These are executable alpha
-work bounds, not claims that a 384-document timing sample predicts production
-capacity.
+超过 2,048 个码点或 4,096 个 UTF-8 字节的查询会在规范化和生成词元前失败。另一项
+包含 65 个唯一词元的查询在执行 FTS 前失败。查询时排序只读取有限的候选 ID 和预计算
+词元行，不读取原始正文。这些是可执行的 Alpha 工作量边界，不代表 384 文档耗时样本
+能够预测生产容量。
 
-`LIMIT 257` alone does not bound the internal work needed to find FTS matches:
-two individually common terms can have a very late or empty intersection. The
-evaluator therefore also fixes a hard ceiling of 1,024 searchable Pages per
-Section. Its adversarial Section divides two terms across disjoint halves of
-all 1,024 Pages and executes the empty conjunction. A 1,025th write is rejected
-before derived-state mutation; when an over-limit authoritative row is injected
-to simulate incompatible pre-existing state, search fails before `MATCH` and
-returns no partial hit.
+单独使用 `LIMIT 257` 不能限制查找 FTS 匹配所需的内部工作：两个各自常见的词项
+可能很晚才相交，甚至没有交集。因此评估器还规定每个 Section 最多有 1,024 个可搜索
+Page。对抗性测试把两个词项分别放入全部 1,024 个 Page 的两半，并执行空交集查询。
+第 1,025 次写入会在改变派生状态前被拒绝；如果注入超限权威行来模拟不兼容的既有
+状态，搜索会在 `MATCH` 前失败，不返回部分命中。
 
-## Proposed alpha choice
+## 拟议的 Alpha 方案
 
-### Token and index representation
+### 词元与索引表示
 
-Use `application_cjk_ngrams`, versioned as an internal tokenizer schema:
+使用 `application_cjk_ngrams`，并把它作为内部 tokenizer schema 进行版本管理：
 
-1. normalize indexed and query text with NFKC and Unicode case folding;
-2. encode every contiguous Han run as overlapping one-, two-, and
-   three-character grams;
-3. encode every contiguous non-Han alphanumeric run as one word token;
-4. encode each non-whitespace punctuation code point as literal data; and
-5. hex-encode token payloads behind type/width prefixes before inserting them
-   into an FTS5 `unicode61` table; and
-6. prefix every FTS token with the SHA-256 digest of its Section ID.
+1. 使用 NFKC 和 Unicode 大小写折叠规范化索引文字与查询文字；
+2. 把每段连续汉字编码为重叠的一元、二元和三元词组；
+3. 把每段连续的非汉字字母数字编码为一个单词词元；
+4. 把每个非空白标点码点编码为字面数据；
+5. 插入 FTS5 `unicode61` 表前，在类型/宽度前缀后对词元载荷进行十六进制编码；
+6. 在每个 FTS 词元前添加其 Section ID 的 SHA-256 摘要。
 
-The Han range table is explicitly versioned as Unicode 15.1. It covers CJK
-Unified Ideographs, Extension A, Extensions B through I, Compatibility
-Ideographs, and the Compatibility Supplement. Range changes are tokenizer
-schema changes and require evaluation plus index rebuild; characters outside
-the versioned ranges are not silently promoted to Han merely because a runtime
-classifies them as alphanumeric.
+汉字范围表明确以 Unicode 15.1 进行版本管理，覆盖 CJK Unified Ideographs、
+Extension A、Extensions B 到 I、Compatibility Ideographs 和 Compatibility
+Supplement。范围变化属于 tokenizer schema 变化，需要重新评估并重建索引；版本化
+范围外的字符不会仅因运行时把它归为字母数字就悄然提升为汉字。
 
-Encoding prevents caller content from becoming FTS grammar and avoids relying
-on a system-installed segmentation dictionary. The Section prefix gives each
-Section a disjoint posting vocabulary, so a broad term in another Section does
-not enlarge the selected Section's posting list. It is a namespace prefix, not
-a secret or authorization mechanism. The tokenized columns represent title,
-summary, tags, and current body. Section ID, Page ID, and Revision ID are
-filtering or citation fields, not searchable terms.
+编码可防止调用方内容变成 FTS 语法，也无需依赖系统安装的分词词典。Section 前缀为
+每个 Section 提供互不重叠的倒排词汇，使其他 Section 中的宽泛词项不会扩大所选
+Section 的倒排列表。它是命名空间前缀，不是机密或授权机制。分词后的列表示标题、
+摘要、标签和当前正文。Section ID、Page ID 和 Revision ID 是过滤或引用字段，
+不是可搜索词项。
 
-Section ID is an unindexed FTS column used as a bound equality constraint in the
-same candidate query: `MATCH :compiled_query AND section_id = :section_id`.
-Authorization resolves the Section before this query executes. The Section
-predicate is therefore inside candidate recall and before the application rank
-function, ordering, and `LIMIT`; the implementation must not retrieve globally
-and filter afterward. Counts, scores, cursors, and snippets are computed only
-from the authorized candidate set. The equality constraint remains mandatory
-even though the posting tokens are Section-scoped.
+Section ID 是不建索引的 FTS 列，在同一个候选查询中作为绑定的等值约束：
+`MATCH :compiled_query AND section_id = :section_id`。授权在查询执行前解析 Section。
+因此 Section 谓词位于候选召回内部，并早于应用排序函数、排序和 `LIMIT`；实现不得
+先全局检索再过滤。计数、分数、游标和摘要片段只从已授权候选集计算。即使倒排词元
+已限定 Section，等值约束仍是必需条件。
 
-The FTS index contains exactly one row per searchable Page and names the exact
-current Revision. A companion derived table stores unique unscoped rank tokens
-by Section, Page, field, and token. It is populated when content is accepted;
-search never retokenizes a stored body. A Revision append replaces both derived
-projections in the same write transaction that advances the current pointer.
-Historical Revisions remain fetchable by citation but are not search candidates.
+FTS 索引对每个可搜索 Page 只包含一行，并标明准确的当前 Revision。配套派生表按
+Section、Page、字段和词元保存唯一、未加作用域前缀的排序词元。接受内容时生成该表；
+搜索不会重新为已存正文分词。追加 Revision 时，在推进当前指针的同一写入事务中替换
+两个派生投影。历史 Revision 仍可通过引用获取，但不是搜索候选。
 
-The alpha write path accepts at most 2 MiB of current body content and 65,536
-derived token rows across title, summary, tags, and body. It checks both limits
-before deleting or inserting a derived row. Crossing either limit rejects the
-index update and leaves the authoritative current Revision and prior compatible
-search projection unchanged. This token-row limit also bounds the amplified
-Section-prefixed FTS representation: the index may be several times larger than
-the source bytes, but it cannot grow with an unbounded number of unique Han
-one-, two-, and three-grams from one document. The route-level status and
-Problem Details code for an indexability rejection remain a public contract
-decision and must be fixed before production implementation.
+Alpha 写入路径允许的当前正文最多为 2 MiB；标题、摘要、标签和正文合计最多生成
+65,536 个派生词元行。删除或插入派生行前会检查两个上限。超过任一上限都会拒绝
+索引更新，并保持权威的当前 Revision 和之前兼容的搜索投影不变。词元行上限也限制
+了带 Section 前缀的放大 FTS 表示：索引可以比源字节大数倍，但不会因单份文档包含
+无限数量的唯一汉字一元、二元和三元词组而无限增长。因无法索引而拒绝时，路由层
+状态和 Problem Details 代码仍是公开契约决定，生产实现前必须确定。
 
-The alpha also permits at most 1,024 searchable Pages in one Section. Creation
-or movement of a Page into a full Section fails before changing its derived
-rows. Before every search, an indexed `(section_id, document_id)` count reads at
-most 1,025 rows; a count above 1,024 rejects the query before FTS recall. Given
-the one-current-row-per-Page invariant and Section-prefixed terms, each of at
-most 64 query-token posting lists then contains at most 1,024 entries. This
-bounds even disjoint or late intersections inside FTS; `LIMIT 257` separately
-bounds produced candidates and the rank projection reads at most 256 candidate
-IDs. An index whose FTS row invariant is not proven at open/rebuild time remains
-`search_unavailable` rather than queryable.
+Alpha 阶段还规定一个 Section 最多包含 1,024 个可搜索 Page。向已满 Section 创建
+或移入 Page 会在改变派生行前失败。每次搜索前，带索引的 `(section_id, document_id)`
+计数最多读取 1,025 行；超过 1,024 时，查询会在 FTS 召回前被拒绝。根据每个 Page
+只有一行当前内容和词项带 Section 前缀的不变量，最多 64 个查询词元的每条倒排列表
+随后最多包含 1,024 项。这样即使 FTS 内部出现无交集或很晚才相交的情况，工作量也
+有上限；`LIMIT 257` 另外限制生成的候选，排序投影最多读取 256 个候选 ID。在打开/
+重建时无法证明 FTS 行不变量的索引必须保持 `search_unavailable`，不得查询。
 
-### Literal alpha query grammar
+### Alpha 字面查询语法
 
-The alpha input is one non-empty literal text value of at most 2,048 Unicode
-code points and 4,096 UTF-8 bytes, producing at most 64 unique tokens. The raw
-limits are checked before NFKC normalization, case folding, or token generation,
-so a repeated-token request cannot consume unbounded preprocessing work. There
-is no caller-visible `MATCH`, boolean, prefix, column, phrase, `NEAR`,
-regular-expression, fuzzy, or wildcard grammar. The service produces unique
-encoded tokens and joins them internally with `AND` using bound parameters.
+Alpha 输入是一个非空字面文本值，最多 2,048 个 Unicode 码点和 4,096 个 UTF-8
+字节，并且最多生成 64 个唯一词元。原始上限在 NFKC 规范化、大小写折叠或生成词元
+前检查，避免重复词元请求消耗无界预处理工作。调用方看不到 `MATCH`、布尔、前缀、
+列、短语、`NEAR`、正则表达式、模糊或通配符语法。服务生成唯一编码词元，并通过
+绑定参数在内部以 `AND` 连接。
 
-This is conjunctive token containment, not a promise of phrase order or
-adjacency. Han grams from a longer query can occur in different positions, and
-English words can match across indexed fields. Those limitations must be stated
-in capabilities or search documentation before the route is enabled.
+这里的语义是词元合取包含，不承诺短语顺序或相邻。较长查询中的汉字词组可能出现在
+不同位置，英文单词也可能跨索引字段匹配。启用路由前，必须在能力或搜索文档中说明
+这些限制。
 
-Candidate recall reads the first at most 257 Page IDs from the already
-authorized, Section-scoped posting list without ordering them. Zero through 256
-candidates continue to deterministic ranking; 257 means the 256-candidate alpha
-ceiling was exceeded and the query fails closed without partial results. The
-overflow subset need not be deterministic because it is never returned or
-ranked. Omitting an order before this limit is part of the work bound: ordering
-an unindexed Page ID would require scanning and sorting every match before the
-limit could apply. The public Problem Details status/code for overflow remains
-to be fixed before the search route is advertised; migration code must not
-invent one. The existing result-page maximum remains 100.
+候选召回从已经授权、限定 Section 的倒排列表中读取前 257 个以内的 Page ID，不对
+它们排序。0 到 256 个候选会继续进行确定性排序；257 表示超过 Alpha 的 256 候选
+上限，查询按失败关闭处理，不返回部分结果。溢出子集不会返回或排序，因此无需具有
+确定性。在应用限制前不排序是工作量边界的一部分：对未建索引的 Page ID 排序需要
+扫描并排序所有匹配。对溢出情况使用的公开 Problem Details 状态/代码仍需在搜索
+路由公布前确定；迁移代码不得自行发明。现有结果页上限仍为 100。
 
-The 1,024-Page Section ceiling is an alpha compatibility limit, not merely an
-observability threshold. The service must expose that limit in capabilities
-before enabling search. Raising it requires new public resource evidence and a
-proposal update; silently increasing it would invalidate the posting-work
-bound.
+每 Section 最多 1,024 个 Page 是 Alpha 兼容性限制，不只是可观测性阈值。启用搜索
+前，服务必须在能力中公开该限制。提高上限需要新的公开资源证据和提案更新；悄然
+增加会使倒排工作量边界失效。
 
-### Deterministic alpha ranking
+### 确定性的 Alpha 排序
 
-Do not use FTS5 `bm25` for the alpha rank. Its inverse-document-frequency
-statistics span the whole virtual table, so documents from another Section can
-change an authorized result's score even when the Section predicate excludes
-them from output.
+Alpha 排序不使用 FTS5 `bm25`。它的逆文档频率统计跨整个虚拟表，因此即使 Section
+谓词排除了输出中的其他 Section，其他 Section 的文档仍可能改变已授权结果的分数。
 
-Instead, join the bounded candidate IDs and query tokens to the precomputed
-rank-token projection. For every field, compute the fraction of unique encoded
-query tokens present in that field, then apply fixed logical weights of title
-10, tags 6, summary 4, and body 1. Sort the resulting score descending, followed
-by opaque Page ID ascending as the total-order tie break. Ranking reads no
-original body and has no corpus-frequency input, so another Section cannot
-alter candidate count, score, order, work bound, or `LIMIT`. Numeric scores are
-internal and are not a stable API value.
+替代方案是把有限候选 ID 和查询词元连接到预计算排序词元投影。对每个字段，计算该
+字段中存在的唯一编码查询词元占比，再应用固定逻辑权重：标题 10、标签 6、摘要 4、
+正文 1。按所得分数降序排列，再用不透明 Page ID 升序作为全序决胜条件。排序不读取
+原始正文，也不使用语料频率，因此其他 Section 不会改变候选数量、分数、顺序、工作
+上限或 `LIMIT`。数值分数只供内部使用，不是稳定 API 值。
 
-Any later default that changes token generation, field weights, or tie-break
-semantics requires an evaluation update and an explicit index/query version.
-Opaque pagination cursors remain bound to that version under the accepted Agent
-MVP contract.
+后续默认方案若改变词元生成、字段权重或决胜语义，需要更新评估并明确新的索引/查询
+版本。根据已接受的 Agent MVP 契约，不透明分页游标仍绑定到该版本。
 
-### Snippet limitation
+### 摘要片段限制
 
-Native FTS5 snippets are not usable for this candidate because they expose the
-encoded token stream rather than original Markdown. The alpha search layer must
-generate a separately bounded, plain-text excerpt from the authorized current
-Revision after ranking. It must not render Markdown or place encoded tokens in
-the response.
+原生 FTS5 摘要片段会暴露编码后的词元流，而不是原始 Markdown，因此不能用于本方案。
+Alpha 搜索层必须在排序后，从已授权当前 Revision 生成另外受到大小限制的纯文本摘录；
+不得渲染 Markdown，也不得在响应中放入编码词元。
 
-Exact excerpt anchoring, highlighting, Unicode offset units, and behavior when
-conjunctive tokens occur in different fields remain deferred. Until those are
-accepted, snippets are explicitly non-stable presentation data and cannot be
-used as citations; Page and Revision identity remain authoritative.
+准确摘录定位、高亮、Unicode 偏移单位，以及合取词元分布在不同字段时的行为仍然
+推迟决定。在这些事项被接受前，摘要片段明确属于不稳定的展示数据，不能作为引用；
+Page 和 Revision 身份仍是权威信息。
 
-## Compatibility, rebuild, and rollback
+## 兼容性、重建与回滚
 
-- Tokenizer schema version and Unicode database version are index metadata.
-  Opening an incompatible index fails closed as `search_unavailable`; it does
-  not silently query with new normalization rules.
-- The index is a derived projection, not part of backup authority. Backup and
-  restore preserve Pages, Revisions, current pointers, and index-version
-  metadata; restore may rebuild the FTS and rank-token rows before search is
-  marked ready.
-- A rebuild reads only current Revisions, writes a fresh versioned index, checks
-  FTS row, Section-prefix, rank-token, and citation invariants, and switches
-  versions atomically. It applies the same byte and derived-token ceilings;
-  encountering an unindexable current Revision aborts the candidate build and
-  reports the Page for operator remediation without exposing its content.
-  Interrupted or rejected builds leave the prior compatible index active or
-  search unavailable.
-- A rebuild also counts current Pages per Section and rejects any Section above
-  1,024 before activation. It never builds a partial searchable subset.
-- Rolling back the search feature drops or disables only the derived index and
-  capability. It never deletes or rewrites a Page, Revision, Source, audit row,
-  or idempotency record.
-- A migration that creates this projection must provide deterministic rebuild
-  and downgrade behavior. Its schema and transaction ordering require separate
-  review after this proposal is accepted.
+- tokenizer schema 版本和 Unicode 数据库版本属于索引元数据。打开不兼容索引时
+  按 `search_unavailable` 失败关闭，不会悄然用新规范化规则查询。
+- 索引是派生投影，不属于备份权威数据。备份和恢复保留 Page、Revision、当前指针
+  和索引版本元数据；在搜索标记为就绪前，恢复可以重建 FTS 和排序词元行。
+- 重建只读取当前 Revision，写入全新的版本化索引，检查 FTS 行、Section 前缀、
+  排序词元和引用不变量，再以原子方式切换版本。它应用相同的字节和派生词元上限；
+  遇到无法索引的当前 Revision 时，会中止候选构建并向管理员报告 Page，但不暴露
+  内容。中断或拒绝的构建会保留之前兼容的索引，或让搜索保持不可用。
+- 重建还会统计各 Section 的当前 Page 数，任何 Section 超过 1,024 都会在激活前
+  被拒绝；绝不构建可搜索的部分子集。
+- 回滚搜索功能只会删除或禁用派生索引和能力，绝不删除或重写 Page、Revision、
+  Source、审计行或幂等记录。
+- 创建该投影的迁移必须提供确定性的重建和降级行为。提案被接受后，其数据库结构和
+  事务顺序仍需单独审查。
 
-## Dependency and license impact
+## 依赖与许可证影响
 
-The choice adds no package, model, hosted provider, segmentation dictionary, or
-runtime service. It uses the already selected SQLite FTS5 capability and Python
-standard-library Unicode normalization. Range endpoints are versioned from the
-Unicode Consortium's [Unicode 15.1 Blocks data][unicode-blocks], which is
-distributed under the [Unicode License v3][unicode-license]; the project does
-not vendor or parse that data file at runtime. The evaluation corpus is original
-synthetic text marked `CC0-1.0`; no private archive or external training corpus
-was used.
+本方案不增加软件包、模型、托管提供方、分词词典或运行时服务。它使用已经选定的
+SQLite FTS5 能力和 Python 标准库 Unicode 规范化。范围端点以 Unicode Consortium
+的 [Unicode 15.1 Blocks 数据][unicode-blocks]为版本来源，该数据采用
+[Unicode License v3][unicode-license]；项目不会在运行时内置或解析该数据文件。
+评估语料是标记为 `CC0-1.0` 的原创合成文字，没有使用私有归档或外部训练语料。
 
-Because token bytes depend on Unicode data, a supported runtime change can
-require a rebuild even when application code is unchanged. That operational
-cost is preferable to introducing a dictionary dependency and its language,
-versioning, packaging, and license surface for the alpha.
+由于词元字节取决于 Unicode 数据，即使应用代码不变，受支持运行时变化也可能要求
+重建。与引入词典依赖及其语言、版本、打包和许可证影响相比，Alpha 阶段接受这项
+运行成本。
 
-The explicit Unicode 15.1 range table, not the runtime Unicode category alone,
-defines Han tokenization. A runtime whose normalization data differs from the
-recorded index metadata still requires a fail-closed rebuild before search.
+汉字分词由明确的 Unicode 15.1 范围表定义，而不是只依赖运行时 Unicode 分类。
+运行时规范化数据若不同于所记录索引元数据，仍需先按失败关闭方式重建，才能搜索。
 
-## Still deferred
+## 仍然推迟的事项
 
-Acceptance of this proposal would not settle:
+即使本提案被接受，也不会解决：
 
-- a long-term normative ranking function, score contract, or quality threshold;
-- phrase, adjacency, stemming, synonym, fuzzy, prefix, or advanced query syntax;
-- exact snippet anchoring, highlighting, offset units, or Markdown treatment;
-- cross-Section search or any authorization expansion;
-- embeddings, hosted-model reranking, or provider selection;
-- corpus scale, production capacity targets, or latency service objectives;
-- any increase to the alpha 1,024-searchable-Page per-Section ceiling;
-- public error status/codes and remediation policy for query, candidate, body,
-  or derived-token resource-limit rejection;
-- index tuning and maintenance policy beyond rebuildability and current-only
-  correctness.
+- 长期规范排序函数、分数契约或质量阈值；
+- 短语、相邻、词干、同义词、模糊、前缀或高级查询语法；
+- 准确摘要片段定位、高亮、偏移单位或 Markdown 处理；
+- 跨 Section 搜索或任何授权扩展；
+- 嵌入、托管模型重排或提供方选择；
+- 语料规模、生产容量目标或延迟服务目标；
+- 提高 Alpha 阶段每 Section 最多 1,024 个可搜索 Page 的限制；
+- 查询、候选、正文或派生词元因资源限制被拒绝时的公开错误状态/代码和修复策略；
+- 除可重建和只索引当前内容之外的索引调优与维护策略。
 
-Those decisions need new public evidence. They must not be inferred from this
-synthetic experiment or silently frozen by the first migration.
+这些决定需要新的公开证据，不能从本次合成实验中推断，也不能由第一次迁移悄然固化。
 
 [unicode-blocks]: https://www.unicode.org/Public/15.1.0/ucd/Blocks.txt
 [unicode-license]: https://www.unicode.org/license.txt

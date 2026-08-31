@@ -1,36 +1,29 @@
-# AI-assisted contribution guide
+# AI 辅助贡献指南
 
-This repository welcomes carefully reviewed AI-assisted contributions.
+本仓库欢迎经过认真审查的 AI 辅助贡献。
 
-- Treat the tracked repository as public. Never copy private notes, chat logs,
-  operator identifiers, secrets, hostnames, or deployment topology into a
-  tracked file, commit, issue, or pull request.
-- Use `docs/` as the public design source of truth. Historical or local-only
-  material is not automatically a public requirement.
-- Preserve the distinction between accepted decisions and open questions.
-- Keep retrieval providers and deployment targets configurable unless a public
-  design proposal establishes a portable default.
-- Before proposing a commit, inspect the complete staged diff and run the
-  documented validation commands.
-- Human contributors remain responsible for correctness, licensing, privacy,
-  and the final submitted text.
+- 将受跟踪的仓库视为公开内容。绝不能把私有笔记、聊天记录、管理员标识、
+  机密、主机名或部署拓扑复制到受跟踪文件、提交、Issue 或 Pull Request 中。
+- 以 `docs/` 作为公开设计事实源。历史资料或仅存在于本地的材料不会自动成为
+  公开需求。
+- 明确区分已接受的决定和开放问题。
+- 检索提供方和部署目标应保持可配置，除非公开设计提案已经确定了可移植的
+  默认方案。
+- 提议提交前，检查完整的已暂存差异，并运行文档规定的验证命令。
+- 人类贡献者仍须对正确性、许可证、隐私和最终提交的文字负责。
 
-## Parallel agent work
+## 并行 Agent 协作
 
-- Keep one coordinating agent or contributor responsible for the active plan,
-  integration branch, cross-cutting decisions, and final acceptance.
-- Give every delegated task a bounded objective, explicit file ownership,
-  required reading, constraints, validation commands, and expected handoff.
-- Use one writer per path. Agents working in a shared worktree must not switch
-  branches, stage, commit, push, merge, or deploy unless the coordinator assigns
-  that responsibility explicitly.
-- Prefer read-only agents for independent review, design comparison, and test-gap
-  analysis. Stop and notify the coordinator if discovered work overlaps another
-  task's files or changes a public contract.
-- A handoff must name changed files, validation performed, decisions made,
-  unresolved risks, and the public or private status of every source used.
-- Keep secret management, release publication, and private deployment serialized
-  under one authorized integrator.
+- 由一名协调 Agent 或贡献者负责当前计划、集成分支、跨领域决定和最终验收。
+- 每个委派任务都应给出有限且明确的目标、文件所有权、必读材料、约束、验证命令
+  和预期交接内容。
+- 每个路径只由一名写入者负责。使用共享 worktree 的 Agent 不得切换分支、暂存、
+  提交、推送、合并或部署，除非协调者明确分配了该职责。
+- 独立审查、设计对比和测试缺口分析应优先交给只读 Agent。若发现的工作与其他
+  任务文件重叠或会改变公开契约，应停止并通知协调者。
+- 交接必须列明改动文件、已执行的验证、作出的决定、未解决风险，以及每项来源
+  属于公开还是私有。
+- 机密管理、发布和私有部署必须由一名获授权的集成者串行执行。
 
-See [the agent contribution workflow](docs/agent-contribution-workflow.md) for
-task briefs, shared-worktree rules, integration gates, and handoff requirements.
+任务说明、共享 worktree 规则、集成门槛和交接要求见
+[Agent 贡献工作流](docs/agent-contribution-workflow.md)。

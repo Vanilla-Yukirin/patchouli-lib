@@ -1,67 +1,61 @@
-# Automatic organization: reviewable Book suggestions
+# 自动整理：可审查的 Book 建议
 
-## Principle
+## 原则
 
-PatchouliLib may calculate and present Book split or merge suggestions. It does
-not execute those suggestions automatically by default. A user or authorized
-caller reviews the proposed change.
+PatchouliLib 可以计算并展示 Book 拆分或合并建议，但默认不会自动执行。用户或获授权
+的调用方需要审查所提议的改动。
 
-## Split suggestions
+## 拆分建议
 
-A split workflow can use two stages:
+拆分工作流可以分为两个阶段：
 
-1. **Deterministic screening** measures size, topic diversity, retrieval
-   confusion, or other published signals.
-2. **Semantic review** evaluates candidates and writes a reasoned proposal with
-   Page assignments and confidence.
+1. **确定性初筛**衡量大小、主题多样性、检索混淆度或其他已公布信号。
+2. **语义审查**评估候选项，并写出包含 Page 分配方案和置信度、理由充分的提案。
 
-The output is a proposal, not a content mutation. A proposal must identify the
-input Revision set and become stale when relevant content changes.
+输出是提案，不是内容变更。提案必须标明输入 Revision 集合，并在相关内容变化时
+变为过期状态。
 
-## Merge suggestions
+## 合并建议
 
-Merge screening compares similarity between Books with cohesion inside each
-Book. Exact distance functions and thresholds remain experimental. A merge
-proposal must explain naming, Section membership, Page movement, Tag impact,
-and how links remain valid.
+合并初筛同时比较 Book 之间的相似性和每个 Book 内部的内聚度（cohesion）。具体采用
+的距离函数和阈值仍处于实验阶段。合并提案必须说明命名、Section 归属、Page 移动、
+Tag 影响，以及如何保持链接有效。
 
-## Applying a decision
+## 应用决定
 
-An accepted proposal uses ordinary audited operations:
+被接受的提案使用普通的可审计操作：
 
-- create the destination Book if necessary;
-- move Pages by changing ownership metadata;
-- preserve Page IDs and Revision histories;
-- invalidate or update affected derived indexes;
-- record the proposal, approver, operations, and result.
+- 必要时创建目标 Book；
+- 通过改变归属元数据移动 Page；
+- 保留 Page ID 和 Revision 历史；
+- 使受影响的派生索引失效或更新它们；
+- 记录提案、批准者、操作和结果。
 
-Rejecting or postponing a proposal is also an audit event.
+拒绝或推迟提案也是一条审计事件。
 
-## Scheduling and cooldown
+## 调度与冷却期
 
-A possible scheduler evaluates only Books changed since their last scan and
-enforces a minimum interval between scans. Rejected suggestions enter a longer
-cooldown to avoid repeated noise. Exact intervals must be configurable and
-should not become API contracts.
+一种可行的调度器只评估自上次扫描后发生变化的 Book，并强制两次扫描间的最短间隔。
+被拒绝的建议会进入更长的冷却期，避免反复干扰。具体间隔必须可配置，不应成为
+API 契约。
 
-## Presentation
+## 展示
 
-Book-level queries may include a compact, non-blocking suggestion notice. A
-future interface could also expose a review queue or timeline. Retrieval results
-must remain usable when suggestion generation is unavailable.
+Book 层查询可以包含紧凑、非阻塞的建议提示。后续界面也可以提供审查队列或时间线。
+建议生成不可用时，检索结果仍必须正常使用。
 
-## Safety constraints
+## 安全约束
 
-- Suggestions cannot bypass authorization.
-- Source text and Revision history are never rewritten by organization jobs.
-- Models receive only content allowed by the deployment's provider policy.
-- Every suggestion cites the Pages and signals that produced it.
-- There must be a deterministic way to dismiss, expire, and rebuild suggestions.
+- 建议不能绕过授权。
+- 整理任务绝不重写源文本和 Revision 历史。
+- 模型只能接收部署的提供方策略允许的内容。
+- 每项建议都要引用促成该建议的 Page 和信号。
+- 必须提供确定性方式来忽略、使建议过期并重新生成建议。
 
-## Open evaluation work
+## 开放的评估工作
 
-- split and merge quality metrics;
-- false-positive cost and acceptable review load;
-- Derived Fact behavior during reorganization;
-- provider-neutral semantic review;
-- interaction between manual decisions and later scans.
+- 拆分与合并质量指标；
+- 误报成本和可接受的审查负担；
+- 重组期间 Derived Fact 的行为；
+- 与提供方无关的语义审查；
+- 手动决定与后续扫描之间的相互作用。

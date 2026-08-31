@@ -1,59 +1,41 @@
-# ADR 0003: bounded web administration console
+# ADR 0003：受限的网页管理面板
 
-- Status: Accepted
-- Date: 2026-08-23
+- 状态：**已接受（Accepted）**
+- 日期：2026-08-23
 
-## Context
+## 背景
 
-The local operator CLI provides safe initialization, recovery, Agent
-provisioning, and credential revocation, but it is inconvenient for occasional
-human administration. A small browser interface can make these operations and
-the public Agent/MCP guidance easier to discover.
+本地管理员 CLI 可以安全地执行初始化、恢复、Agent 配置和凭据吊销，但对偶尔进行
+的人工作业并不方便。小型浏览器界面能让这些操作以及公开 Agent/MCP 指引更容易发现。
 
-A browser also creates a new attack surface. The existing local operator
-boundary must not silently become a remote shell or deployment controller, and
-passwords and bearer credentials must not enter URLs, logs, browser storage, or
-long-lived web sessions.
+浏览器也会带来新的攻击面。现有本地管理员边界不得悄然变成远程 Shell 或部署控制器；
+密码和 bearer 凭据也不得进入 URL、日志、浏览器存储或长期 Web 会话。
 
-## Decision
+## 决定
 
-- The administration console is optional and lives under `/admin` in the
-  existing FastAPI application. It is absent unless a password verifier,
-  independent session signing secret, and exact browser origin are all
-  configured.
-- The server stores a salted PBKDF2-SHA256 password verifier, never the
-  administration password. `patchouli-admin-password` reads and confirms the
-  password without accepting it as a command-line argument.
-- Successful login creates a short-lived, signed, HttpOnly, SameSite=Strict
-  cookie. The cookie contains only an expiry and random CSRF value. Production
-  configuration requires an HTTPS origin and emits a Secure cookie.
-- Every state-changing request requires the configured Host and Origin, a valid
-  session, and the matching CSRF value. Form bodies and field counts are
-  bounded; unknown and ambiguous duplicate fields fail closed.
-- Operator and Agent bearer values appear only in password-form inputs or a
-  no-store one-time result page. They are not added to the session, URL, log,
-  or persistent web state.
-- The console calls the existing transaction, authorization, and audit
-  services. It supports first initialization, operator recovery, scoped Agent
-  provisioning, and Agent credential revocation.
-- The console includes read-only operator, Agent, and MCP guidance. It does not
-  control images, registries, updates, rollback, Docker, host shells, backup
-  restore, secrets infrastructure, or deployment.
-- A target-neutral Nginx example terminates TLS, preserves the exact Host and
-  Origin contract, bounds admin form bodies, and rate-limits login requests.
-  Private names, certificates, paths, and network exposure remain
-  operator-owned configuration.
+- 管理面板是可选功能，位于现有 FastAPI 应用的 `/admin` 下。只有密码校验值、独立
+  会话签名密钥和精确匹配的浏览器 Origin（源站）全部配置后，面板才会存在。
+- 服务器只存储带盐的 PBKDF2-SHA256 密码校验值，绝不存储管理密码。
+  `patchouli-admin-password` 读取并确认密码，但不允许通过命令行参数传入。
+- 登录成功后创建短期、带签名、HttpOnly、SameSite=Strict 的 Cookie。Cookie 只
+  包含到期时间和随机 CSRF 值。生产配置要求 HTTPS Origin（源站），并设置 Secure Cookie。
+- 每个改变状态的请求都必须提供已配置的 Host 和 Origin、有效会话及匹配的 CSRF 值。
+  表单正文和字段数有上限；未知字段和含糊的重复字段会按失败关闭处理。
+- 管理员和 Agent bearer 值只会出现在密码表单输入或禁止缓存的一次性结果页中，
+  不会加入会话、URL、日志或持久 Web 状态。
+- 面板调用现有事务、授权和审计服务，支持首次初始化、管理员恢复、限定范围的 Agent
+  配置和 Agent 凭据吊销。
+- 面板包含只读的管理员、Agent 和 MCP 指引，但不控制镜像、Registry、更新、回滚、
+  Docker、主机 Shell、备份恢复、机密基础设施或部署。
+- 与目标无关的 Nginx 示例负责 TLS 终止、保持 Host 与 Origin 精确匹配、限制管理
+  表单正文并限制登录请求频率。私有名称、证书、路径和网络暴露方式仍由管理员配置。
 
-## Consequences
+## 后果
 
-- Enabling the console requires three deliberate configuration values and a
-  TLS reverse proxy. The API remains loopback-only in the public Compose
-  example.
-- Losing an operator or Agent credential response does not make the value
-  recoverable. The operator must revoke or recover using the recorded public
-  credential metadata and normal audited procedures.
-- The password verifier and session signing secret remain sensitive even
-  though neither is a usable browser password. They must stay in the private
-  secret store and out of tracked files and logs.
-- More advanced administration, user accounts, multiple roles, secret
-  rotation workflows, and deployment control require separate decisions.
+- 启用面板需要三个明确配置值和 TLS 反向代理。公开 Compose 示例中的 API 仍只
+  监听回环地址。
+- 丢失管理员或 Agent 凭据响应后，无法恢复同一个值。管理员必须使用已记录的公开
+  凭据元数据和正常审计流程吊销或恢复。
+- 密码校验值和会话签名密钥仍是敏感信息，尽管两者都不能直接用作浏览器密码。它们
+  必须保存在私有机密存储中，不能进入受跟踪文件或日志。
+- 更高级的管理功能、用户账号、多角色、机密轮换工作流和部署控制需要另行决策。
