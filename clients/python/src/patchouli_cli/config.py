@@ -6,14 +6,14 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from patchouli_cli.errors import config_error
 from patchouli_cli.secure_fs import read_trusted_file
+from patchouli_client.origins import validate_origin
 
 _PROFILE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", re.ASCII)
 _TOP_LEVEL_KEYS = {"version", "profiles"}
-_PROFILE_KEYS = {"endpoint", "api_version"}
+_PROFILE_KEYS = {"endpoint", "api_version", "allow_private_http"}
 _MAX_CONFIG_BYTES = 64 * 1024
 
 
@@ -22,6 +22,7 @@ class Profile:
     name: str
     endpoint: str
     api_version: str
+    allow_private_http: bool = False
 
 
 def default_config_path(environ: Mapping[str, str]) -> Path:
@@ -70,8 +71,18 @@ def resolve_profile(
         raise config_error("profile endpoint is required in config or PATCHOULI_ENDPOINT")
     if not isinstance(version_value, str) or version_value != "v1":
         raise config_error("only the accepted v1 compatibility profile is supported")
-    endpoint = _validate_endpoint(endpoint_value)
-    return Profile(name=name, endpoint=endpoint, api_version=version_value)
+    allow_http = profile_data.get("allow_private_http", False)
+    if "PATCHOULI_ALLOW_PRIVATE_HTTP" in environ:
+        setting = environ["PATCHOULI_ALLOW_PRIVATE_HTTP"].casefold()
+        if setting not in {"true", "false"}:
+            raise config_error("PATCHOULI_ALLOW_PRIVATE_HTTP must be true or false")
+        allow_http = setting == "true"
+    if not isinstance(allow_http, bool):
+        raise config_error("allow_private_http must be a boolean")
+    endpoint = _validate_endpoint(endpoint_value, allow_private_http=allow_http)
+    return Profile(
+        name=name, endpoint=endpoint, api_version=version_value, allow_private_http=allow_http
+    )
 
 
 def _read_config(path: Path, *, required: bool) -> dict[str, object]:
@@ -116,22 +127,11 @@ def _profile_data(data: Mapping[str, object], name: str) -> dict[str, object]:
     return result
 
 
-def _validate_endpoint(value: str) -> str:
+def _validate_endpoint(value: str, *, allow_private_http: bool = False) -> str:
     try:
-        parsed = urlsplit(value)
-        port = parsed.port
+        return validate_origin(value, allow_private_http=allow_private_http)
     except ValueError as exc:
-        raise config_error("profile endpoint must be an HTTPS origin") from exc
-    if (
-        parsed.scheme != "https"
-        or not parsed.netloc
-        or parsed.hostname is None
-        or parsed.username
-        or parsed.password
-        or parsed.path not in {"", "/"}
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise config_error("profile endpoint must be an HTTPS origin without user information")
-    del port  # accessing it above validates the optional numeric port
-    return value.rstrip("/")
+        raise config_error(
+            "profile endpoint must be an HTTPS origin "
+            "or an explicitly enabled private HTTP IP origin"
+        ) from exc

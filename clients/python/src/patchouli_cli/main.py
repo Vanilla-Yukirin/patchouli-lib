@@ -149,7 +149,7 @@ def run(
     stdin: BinaryIO | TextIO | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
-    client_factory: ClientFactory = PatchouliClient,
+    client_factory: ClientFactory | None = None,
     secret_store: SecretStore | None = None,
 ) -> int:
     resolved_environ = dict(os.environ if environ is None else environ)
@@ -175,7 +175,11 @@ def run(
             stdin=input_stream,
             secret_store=secret_store or KeyringSecretStore(),
         )
-        client = client_factory(profile.endpoint)
+        client = (
+            client_factory(profile.endpoint)
+            if client_factory is not None
+            else PatchouliClient(profile.endpoint, allow_private_http=profile.allow_private_http)
+        )
         operation = cast(str, args.handler)
         response, state.operation_id = _dispatch(
             operation,

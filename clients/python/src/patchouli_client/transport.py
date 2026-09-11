@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from patchouli_client.errors import TransportError
+from patchouli_client.origins import validate_origin
 from patchouli_client.secrets import BearerToken, IdempotencyKey
 
 Sleep = Callable[[float], None]
@@ -69,21 +70,20 @@ class Transport:
         self,
         base_url: str,
         *,
+        allow_private_http: bool = False,
         http_transport: httpx.BaseTransport | None = None,
         retry_policy: RetryPolicy | None = None,
         sleep: Sleep | None = None,
         random_value: RandomValue | None = None,
     ) -> None:
-        parsed = urlsplit(base_url)
-        if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
-            raise ValueError("base URL must be an HTTPS origin without user information")
-        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
-            raise ValueError("base URL must contain only an HTTPS origin")
+        base_url = validate_origin(base_url, allow_private_http=allow_private_http)
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
             follow_redirects=False,
             timeout=httpx.Timeout(60.0, connect=5.0),
             transport=http_transport,
+            # HTTP 私网请求不能把 Token 交给环境变量指定的外部代理。
+            trust_env=urlsplit(base_url).scheme == "https",
         )
         self._retry_policy: RetryPolicy = retry_policy or RetryPolicy()
         self._sleep: Sleep = sleep or time.sleep

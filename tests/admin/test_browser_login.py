@@ -71,7 +71,9 @@ def _live_admin(tmp_path: Path) -> Iterator[str]:
     origin = f"http://127.0.0.1:{port}"
     settings = Settings.model_validate(
         {
-            "environment": "test",
+            "environment": "production",
+            "retrieval_cursor_signing_secret": "r" * 32,
+            "admin_allow_private_http": True,
             "database_url": f"sqlite:///{(tmp_path / 'browser.db').as_posix()}",
             "admin_password_hash": _ADMIN_PASSWORD_HASH,
             "admin_session_signing_secret": "s" * 32,

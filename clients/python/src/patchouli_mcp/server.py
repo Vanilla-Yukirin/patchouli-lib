@@ -85,7 +85,7 @@ RuntimeFactory = Callable[[], AbstractContextManager[McpRuntime]]
 def runtime_from_environment(
     *,
     environ: Mapping[str, str] | None = None,
-    client_factory: ClientFactory = PatchouliClient,
+    client_factory: ClientFactory | None = None,
     secret_store: SecretStore | None = None,
 ) -> Iterator[McpRuntime]:
     """Resolve non-tool startup state and own exactly one client for the session."""
@@ -98,7 +98,11 @@ def runtime_from_environment(
         stdin=io.StringIO(),
         secret_store=secret_store or KeyringSecretStore(),
     )
-    client = client_factory(profile.endpoint)
+    client = (
+        client_factory(profile.endpoint)
+        if client_factory is not None
+        else PatchouliClient(profile.endpoint, allow_private_http=profile.allow_private_http)
+    )
     try:
         with OperationJournal(default_state_path(resolved_environ), profile.name) as journal:
             application = ArchiveApplication(

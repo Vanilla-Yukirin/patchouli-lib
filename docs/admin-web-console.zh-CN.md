@@ -38,7 +38,8 @@ pbkdf2_sha256$...
 私钥。可选的 `PATCHOULI_ADMIN_SESSION_TTL_SECONDS` 允许 300 到 86400 秒，
 默认是 1800 秒。
 
-生产环境只接受 HTTPS Origin（源站）。三个必需配置全部为空时面板保持关闭；
+生产环境默认只接受 HTTPS Origin（源站）。仅在加密私网中使用 HTTP 的明确配置和限制，
+见[规范说明](admin-web-console.md#仅在加密私网中使用-http)。三个必需配置全部为空时面板保持关闭；
 只设置其中一部分时，应用会拒绝启动。
 
 ## 在前面放置 TLS 入口

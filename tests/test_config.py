@@ -105,6 +105,7 @@ def test_admin_console_requires_complete_redacted_configuration() -> None:
         ("https://admin.example.invalid:443", "https://admin.example.invalid"),
         ("http://Admin.Example.Invalid:80/", "http://admin.example.invalid"),
         ("https://Admin.Example.Invalid:8443/", "https://admin.example.invalid:8443"),
+        ("http://[fd00:0:0:0:0:0:0:7]:8080/", "http://[fd00::7]:8080"),
     ],
 )
 def test_admin_origin_is_normalized_to_browser_serialization(
@@ -191,5 +192,49 @@ def test_production_admin_console_requires_https_origin() -> None:
                 "admin_password_hash": _ADMIN_PASSWORD_HASH,
                 "admin_session_signing_secret": "s" * 32,
                 "admin_origin": "http://admin.example.invalid",
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "origin",
+    ["http://100.64.0.7:8080", "http://10.1.2.3", "http://127.0.0.1:8080", "http://[fd00::7]"],
+)
+def test_production_private_http_requires_explicit_opt_in(origin: str) -> None:
+    values = {
+        "environment": "production",
+        "retrieval_cursor_signing_secret": "r" * 32,
+        "admin_password_hash": _ADMIN_PASSWORD_HASH,
+        "admin_session_signing_secret": "s" * 32,
+        "admin_origin": origin,
+    }
+    with pytest.raises(ValidationError, match="must use HTTPS"):
+        Settings.model_validate(values)
+    configured = Settings.model_validate({**values, "admin_allow_private_http": True})
+    assert configured.admin_origin == origin
+    assert configured.environment == "production"
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://admin.example.invalid",
+        "http://8.8.8.8",
+        "http://0.0.0.0",
+        "http://169.254.169.254",
+        "http://[::]",
+        "http://[fd00::1%25eth0]",
+    ],
+)
+def test_private_http_flag_does_not_allow_public_or_ambiguous_origins(origin: str) -> None:
+    with pytest.raises(ValidationError, match="private IP origin"):
+        Settings.model_validate(
+            {
+                "environment": "production",
+                "retrieval_cursor_signing_secret": "r" * 32,
+                "admin_password_hash": _ADMIN_PASSWORD_HASH,
+                "admin_session_signing_secret": "s" * 32,
+                "admin_origin": origin,
+                "admin_allow_private_http": True,
             }
         )
