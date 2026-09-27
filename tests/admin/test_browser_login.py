@@ -77,7 +77,6 @@ def _live_admin(tmp_path: Path) -> Iterator[str]:
             "database_url": f"sqlite:///{(tmp_path / 'browser.db').as_posix()}",
             "admin_password_hash": _ADMIN_PASSWORD_HASH,
             "admin_session_signing_secret": "s" * 32,
-            "admin_origin": origin,
             "admin_session_ttl_seconds": 600,
         }
     )

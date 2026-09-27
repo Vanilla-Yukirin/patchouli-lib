@@ -97,10 +97,12 @@ docker compose up --build --wait
 ## 可选网页管理功能
 
 FastAPI 管理面板默认关闭。默认在 HTTPS 反向代理后启用，并配置生成的密码校验值、
-独立会话签名密钥和精确匹配的浏览器 Origin（源站）。只有管理员提供这些值时，
-公开 Compose 文件才会传入它们。
+独立会话签名密钥。不需要配置域名或 IP 白名单，旧 `PATCHOULI_ADMIN_ORIGIN` 会被忽略。
+公开 Compose 文件传入这些管理设置，也传入 Uvicorn 的 `FORWARDED_ALLOW_IPS`。
+该项默认只信任回环；若代理从容器网桥连接 API，应在私有环境文件中填入实际直接
+代理地址，不能使用任意来源通配信任。代理应保留原始 Host 和正确的协议。
 
-加密私网可以明确启用仅限私有 IP 入口的 HTTP 模式；配置、监听范围和仍保留的登录
+加密私网可以明确启用 HTTP Cookie；配置、监听范围和仍保留的登录
 防护见[私网 HTTP 说明](admin-web-console.md#仅在加密私网中使用-http)。不要用切换到
 开发环境或跳过身份验证来实现它。
 
