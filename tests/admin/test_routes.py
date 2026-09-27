@@ -128,6 +128,85 @@ def _metadata_from(response_text: str) -> tuple[str, str, str]:
     return values[0], values[1], values[2]
 
 
+def test_production_private_http_preserves_login_csrf_and_token_boundaries(tmp_path: Path) -> None:
+    origin = "http://100.64.0.7:8080"
+    settings = Settings.model_validate(
+        {
+            "environment": "production",
+            "database_url": f"sqlite:///{(tmp_path / 'private-http.db').as_posix()}",
+            "retrieval_cursor_signing_secret": "r" * 32,
+            "admin_password_hash": _ADMIN_PASSWORD_HASH,
+            "admin_session_signing_secret": "s" * 32,
+            "admin_origin": origin,
+            "admin_allow_private_http": True,
+        }
+    )
+    application = create_app(settings)
+    Caller.metadata.create_all(application.state.engine)
+    with TestClient(application, base_url=origin, follow_redirects=False) as client:
+        assert client.get("/admin").status_code == 303
+        assert client.get("/admin/login", headers={"Host": "wrong.invalid"}).status_code == 403
+        for bad_origin in ("https://100.64.0.7:8080", "http://100.64.0.8:8080"):
+            assert (
+                _post(
+                    client, "/admin/login", origin=bad_origin, data={"password": _ADMIN_PASSWORD}
+                ).status_code
+                == 403
+            )
+        assert (
+            _post(client, "/admin/login", origin=origin, data={"password": "wrong"}).status_code
+            == 401
+        )
+        signed_in = _post(client, "/admin/login", origin=origin, data={"password": _ADMIN_PASSWORD})
+        assert signed_in.status_code == 303
+        cookie = signed_in.headers["set-cookie"]
+        assert "Secure" not in cookie
+        assert "HttpOnly" in cookie and "SameSite=strict" in cookie
+        assert _ADMIN_PASSWORD not in cookie
+        _assert_security_headers(signed_in)
+        dashboard = client.get("/admin")
+        assert dashboard.status_code == 200
+        csrf = re.search(r'name="csrf_token" value="([^"]+)"', dashboard.text)
+        assert csrf is not None
+        assert (
+            _post(
+                client, "/admin/bootstrap", origin=origin, data=_bootstrap_data("wrong")
+            ).status_code
+            == 403
+        )
+        created = _post(
+            client, "/admin/bootstrap", origin=origin, data=_bootstrap_data(csrf.group(1))
+        )
+        assert created.status_code == 200
+        operator = _credential_from(created.text)
+        # 管理页面会话不能替代 API Token；正确 Token 仍须通过既有身份验证。
+        assert client.get("/api/v1/auth/whoami").status_code == 401
+        assert (
+            client.get(
+                "/api/v1/auth/whoami", headers={"Authorization": "Bearer invalid"}
+            ).status_code
+            == 401
+        )
+        assert (
+            client.get(
+                "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {operator}"}
+            ).status_code
+            == 200
+        )
+        assert operator not in str(client.cookies)
+        assert (
+            _post(client, "/admin/logout", origin=origin, data={"csrf_token": "wrong"}).status_code
+            == 403
+        )
+        assert (
+            _post(
+                client, "/admin/logout", origin=origin, data={"csrf_token": csrf.group(1)}
+            ).status_code
+            == 303
+        )
+        assert client.get("/admin").status_code == 303
+
+
 def test_admin_routes_are_absent_when_configuration_is_disabled(client: TestClient) -> None:
     response = client.get("/admin")
 

@@ -19,7 +19,7 @@ Alpha 阶段的接口范围包括：
 
 ## 命令行（CLI）
 
-安装软件包后运行 `patchouli --help`。配置档是带版本的 TOML，只包含 HTTPS URL
+安装软件包后运行 `patchouli --help`。配置档是带版本的 TOML，默认使用 HTTPS URL
 origin（源站）和兼容性版本。这里的 origin 只含 scheme、host 和可选 port：
 
 ```toml
@@ -35,6 +35,22 @@ Windows 上的默认配置档路径遵循 `%APPDATA%`，POSIX 上遵循 `$XDG_CO
 `PATCHOULI_ENDPOINT` 和 `PATCHOULI_API_VERSION` 提供非机密的进程级覆盖值。配置
 若含令牌等未知字段会被拒绝。读取配置文件时只通过经过验证且非重解析的句柄执行一次；
 端点与 bearer 凭据一起使用前，文件及已有的上级目录链必须具有可信所有者和权限。
+
+### 加密私网 HTTP 入口
+
+如果服务只通过已建立的加密私网访问，可在指定配置档中加入
+`allow_private_http = true`，并将 `endpoint` 改成管理员给出的精确 HTTP IP 入口。
+进程环境变量 `PATCHOULI_ALLOW_PRIVATE_HTTP=true` 也可开启，`false` 可明确关闭；
+它同时适用于 CLI 和 MCP。默认仍只接受 HTTPS。
+
+直接使用 Python 时，向 `PatchouliClient(endpoint, allow_private_http=True)` 传入
+相同选择。HTTP 仅接受私有 IPv4、共享地址段、回环或 IPv6 唯一本地 IP，不接受域名、
+公网 IP 或通配地址。软件不会仅凭 IP 判定网络已经加密，部署方必须保证访问路径。
+
+HTTP 请求不读取环境代理配置，也不跟随重定向，以免把 Token 送到外部代理或另一入口。
+Token、限定权限、输入保护、重试和幂等规则不变。HTTPS 的证书验证和代理行为不变。
+
+### 凭据和调用
 
 调用方凭据没有命令行选项，解析顺序为：
 

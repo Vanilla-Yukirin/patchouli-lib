@@ -42,6 +42,7 @@ class PatchouliClient:
         self,
         base_url: str,
         *,
+        allow_private_http: bool = False,
         http_transport: httpx.BaseTransport | None = None,
         retry_policy: RetryPolicy | None = None,
         sleep: Sleep | None = None,
@@ -49,6 +50,7 @@ class PatchouliClient:
     ) -> None:
         self._transport = Transport(
             base_url,
+            allow_private_http=allow_private_http,
             http_transport=http_transport,
             retry_policy=retry_policy,
             sleep=sleep,

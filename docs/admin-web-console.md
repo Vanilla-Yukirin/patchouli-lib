@@ -36,8 +36,27 @@ pbkdf2_sha256$...
 校验值、Agent 凭据、管理员凭据、检索游标签名密钥或 TLS 私钥。可选的
 `PATCHOULI_ADMIN_SESSION_TTL_SECONDS` 允许 300 到 86400 秒，默认是 1800 秒。
 
-生产环境只接受 HTTPS Origin（源站）。三个必需配置全部为空时面板保持关闭；只设置其中
+生产环境默认只接受 HTTPS Origin（源站）。三个必需配置全部为空时面板保持关闭；只设置其中
 一部分时，应用会拒绝启动。
+
+## 仅在加密私网中使用 HTTP
+
+如果所有访问都通过管理员控制的加密私网（例如 Tailscale），可以不配置域名和 TLS
+证书。在私有配置中设置 `PATCHOULI_ADMIN_ALLOW_PRIVATE_HTTP=true`，并把
+`PATCHOULI_ADMIN_ORIGIN` 设置为浏览器实际访问的精确 HTTP IP 地址与端口。
+
+该选项默认关闭，只允许私有 IPv4、共享地址段、回环地址或 IPv6 唯一本地地址；不允许
+公网 IP、通配地址或域名。地址属于这些范围并不证明网络可信，管理员仍须确认流量
+确实走加密私网。代理只绑定选定的私网接口地址，不要绑定 `0.0.0.0` 或 `[::]`；
+API 仍只绑定回环地址。HTTP 代理需转发原始 Host，设置 `X-Forwarded-Proto http`，
+保留登录限速和请求体上限。浏览器和客户端须将该私网地址排除在外部代理之外。
+
+密码校验、短期会话签名、HttpOnly、SameSite=Strict、精确 Host/Origin、CSRF 和 API
+Token 权限检查全部保留。仅 HTTP 会话不设置浏览器无法用于 HTTP 的 Secure 标记；
+HTTPS 会话仍设置它。浏览器可能显示“非安全”，但不再发生证书信任错误。
+
+这不是给现有公网入口关闭 TLS 的方法。公开的 TLS 示例保持不变，真实监听地址和网络
+配置不写入仓库。Agent 的 Python、CLI 和 MCP 配置见[客户端说明](../clients/python/README.md)。
 
 ## 在前面放置 TLS 入口
 

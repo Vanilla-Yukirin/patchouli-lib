@@ -1,3 +1,4 @@
+from ipaddress import ip_address, ip_network
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
@@ -27,6 +28,7 @@ class Settings(BaseSettings):
     admin_password_hash: SecretStr | None = None
     admin_session_signing_secret: SecretStr | None = None
     admin_origin: str | None = None
+    admin_allow_private_http: bool = False
     admin_session_ttl_seconds: Annotated[int, Field(ge=300, le=86_400)] = 1_800
 
     @field_validator("database_url")
@@ -111,7 +113,7 @@ class Settings(BaseSettings):
             message = "The admin origin hostname must contain ASCII characters only."
             raise ValueError(message)
         if ":" in host:
-            host = f"[{host}]"
+            host = f"[{ip_address(host)}]"
         default_port = 443 if scheme == "https" else 80
         if port is not None and port != default_port:
             host = f"{host}:{port}"
@@ -139,8 +141,23 @@ class Settings(BaseSettings):
             and self.admin_origin is not None
             and not self.admin_origin.startswith("https://")
         ):
-            message = "The admin origin must use HTTPS in production."
-            raise ValueError(message)
+            if not self.admin_allow_private_http:
+                raise ValueError("The admin origin must use HTTPS in production by default.")
+            try:
+                address = ip_address(urlsplit(self.admin_origin).hostname or "")
+            except ValueError:
+                raise ValueError("Private HTTP requires an explicit private IP origin.") from None
+            networks = (
+                "10.0.0.0/8",
+                "172.16.0.0/12",
+                "192.168.0.0/16",
+                "100.64.0.0/10",
+                "127.0.0.0/8",
+                "::1/128",
+                "fc00::/7",
+            )
+            if "%" in str(address) or not any(address in ip_network(net) for net in networks):
+                raise ValueError("Private HTTP requires an explicit private IP origin.")
         return self
 
     @property
