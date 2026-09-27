@@ -8,14 +8,15 @@
 
 ## 启用面板
 
-只有同时提供下面三个配置时，服务才会注册 `/admin` 页面：
+只有同时提供下面两个配置时，服务才会注册 `/admin` 页面，无需配置地址白名单：
 
 - `PATCHOULI_ADMIN_PASSWORD_HASH`：带盐的密码校验值；
 - `PATCHOULI_ADMIN_SESSION_SIGNING_SECRET`：单独生成、至少包含 32 个
-  UTF-8 字节的随机值；
-- `PATCHOULI_ADMIN_ORIGIN`：浏览器访问面板时唯一且精确匹配的 Origin（源站），
-  例如仅作示例的 `https://admin.example.invalid`。主机名必须已使用 ASCII
-  或 Punycode 形式；原始 Unicode 主机名会被拒绝。
+  UTF-8 字节的随机值。
+
+旧 `PATCHOULI_ADMIN_ORIGIN` 会被忽略，可以从环境文件删除。多个入口使用同一密码，
+不同域名分别登录；管理表单仍自动检查当前请求与网页同源，并验证会话及 CSRF 值。
+代理协议传递和 Uvicorn 受信代理配置见[多入口说明](admin-web-console.md#多入口与同源提交)。
 
 在本机生成密码校验值：
 
@@ -38,8 +39,8 @@ pbkdf2_sha256$...
 私钥。可选的 `PATCHOULI_ADMIN_SESSION_TTL_SECONDS` 允许 300 到 86400 秒，
 默认是 1800 秒。
 
-生产环境默认只接受 HTTPS Origin（源站）。仅在加密私网中使用 HTTP 的明确配置和限制，
-见[规范说明](admin-web-console.md#仅在加密私网中使用-http)。三个必需配置全部为空时面板保持关闭；
+会话 Cookie 默认设置 Secure。仅在加密私网中使用 HTTP 的明确配置和限制，
+见[规范说明](admin-web-console.md#仅在加密私网中使用-http)。两个必需配置全部为空时面板保持关闭；
 只设置其中一部分时，应用会拒绝启动。
 
 ## 在前面放置 TLS 入口
@@ -56,8 +57,8 @@ pbkdf2_sha256$...
 - 单独保留 Archive 接口所需的请求体上限；
 - 只转发到本机回环 API，不在公开仓库记录真实地址或证书位置。
 
-`PATCHOULI_ADMIN_ORIGIN` 必须与浏览器实际发送的 Origin 完全一致。不要为了
-绕过 TLS 和登录限速边界而把回环 API 直接暴露到不可信网络。
+其他入口代理也可以使用，不要求 Nginx；仍需传递正确协议与原始 Host、限制登录
+请求频率。不要为了绕过 TLS 和登录限速边界而把回环 API 直接暴露到不可信网络。
 
 ## 使用面板
 

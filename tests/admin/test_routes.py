@@ -4,12 +4,13 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, select
 from starlette.concurrency import run_in_threadpool as starlette_run_in_threadpool
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 import patchouli_lib.admin.router as admin_router
 from patchouli_lib.admin.passwords import hash_password
@@ -46,7 +47,6 @@ def admin_web(tmp_path: Path) -> Iterator[AdminWeb]:
             "database_url": f"sqlite:///{database_path}",
             "admin_password_hash": _ADMIN_PASSWORD_HASH,
             "admin_session_signing_secret": "s" * 32,
-            "admin_origin": _ORIGIN,
             "admin_session_ttl_seconds": 600,
         }
     )
@@ -137,7 +137,6 @@ def test_production_private_http_preserves_login_csrf_and_token_boundaries(tmp_p
             "retrieval_cursor_signing_secret": "r" * 32,
             "admin_password_hash": _ADMIN_PASSWORD_HASH,
             "admin_session_signing_secret": "s" * 32,
-            "admin_origin": origin,
             "admin_allow_private_http": True,
         }
     )
@@ -145,7 +144,9 @@ def test_production_private_http_preserves_login_csrf_and_token_boundaries(tmp_p
     Caller.metadata.create_all(application.state.engine)
     with TestClient(application, base_url=origin, follow_redirects=False) as client:
         assert client.get("/admin").status_code == 303
-        assert client.get("/admin/login", headers={"Host": "wrong.invalid"}).status_code == 403
+        assert (
+            client.get("/admin/login", headers={"Host": "new.example.invalid"}).status_code == 200
+        )
         for bad_origin in ("https://100.64.0.7:8080", "http://100.64.0.8:8080"):
             assert (
                 _post(
@@ -213,8 +214,12 @@ def test_admin_routes_are_absent_when_configuration_is_disabled(client: TestClie
     assert response.status_code == 404
 
 
-def test_canonical_browser_origin_works_for_noncanonical_configuration(
+@pytest.mark.parametrize(
+    "origin", ["https://admin.example.invalid", "https://other.example.invalid:8443"]
+)
+def test_multiple_entrypoints_work_without_origin_configuration(
     tmp_path: Path,
+    origin: str,
 ) -> None:
     database_path = (tmp_path / "canonical-origin.db").as_posix()
     settings = Settings.model_validate(
@@ -223,26 +228,33 @@ def test_canonical_browser_origin_works_for_noncanonical_configuration(
             "database_url": f"sqlite:///{database_path}",
             "admin_password_hash": _ADMIN_PASSWORD_HASH,
             "admin_session_signing_secret": "s" * 32,
-            "admin_origin": "HTTPS://Admin.Example.Invalid:443/",
+            # 旧设置不再限制访问，也不要求部署时先删除它。
+            "admin_origin": "http://old.example.invalid:8080",
+            "admin_allow_private_http": True,
         }
     )
     application = create_app(settings)
 
-    with TestClient(application, base_url=_ORIGIN, follow_redirects=False) as client:
+    with TestClient(application, base_url=origin, follow_redirects=False) as client:
+        assert client.get("/admin/login").status_code == 200
+        assert client.get("/admin/style.css").status_code == 200
+        assert client.get("/admin").status_code == 303
         response = _post(
             client,
             "/admin/login",
+            origin=origin,
             data={"password": _ADMIN_PASSWORD},
         )
+        assert client.get("/admin").status_code == 200
+        assert client.get("/api/v1/auth/whoami").status_code == 401
 
-    assert settings.admin_origin == _ORIGIN
     assert response.status_code == 303
+    assert "Secure" in response.headers["set-cookie"]
 
 
-def test_login_fails_closed_for_wrong_host_origin_password_and_form_shape(
+def test_login_fails_closed_for_wrong_origin_password_and_form_shape(
     admin_web: AdminWeb,
 ) -> None:
-    wrong_host = admin_web.client.get("/admin/login", headers={"Host": "wrong.example.invalid"})
     wrong_origin = _post(
         admin_web.client,
         "/admin/login",
@@ -273,14 +285,12 @@ def test_login_fails_closed_for_wrong_host_origin_password_and_form_shape(
         headers={"Origin": _ORIGIN},
     )
 
-    assert wrong_host.status_code == 403
     assert wrong_origin.status_code == 403
     assert wrong_password.status_code == 401
     assert duplicate.status_code == 422
     assert unknown.status_code == 422
     assert wrong_media.status_code == 415
     for response in (
-        wrong_host,
         wrong_origin,
         wrong_password,
         duplicate,
@@ -290,6 +300,161 @@ def test_login_fails_closed_for_wrong_host_origin_password_and_form_shape(
         assert _ADMIN_PASSWORD not in response.text
         assert _SESSION_COOKIE not in response.cookies
         _assert_security_headers(response)
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "null",
+        "",
+        "http://admin.example.invalid",
+        "https://admin.example.invalid:8443",
+        "https://admin.example.invalid.evil.invalid",
+        "https://user@admin.example.invalid",
+        "https://admin.example.invalid/",
+        "https://admin.example.invalid/path",
+        "https://admin.example.invalid?",
+        "https://admin.example.invalid#",
+        "https://admin.example.invalid:",
+        "https://admin.example.invalid:0",
+        "https://admin.example.invalid:65536",
+        "https://admin.example.invalid:invalid",
+        "https://admin.example.invalid,https://other.example.invalid",
+        " https://admin.example.invalid",
+        "https://admin.example.invalid\\",
+        "https://[invalid]",
+        "file://admin.example.invalid",
+    ],
+)
+def test_login_rejects_cross_origin_and_malformed_origins(admin_web: AdminWeb, origin: str) -> None:
+    response = _post(
+        admin_web.client, "/admin/login", origin=origin, data={"password": _ADMIN_PASSWORD}
+    )
+    assert response.status_code == 403
+    assert _SESSION_COOKIE not in response.cookies
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [],
+        [("Origin", _ORIGIN), ("Origin", _ORIGIN)],
+        [("Origin", _ORIGIN), ("Host", "admin.example.invalid"), ("Host", "other.invalid")],
+        [("Origin", _ORIGIN), ("Host", "admin.example.invalid/ignored")],
+    ],
+)
+def test_login_rejects_missing_or_ambiguous_headers(
+    admin_web: AdminWeb, headers: list[tuple[str, str]]
+) -> None:
+    response = admin_web.client.post(
+        "/admin/login", headers=headers, data={"password": _ADMIN_PASSWORD}
+    )
+    assert response.status_code == 403
+    assert _SESSION_COOKIE not in response.cookies
+
+
+@pytest.mark.parametrize(
+    ("origin", "expected"),
+    [
+        ("HTTPS://Admin.Example.Invalid:443", ("https", "admin.example.invalid", 443)),
+        ("http://admin.example.invalid:80", ("http", "admin.example.invalid", 80)),
+        ("http://[fd00:0:0:0:0:0:0:7]:8080", ("http", "fd00::7", 8080)),
+        ("http://[fd00::7%25eth0]", None),
+        ("https://bücher.example.invalid", None),
+        ("https://admin.example.invalid\n", None),
+        ("https://", None),
+    ],
+)
+def test_origin_comparison_normalizes_only_equivalent_addresses(
+    origin: str, expected: tuple[str, str, int] | None
+) -> None:
+    assert admin_router._origin_parts(origin) == expected
+
+
+@pytest.mark.parametrize(
+    ("host", "origin"),
+    [
+        ("Admin.Example.Invalid:443", _ORIGIN),
+        ("admin.example.invalid", "https://admin.example.invalid:443"),
+        ("[fd00:0:0:0:0:0:0:7]:8443", "https://[fd00::7]:8443"),
+    ],
+)
+def test_equivalent_host_and_origin_forms_can_log_in(
+    admin_web: AdminWeb, host: str, origin: str
+) -> None:
+    response = admin_web.client.post(
+        "/admin/login",
+        headers={"Host": host, "Origin": origin},
+        data={"password": _ADMIN_PASSWORD},
+    )
+    assert response.status_code == 303
+
+
+@pytest.mark.parametrize("trusted", [True, False])
+@pytest.mark.parametrize("host", ["public.example.invalid", "private.example.invalid:8443"])
+def test_https_proxy_login_uses_only_trusted_asgi_scheme(
+    admin_web: AdminWeb, trusted: bool, host: str
+) -> None:
+    application = ProxyHeadersMiddleware(
+        cast(Any, admin_web.client.app), trusted_hosts=["127.0.0.1"] if trusted else []
+    )
+    with TestClient(
+        cast(Any, application),
+        base_url=f"http://{host}",
+        client=("127.0.0.1", 12345),
+        follow_redirects=False,
+    ) as client:
+        headers = {"X-Forwarded-Proto": "https", "Origin": f"https://{host}"}
+        assert client.get("/admin/login", headers=headers).status_code == 200
+        assert client.get("/admin/style.css", headers=headers).status_code == 200
+        response = client.post("/admin/login", headers=headers, data={"password": _ADMIN_PASSWORD})
+        assert response.status_code == (303 if trusted else 403)
+        if trusted:
+            assert "Secure" in response.headers["set-cookie"]
+            assert "Domain=" not in response.headers["set-cookie"]
+        else:
+            assert _SESSION_COOKIE not in response.cookies
+
+
+def test_forwarded_host_cannot_override_actual_request_host(admin_web: AdminWeb) -> None:
+    response = admin_web.client.post(
+        "/admin/login",
+        headers={
+            "Origin": "https://other.example.invalid",
+            "X-Forwarded-Host": "other.example.invalid",
+            "Forwarded": "host=other.example.invalid;proto=https",
+        },
+        data={"password": _ADMIN_PASSWORD},
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize("private_http", [False, True])
+def test_secure_cookie_depends_on_request_transport_and_http_opt_in(
+    tmp_path: Path, private_http: bool
+) -> None:
+    settings = Settings.model_validate(
+        {
+            "environment": "test",
+            "database_url": f"sqlite:///{(tmp_path / 'cookie.db').as_posix()}",
+            "admin_password_hash": _ADMIN_PASSWORD_HASH,
+            "admin_session_signing_secret": "s" * 32,
+            "admin_allow_private_http": private_http,
+        }
+    )
+    app = create_app(settings)
+    # 同一个应用通过多个入口访问，不需要为入口名称分别修改设置。
+    for origin in ("http://private.example.invalid:8080", "https://public.example.invalid"):
+        with TestClient(app, base_url=origin, follow_redirects=False) as client:
+            locale = client.get("/admin/login?lang=zh-CN")
+            login = _post(client, "/admin/login", origin=origin, data={"password": _ADMIN_PASSWORD})
+            expected_secure = origin.startswith("https://") or not private_http
+            assert login.status_code == 303
+            for response in (locale, login):
+                assert ("Secure" in response.headers["set-cookie"]) == expected_secure
+            assert client.get("/admin").status_code == (
+                303 if origin.startswith("http:") and not private_http else 200
+            )
 
 
 def test_language_switch_is_scoped_persistent_and_localizes_errors(

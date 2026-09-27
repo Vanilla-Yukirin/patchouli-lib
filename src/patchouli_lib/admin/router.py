@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 from collections.abc import Callable
+from ipaddress import IPv6Address
 from typing import Final, cast
 from urllib.parse import parse_qsl, urlsplit
 
@@ -83,9 +84,6 @@ def create_admin_router(
         SecretStr,
         settings.admin_session_signing_secret,
     ).get_secret_value()
-    origin = cast(str, settings.admin_origin)
-    expected_host = urlsplit(origin).netloc.casefold()
-    secure_cookie = origin.startswith("https://")
     codec = session_codec or AdminSessionCodec(
         signing_secret.encode("utf-8"),
         ttl_seconds=settings.admin_session_ttl_seconds,
@@ -93,11 +91,8 @@ def create_admin_router(
     service = action_service or AdminActionService(engine)
     router = APIRouter(prefix="/admin", include_in_schema=False)
 
-    def host_allowed(request: Request) -> bool:
-        return request.headers.get("host", "").casefold() == expected_host
-
-    def post_origin_allowed(request: Request) -> bool:
-        return host_allowed(request) and request.headers.get("origin") == origin
+    def secure_cookie(request: Request) -> bool:
+        return request.scope["scheme"] == "https" or not settings.admin_allow_private_http
 
     def current_session(request: Request) -> AdminSession | None:
         return codec.verify(request.cookies.get(_SESSION_COOKIE, ""))
@@ -150,7 +145,7 @@ def create_admin_router(
             requested,
             max_age=_LOCALE_COOKIE_MAX_AGE,
             path="/admin",
-            secure=secure_cookie,
+            secure=secure_cookie(request),
             httponly=True,
             samesite="strict",
         )
@@ -166,13 +161,11 @@ def create_admin_router(
         request: Request,
         render: Callable[[str, AdminLocale], str],
     ) -> Response:
-        if not host_allowed(request):
-            return forbidden(request)
         locale = locale_for(request)
         session = current_session(request)
         if session is None:
             redirect_response = redirect("/admin/login")
-            _clear_cookie(redirect_response, secure=secure_cookie)
+            _clear_cookie(redirect_response, secure=secure_cookie(request))
             remember_requested_locale(redirect_response, request)
             return redirect_response
         page_response = html(render(session.csrf_token, locale), locale=locale)
@@ -189,7 +182,7 @@ def create_admin_router(
         success_message: str | None = None,
     ) -> Response:
         locale = locale_for(request)
-        if not post_origin_allowed(request):
+        if not _same_origin_submission(request):
             return forbidden(request)
         session = current_session(request)
         if session is None:
@@ -305,8 +298,6 @@ def create_admin_router(
 
     @router.get("/login")
     def login(request: Request) -> Response:
-        if not host_allowed(request):
-            return forbidden(request)
         locale = locale_for(request)
         if current_session(request) is not None:
             redirect_response = redirect("/admin")
@@ -319,7 +310,7 @@ def create_admin_router(
     @router.post("/login")
     async def login_submit(request: Request) -> Response:
         locale = locale_for(request)
-        if not post_origin_allowed(request):
+        if not _same_origin_submission(request):
             return forbidden(request)
         try:
             values = await _read_form(
@@ -346,7 +337,7 @@ def create_admin_router(
             encoded,
             max_age=settings.admin_session_ttl_seconds,
             path="/admin",
-            secure=secure_cookie,
+            secure=secure_cookie(request),
             httponly=True,
             samesite="strict",
         )
@@ -355,7 +346,7 @@ def create_admin_router(
     @router.post("/logout")
     async def logout(request: Request) -> Response:
         locale = locale_for(request)
-        if not post_origin_allowed(request):
+        if not _same_origin_submission(request):
             return forbidden(request)
         session = current_session(request)
         if session is None:
@@ -377,7 +368,7 @@ def create_admin_router(
                 status_code=exc.status_code,
             )
         response = redirect("/admin/login")
-        _clear_cookie(response, secure=secure_cookie)
+        _clear_cookie(response, secure=secure_cookie(request))
         return response
 
     @router.post("/bootstrap")
@@ -448,13 +439,7 @@ def create_admin_router(
         )
 
     @router.get("/style.css")
-    def stylesheet(request: Request) -> Response:
-        if not host_allowed(request):
-            return PlainTextResponse(
-                "Request origin was rejected.",
-                status_code=403,
-                headers=_SECURITY_HEADERS,
-            )
+    def stylesheet() -> Response:
         return PlainTextResponse(
             STYLESHEET,
             media_type="text/css",
@@ -462,6 +447,50 @@ def create_admin_router(
         )
 
     return router
+
+
+def _origin_parts(value: str) -> tuple[str, str, int] | None:
+    # Reject characters urlsplit would silently strip or interpret ambiguously.
+    if not value.isascii() or any(ord(char) <= 32 or char in "\\,?#\x7f" for char in value):
+        return None
+    try:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.netloc.endswith(":")
+        ):
+            return None
+        host = parsed.hostname.casefold()
+        if ":" in host:
+            if "%" in host:
+                return None
+            host = str(IPv6Address(host))
+        port = parsed.port
+        if port == 0:
+            return None
+        return (
+            parsed.scheme,
+            host,
+            port if port is not None else (443 if parsed.scheme == "https" else 80),
+        )
+    except ValueError:
+        return None
+
+
+def _same_origin_submission(request: Request) -> bool:
+    origins = request.headers.getlist("origin")
+    hosts = request.headers.getlist("host")
+    if len(origins) != 1 or len(hosts) != 1:
+        return False
+    origin = _origin_parts(origins[0])
+    # Only the ASGI server's trusted proxy handling may determine the scheme.
+    # Never use Origin, Forwarded or X-Forwarded-Host to choose the target site.
+    target = _origin_parts(f"{request.scope['scheme']}://{hosts[0]}")
+    return origin is not None and origin == target
 
 
 async def _read_form(

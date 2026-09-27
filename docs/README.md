@@ -26,6 +26,7 @@
 - [ADR 0001：实现与交付基线](decisions/0001-implementation-baseline.md)
 - [ADR 0002：由管理员发起的私有更新](decisions/0002-manual-private-updates.md)
 - [ADR 0003：受限的网页管理面板](decisions/0003-admin-web-console.md)
+- [管理面板入口简化提案](proposals/admin-request-origin.md)
 
 ## 状态词汇
 

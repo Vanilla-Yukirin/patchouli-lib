@@ -1,6 +1,4 @@
-from ipaddress import ip_address, ip_network
 from typing import Annotated, Literal
-from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,7 +25,6 @@ class Settings(BaseSettings):
     retrieval_cursor_signing_secret: SecretStr | None = None
     admin_password_hash: SecretStr | None = None
     admin_session_signing_secret: SecretStr | None = None
-    admin_origin: str | None = None
     admin_allow_private_http: bool = False
     admin_session_ttl_seconds: Annotated[int, Field(ge=300, le=86_400)] = 1_800
 
@@ -53,7 +50,6 @@ class Settings(BaseSettings):
     @field_validator(
         "admin_password_hash",
         "admin_session_signing_secret",
-        "admin_origin",
         mode="before",
     )
     @classmethod
@@ -82,43 +78,6 @@ class Settings(BaseSettings):
             raise ValueError(message)
         return value
 
-    @field_validator("admin_origin")
-    @classmethod
-    def require_exact_admin_origin(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        try:
-            parsed = urlsplit(value)
-            port = parsed.port
-        except ValueError:
-            raise ValueError(
-                "The admin origin must be one exact HTTP(S) origin without credentials."
-            ) from None
-        scheme = parsed.scheme.casefold()
-        if (
-            value != value.strip()
-            or any(character.isspace() for character in value)
-            or scheme not in {"http", "https"}
-            or parsed.hostname is None
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.query
-            or parsed.fragment
-            or parsed.path not in {"", "/"}
-        ):
-            message = "The admin origin must be one exact HTTP(S) origin without credentials."
-            raise ValueError(message)
-        host = parsed.hostname.casefold()
-        if not host.isascii():
-            message = "The admin origin hostname must contain ASCII characters only."
-            raise ValueError(message)
-        if ":" in host:
-            host = f"[{ip_address(host)}]"
-        default_port = 443 if scheme == "https" else 80
-        if port is not None and port != default_port:
-            host = f"{host}:{port}"
-        return f"{scheme}://{host}"
-
     @model_validator(mode="after")
     def validate_environment_secrets(self) -> "Settings":
         if self.environment == "production" and self.retrieval_cursor_signing_secret is None:
@@ -127,37 +86,12 @@ class Settings(BaseSettings):
         admin_values = (
             self.admin_password_hash,
             self.admin_session_signing_secret,
-            self.admin_origin,
         )
         if any(value is not None for value in admin_values) and not all(
             value is not None for value in admin_values
         ):
-            message = (
-                "Admin password hash, session signing secret, and origin must be set together."
-            )
+            message = "Admin password hash and session signing secret must be set together."
             raise ValueError(message)
-        if (
-            self.environment == "production"
-            and self.admin_origin is not None
-            and not self.admin_origin.startswith("https://")
-        ):
-            if not self.admin_allow_private_http:
-                raise ValueError("The admin origin must use HTTPS in production by default.")
-            try:
-                address = ip_address(urlsplit(self.admin_origin).hostname or "")
-            except ValueError:
-                raise ValueError("Private HTTP requires an explicit private IP origin.") from None
-            networks = (
-                "10.0.0.0/8",
-                "172.16.0.0/12",
-                "192.168.0.0/16",
-                "100.64.0.0/10",
-                "127.0.0.0/8",
-                "::1/128",
-                "fc00::/7",
-            )
-            if "%" in str(address) or not any(address in ip_network(net) for net in networks):
-                raise ValueError("Private HTTP requires an explicit private IP origin.")
         return self
 
     @property
