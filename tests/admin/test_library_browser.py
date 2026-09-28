@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, update
+from sqlalchemy import Engine, insert, update
 
 from patchouli_lib.admin.passwords import hash_password
 from patchouli_lib.app import create_app
-from patchouli_lib.auth.models import Caller
+from patchouli_lib.auth.models import AuditEvent, Caller, Credential
 from patchouli_lib.config import Settings
-from patchouli_lib.content.models import Page
+from patchouli_lib.content.models import Page, Revision
 from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import MarkdownContent, NewPage, NewPageIdentifier, NewRevision
 from patchouli_lib.database import immediate_transaction
@@ -345,3 +345,137 @@ def test_browser_reads_historical_revision_without_crossing_page_scope(
     chinese = client.get(f"{history_path}?lang=zh-CN")
     assert "版本历史" in chinese.text
     assert "返回当前版本" in chinese.text
+
+
+def test_home_shows_only_scoped_successful_content_activity(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    library, section, book = _seed_structure(engine)
+    other_library, _, _ = _seed_structure(engine, prefix="4", label="Other")
+    page_id = _insert_page(
+        engine,
+        library,
+        section,
+        book,
+        title="Title <script>alert(1)</script>",
+    )
+    actor_id = "a" * 32
+    credential_id = "b" * 32
+    revision_id = "rev_" + "3" * 32
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            insert(Caller),
+            {
+                "id": actor_id,
+                "library_id": library,
+                "kind": "agent",
+                "name": "Agent <img src=x onerror=alert(1)>",
+                "description": "Synthetic caller",
+                "policy_version": 1,
+                "created_at": 1,
+                "updated_at": 1,
+            },
+        )
+        connection.execute(
+            insert(Credential),
+            {
+                "id": credential_id,
+                "library_id": library,
+                "caller_id": actor_id,
+                "selector": "s" * 22,
+                "token_version": 1,
+                "verifier": b"v" * 32,
+                "expires_at": 10_000_000,
+                "created_at": 1,
+                "updated_at": 1,
+            },
+        )
+        page = (
+            connection.execute(
+                Page.__table__.select().where(Page.library_id == library, Page.page_id == page_id)
+            )
+            .mappings()
+            .one()
+        )
+        connection.execute(
+            insert(Revision),
+            NewRevision(
+                library_id=library,
+                revision_id=revision_id,
+                page_uid=page["page_uid"],
+                revision_number=2,
+                created_at=3_000_000,
+                **MarkdownContent.from_bytes(b"# New\n").model_dump(),
+            ).model_dump(),
+        )
+        connection.execute(
+            update(Page)
+            .where(Page.library_id == library, Page.page_id == page_id)
+            .values(
+                current_revision_id=revision_id,
+                current_revision_number=2,
+                updated_at=3_000_000,
+            ),
+        )
+        base = {
+            "library_id": library,
+            "actor_caller_id": actor_id,
+            "actor_credential_id": credential_id,
+            "resource_type": "page",
+            "resource_id": page_id,
+            "request_id": "synthetic-request",
+            "occurred_at": 3_000_000,
+        }
+        connection.execute(
+            insert(AuditEvent),
+            [
+                {
+                    **base,
+                    "id": "c" * 32,
+                    "action": "content.archive.create",
+                    "outcome": "succeeded",
+                },
+                {
+                    **base,
+                    "id": "d" * 32,
+                    "action": "content.archive.revise",
+                    "resource_type": "revision",
+                    "resource_id": revision_id,
+                    "outcome": "succeeded",
+                    "occurred_at": 4_000_000,
+                },
+                {**base, "id": "e" * 32, "action": "content.archive.create", "outcome": "failed"},
+                {**base, "id": "f" * 32, "action": "auth.credential.issue", "outcome": "succeeded"},
+            ],
+        )
+
+    assert client.get("/admin").status_code == 303
+    assert client.get(f"/admin/libraries/{library}/callers/{actor_id}").status_code == 303
+    _login(client)
+    home = client.get("/admin?lang=zh-CN")
+    assert home.status_code == 200
+    assert "内容近况" in home.text
+    assert home.text.count("更新了页面") == 1
+    assert home.text.count("创建了页面") == 1
+    assert home.text.index("更新了页面") < home.text.index("创建了页面")
+    assert f"/admin/libraries/{library}/callers/{actor_id}" in home.text
+    assert f"/pages/{page_id}/revisions/2" in home.text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in home.text
+    assert "<script>alert(1)</script>" not in home.text
+    assert "<img src=x onerror=alert(1)>" not in home.text
+    assert 'title="1970-01-01 00:00:04 UTC"' in home.text
+    assert home.headers["cache-control"] == "no-store, max-age=0"
+
+    rejected_form = client.post(
+        "/admin/bootstrap", data={"csrf_token": "wrong"}, headers={"Origin": _ORIGIN}
+    )
+    assert rejected_form.status_code == 403
+    assert "内容近况" not in rejected_form.text
+    assert "暂无内容活动。" not in rejected_form.text
+
+    caller = client.get(f"/admin/libraries/{library}/callers/{actor_id}")
+    assert caller.status_code == 200
+    assert "Synthetic caller" in caller.text
+    assert "&lt;img src=x onerror=alert(1)&gt;" in caller.text
+    assert client.get(f"/admin/libraries/{other_library}/callers/{actor_id}").status_code == 404

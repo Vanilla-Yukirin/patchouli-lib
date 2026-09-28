@@ -25,6 +25,7 @@ from patchouli_lib.admin.pages import (
     action_result_page,
     book_page,
     browser_not_found_page,
+    caller_page,
     credential_page,
     dashboard_page,
     guide_page,
@@ -308,7 +309,9 @@ def create_admin_router(
     def dashboard(request: Request) -> Response:
         return protected_page(
             request,
-            lambda csrf, locale: dashboard_page(csrf, locale=locale),
+            lambda csrf, locale: dashboard_page(
+                csrf, locale=locale, activities=read_model.recent_content_activity()
+            ),
         )
 
     @router.get("/login")
@@ -334,6 +337,14 @@ def create_admin_router(
         def render(csrf: str, locale: AdminLocale) -> str | None:
             view = read_model.get_library(library_id)
             return None if view is None else library_page(csrf, view, locale=locale)
+
+        return protected_page(request, render)
+
+    @router.get("/libraries/{library_id}/callers/{caller_id}")
+    def caller_detail(request: Request, library_id: str, caller_id: str) -> Response:
+        def render(csrf: str, locale: AdminLocale) -> str | None:
+            view = read_model.get_caller(library_id, caller_id)
+            return None if view is None else caller_page(csrf, view, locale=locale)
 
         return protected_page(request, render)
 

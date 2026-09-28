@@ -9,6 +9,7 @@ from sqlalchemy import Connection, Engine, and_, func, select
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.sql import Select
 
+from patchouli_lib.auth.models import AuditEvent, Caller
 from patchouli_lib.content.models import Page, Revision
 from patchouli_lib.library.models import Book, Library, Section
 
@@ -83,6 +84,30 @@ class RevisionItem:
     created_at: int
 
 
+@dataclass(frozen=True)
+class ContentActivityItem:
+    library_id: str
+    actor_id: str
+    actor_name: str
+    action: str
+    occurred_at: int
+    page_title: str | None
+    section_id: str | None
+    book_id: str | None
+    page_id: str | None
+    revision_number: int | None
+
+
+@dataclass(frozen=True)
+class CallerView:
+    library_id: str
+    id: str
+    name: str
+    description: str
+    kind: str
+    disabled_at: int | None
+
+
 class AdminReadModel:
     """Never issues DML and does not authenticate callers; the router does that first."""
 
@@ -93,6 +118,137 @@ class AdminReadModel:
         with self._engine.connect() as connection:
             rows = connection.execute(_library_summary_query()).mappings().all()
             return tuple(_library_item(row) for row in rows)
+
+    def recent_content_activity(self, *, limit: int = 50) -> tuple[ContentActivityItem, ...]:
+        """Show successful content writes only; this is not an API request log."""
+
+        if not 1 <= limit <= 50:
+            raise ValueError("Activity limit must be between 1 and 50.")
+        with self._engine.connect() as connection:
+            events = (
+                connection.execute(
+                    select(
+                        AuditEvent.library_id,
+                        AuditEvent.actor_caller_id,
+                        Caller.name.label("actor_name"),
+                        AuditEvent.action,
+                        AuditEvent.resource_id,
+                        AuditEvent.occurred_at,
+                    )
+                    .join(
+                        Caller,
+                        and_(
+                            Caller.library_id == AuditEvent.library_id,
+                            Caller.id == AuditEvent.actor_caller_id,
+                        ),
+                    )
+                    .where(
+                        AuditEvent.outcome == "succeeded",
+                        AuditEvent.action.in_(("content.archive.create", "content.archive.revise")),
+                    )
+                    .order_by(AuditEvent.occurred_at.desc(), AuditEvent.id.desc())
+                    .limit(limit)
+                )
+                .mappings()
+                .all()
+            )
+            items: list[ContentActivityItem] = []
+            for event in events:
+                if event["action"] == "content.archive.create":
+                    page = (
+                        connection.execute(
+                            select(
+                                Page.section_id,
+                                Page.book_id,
+                                Page.page_id,
+                                Page.title,
+                                Page.deleted_at,
+                            ).where(
+                                Page.library_id == event["library_id"],
+                                Page.page_id == event["resource_id"],
+                            )
+                        )
+                        .mappings()
+                        .one_or_none()
+                    )
+                    revision_number = None if page is None else 1
+                else:
+                    page = (
+                        connection.execute(
+                            select(
+                                Page.section_id,
+                                Page.book_id,
+                                Page.page_id,
+                                Page.title,
+                                Page.deleted_at,
+                                Revision.revision_number,
+                            )
+                            .join(
+                                Revision,
+                                and_(
+                                    Revision.library_id == Page.library_id,
+                                    Revision.page_uid == Page.page_uid,
+                                ),
+                            )
+                            .where(
+                                Revision.library_id == event["library_id"],
+                                Revision.revision_id == event["resource_id"],
+                            )
+                        )
+                        .mappings()
+                        .one_or_none()
+                    )
+                    revision_number = None if page is None else page["revision_number"]
+                if page is None or page["deleted_at"] is not None:
+                    section_id = book_id = page_id = None
+                    visible_revision_number = None
+                else:
+                    section_id = page["section_id"]
+                    book_id = page["book_id"]
+                    page_id = page["page_id"]
+                    visible_revision_number = revision_number
+                items.append(
+                    ContentActivityItem(
+                        library_id=event["library_id"],
+                        actor_id=event["actor_caller_id"],
+                        actor_name=event["actor_name"],
+                        action=event["action"],
+                        occurred_at=event["occurred_at"],
+                        page_title=None if page is None else page["title"],
+                        section_id=section_id,
+                        book_id=book_id,
+                        page_id=page_id,
+                        revision_number=visible_revision_number,
+                    )
+                )
+            return tuple(items)
+
+    def get_caller(self, library_id: str, caller_id: str) -> CallerView | None:
+        with self._engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(
+                        Caller.id,
+                        Caller.library_id,
+                        Caller.name,
+                        Caller.description,
+                        Caller.kind,
+                        Caller.disabled_at,
+                    ).where(Caller.library_id == library_id, Caller.id == caller_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                return None
+            return CallerView(
+                row["library_id"],
+                row["id"],
+                row["name"],
+                row["description"],
+                row["kind"],
+                row["disabled_at"],
+            )
 
     def get_library(self, library_id: str) -> LibraryView | None:
         with self._engine.connect() as connection:

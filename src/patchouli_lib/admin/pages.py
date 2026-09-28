@@ -6,6 +6,8 @@ from typing import Literal
 
 from patchouli_lib.admin.read_model import (
     BookView,
+    CallerView,
+    ContentActivityItem,
     LibraryItem,
     LibraryView,
     PageView,
@@ -175,6 +177,18 @@ _ZH_CN: dict[str, str] = {
     "Books": "书籍",
     "Pages": "页面",
     "Created": "创建时间",
+    "Content activity": "内容近况",
+    "Created a page": "创建了页面",
+    "Revised a page": "更新了页面",
+    "No content activity yet.": "暂无内容活动。",
+    "Page no longer available": "页面目前不可预览",
+    "Identity details": "身份详情",
+    "Identity kind": "身份类型",
+    "Identity description": "身份说明",
+    "Identity disabled": "身份已停用",
+    "Identity active": "身份有效",
+    "Status": "状态",
+    "Back to activity": "返回近况",
     "Occurred": "发生时间",
     "Current revision": "当前版本",
     "Page type": "页面类型",
@@ -297,6 +311,7 @@ def dashboard_page(
     *,
     locale: AdminLocale = "en",
     message: str | None = None,
+    activities: tuple[ContentActivityItem, ...] | None = None,
 ) -> str:
     csrf = escape(csrf_token, quote=True)
     notice = "" if message is None else _notice(localize(locale, message), error=True)
@@ -407,6 +422,7 @@ def dashboard_page(
 {_sidebar(locale, current="home")}
 <main>
   <h1>{localize(locale, "Administration")}</h1>
+  {"" if activities is None else _content_activity_timeline(activities, locale)}
   <p class="notice">{credential_notice}</p>
   {notice}
   <div class="grid">
@@ -461,6 +477,67 @@ def dashboard_page(
 </div>
 """
     return _document(localize(locale, "Administration"), content, locale)
+
+
+def _content_activity_timeline(
+    activities: tuple[ContentActivityItem, ...], locale: AdminLocale
+) -> str:
+    entries: list[str] = []
+    for item in activities:
+        actor_path = (
+            f"/admin/libraries/{escape(item.library_id, quote=True)}/callers/"
+            f"{escape(item.actor_id, quote=True)}"
+        )
+        actor = f'<a href="{actor_path}">{escape(item.actor_name)}</a>'
+        action = "Created a page" if item.action == "content.archive.create" else "Revised a page"
+        if (
+            item.page_id is not None
+            and item.section_id is not None
+            and item.book_id is not None
+            and item.revision_number is not None
+        ):
+            page_path = (
+                f"/admin/libraries/{escape(item.library_id, quote=True)}"
+                f"/sections/{escape(item.section_id, quote=True)}"
+                f"/books/{escape(item.book_id, quote=True)}"
+                f"/pages/{escape(item.page_id, quote=True)}"
+                f"/revisions/{item.revision_number}"
+            )
+            page = f'<a href="{page_path}">{escape(item.page_title or "")}</a>'
+        else:
+            page = escape(item.page_title or localize(locale, "Page no longer available"))
+        entries.append(
+            f"<li>{actor} {localize(locale, action)} {page}"
+            f'<p class="meta">{_relative_time(item.occurred_at, locale)}</p></li>'
+        )
+    body = (
+        f'<ul class="item-list">{"".join(entries)}</ul>'
+        if entries
+        else f"<p>{localize(locale, 'No content activity yet.')}</p>"
+    )
+    return f'<section class="card"><h2>{localize(locale, "Content activity")}</h2>{body}</section>'
+
+
+def caller_page(csrf_token: str, view: CallerView, *, locale: AdminLocale = "en") -> str:
+    status = "Identity disabled" if view.disabled_at is not None else "Identity active"
+    body = (
+        "<dl>"
+        f"<dt>{localize(locale, 'Identity kind')}</dt><dd>{escape(view.kind)}</dd>"
+        f"<dt>{localize(locale, 'Identity description')}</dt>"
+        f"<dd>{escape(view.description)}</dd>"
+        f"<dt>{localize(locale, 'Status')}</dt><dd>{localize(locale, status)}</dd>"
+        "</dl>"
+        f'<p><a href="/admin">{localize(locale, "Back to activity")}</a></p>'
+    )
+    return _browser_document(
+        csrf_token,
+        locale,
+        view.name,
+        f"/admin/libraries/{escape(view.library_id, quote=True)}/callers/"
+        f"{escape(view.id, quote=True)}",
+        body,
+        crumbs=((localize(locale, "Libraries"), "/admin/libraries"),),
+    )
 
 
 def credential_page(
@@ -858,6 +935,25 @@ def _time(timestamp_micros: int) -> str:
         return f"{timestamp_micros} µs (UTC)"
     iso = value.isoformat(timespec="seconds")
     return f'<time datetime="{iso}">{value:%Y-%m-%d %H:%M} UTC</time>'
+
+
+def _relative_time(timestamp_micros: int, locale: AdminLocale) -> str:
+    try:
+        value = datetime.fromtimestamp(timestamp_micros / 1_000_000, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return _time(timestamp_micros)
+    seconds = max(0, int((datetime.now(UTC) - value).total_seconds()))
+    if seconds < 60:
+        count, unit = seconds, ("秒前", "seconds ago")
+    elif seconds < 3600:
+        count, unit = seconds // 60, ("分钟前", "minutes ago")
+    elif seconds < 86_400:
+        count, unit = seconds // 3600, ("小时前", "hours ago")
+    else:
+        count, unit = seconds // 86_400, ("天前", "days ago")
+    relative = f"{count}{unit[0]}" if locale == "zh-CN" else f"{count} {unit[1]}"
+    absolute = value.strftime("%Y-%m-%d %H:%M:%S UTC")
+    return f'<time datetime="{value.isoformat()}" title="{absolute}">{relative}</time>'
 
 
 def _header(

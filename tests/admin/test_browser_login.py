@@ -19,6 +19,7 @@ from websockets.sync.client import connect
 
 from patchouli_lib.admin.passwords import hash_password
 from patchouli_lib.app import create_app
+from patchouli_lib.auth.models import Caller
 from patchouli_lib.config import Settings
 
 _ADMIN_PASSWORD = "synthetic browser password"
@@ -80,9 +81,11 @@ def _live_admin(tmp_path: Path) -> Iterator[str]:
             "admin_session_ttl_seconds": 600,
         }
     )
+    application = create_app(settings)
+    Caller.metadata.create_all(application.state.engine)
     server = uvicorn.Server(
         uvicorn.Config(
-            create_app(settings),
+            application,
             host="127.0.0.1",
             port=port,
             log_level="error",

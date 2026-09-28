@@ -234,6 +234,7 @@ def test_multiple_entrypoints_work_without_origin_configuration(
         }
     )
     application = create_app(settings)
+    Caller.metadata.create_all(application.state.engine)
 
     with TestClient(application, base_url=origin, follow_redirects=False) as client:
         assert client.get("/admin/login").status_code == 200
@@ -443,6 +444,7 @@ def test_secure_cookie_depends_on_request_transport_and_http_opt_in(
         }
     )
     app = create_app(settings)
+    Caller.metadata.create_all(app.state.engine)
     # 同一个应用通过多个入口访问，不需要为入口名称分别修改设置。
     for origin in ("http://private.example.invalid:8080", "https://public.example.invalid"):
         with TestClient(app, base_url=origin, follow_redirects=False) as client:
