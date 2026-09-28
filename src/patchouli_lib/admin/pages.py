@@ -124,6 +124,8 @@ small { color: #526259; }
 .item-list li { background: #fff; border: 1px solid #d6ddd5; border-radius: .6rem; padding: 1rem; }
 .item-list a { font-weight: 700; }
 .item-list p { margin-bottom: 0; overflow-wrap: anywhere; }
+.library-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); }
+.library-grid li { min-height: 8rem; }
 .meta { color: #526259; font-size: .9rem; }
 .markdown-preview { white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 40rem) {
@@ -755,7 +757,7 @@ def libraries_page(
         for item in libraries
     )
     body = (
-        f'<ul class="item-list">{cards}</ul>'
+        f'<ul class="item-list library-grid">{cards}</ul>'
         if libraries
         else f'<p class="card">{localize(locale, "No libraries yet.")}</p>'
     )

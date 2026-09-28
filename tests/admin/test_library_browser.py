@@ -248,6 +248,7 @@ def test_browser_reads_scoped_hierarchy_and_escapes_markdown(
 
     listing = client.get("/admin/libraries")
     assert listing.status_code == 200
+    assert '<ul class="item-list library-grid">' in listing.text
     assert f'href="{library_path}"' in listing.text
     assert "Page count: 1" in listing.text
     assert "Page count: 0" in listing.text
