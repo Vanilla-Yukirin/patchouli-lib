@@ -5,15 +5,19 @@ import hashlib
 import json
 import math
 import platform
+import random
 import sqlite3
 import tempfile
 import time
 import unicodedata
 from collections import defaultdict
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
 from typing import Literal, cast
+
+from patchouli_lib.search.ngram import extract_term_frequencies
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FIXTURE = REPOSITORY_ROOT / "tests" / "fixtures" / "retrieval" / "fts_corpus.json"
@@ -45,6 +49,77 @@ HAN_RANGES = (
 )
 
 CandidateName = Literal["unicode61", "trigram", "application_cjk_ngrams"]
+ScaleCandidateName = Literal["trigram", "alpha_ngrams", "nfc_ngrams"]
+
+SCALE_DEFAULT_PAGES = 5_000
+SCALE_DEFAULT_BODY_BYTES = 10 * 1024
+SCALE_TOP_K = 20
+SCALE_CANDIDATES: tuple[ScaleCandidateName, ...] = (
+    "trigram",
+    "alpha_ngrams",
+    "nfc_ngrams",
+)
+_SCALE_TOPIC_SENTENCES = (
+    (
+        "知识库资料讨论检索目标和历史版本。\n",
+        "知识库中的中文文档记录声明时间与来源。\n",
+        "Knowledge library notes compare Page and Revision citations.\n",
+    ),
+    (
+        "视频摘要梳理画面、字幕与发布时间。\n",
+        "视频主题包含创作者讲述与素材核对。\n",
+        "Video notes describe episodes and visual examples.\n",
+    ),
+    (
+        "新闻报道记录事件进展、采访与现场信息。\n",
+        "新闻资料区分初稿、勘误及后续说明。\n",
+        "Newsroom records include dates and independent sources.\n",
+    ),
+    (
+        "系统技术报告记录接口性能与故障恢复。\n",
+        "系统工程实验比较缓存、索引与请求延迟。\n",
+        "Technical report examines storage and query plans.\n",
+    ),
+    (
+        "会议纪要整理议题、决定与待办事项。\n",
+        "会议成员讨论时间安排和文档修订。\n",
+        "Meeting minutes capture open questions and decisions.\n",
+    ),
+    (
+        "工程脚本说明构建过程、校验结果与版本。\n",
+        "工程笔记关注错误处理、测试和安全边界。\n",
+        "Build notes cover validation and reproducible checks.\n",
+    ),
+)
+_SCALE_SHARED_SENTENCES = (
+    "合成资料使用不同主题，方便观察候选集变化。\n",
+    "Synthetic sample echos neutral context without a topic keyword.\n",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ScaleDocument:
+    page_id: str
+    library_id: str
+    section_id: str
+    book_id: str
+    revision_id: str
+    title: str
+    tags: tuple[str, ...]
+    occurred_at: int
+    body: str
+    old_body: str | None
+    deleted: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ScaleQuery:
+    name: str
+    keywords: tuple[str, ...]
+    libraries: tuple[str, ...]
+    tags_any: tuple[str, ...] = ()
+    occurred_from: int | None = None
+    occurred_before: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1583,14 +1658,487 @@ def render_markdown(report: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def generate_scale_corpus(
+    page_count: int = SCALE_DEFAULT_PAGES,
+    body_bytes: int = SCALE_DEFAULT_BODY_BYTES,
+) -> tuple[ScaleDocument, ...]:
+    """Create original, deterministic synthetic Pages; no private fixture is read.
+
+    The bytes vary by Page and paragraph, but reuse a small fixed sentence pool.
+    Old revisions and deleted Pages are included as *negative* search probes.
+    This is an experiment, not a production schema or representative corpus.
+    """
+
+    if (
+        not 1 <= page_count <= 20_000
+        or not 512 <= body_bytes <= 64 * 1024
+        or page_count * body_bytes > 128 * 1024 * 1024
+    ):
+        raise ValueError("Scale corpus dimensions are outside the experiment bounds.")
+    documents: list[ScaleDocument] = []
+    base_time = 1_735_689_600_000_000
+    for index in range(page_count):
+        rng = random.Random(index + 20_260_929)
+        page_id = f"synthetic-page-{index:05d}"
+        topic_sentences = _SCALE_TOPIC_SENTENCES[index % len(_SCALE_TOPIC_SENTENCES)]
+        prefix = f"合成页面 {index:05d} 实体 entity{index:05d}。\n{topic_sentences[0]}"
+        if index == 17:
+            prefix += "独家信号仅出现在这份当前资料。\n"
+        if index % 19 == 0:
+            prefix += "回收站独有标记只属于已删除页面。\n"
+        parts = [prefix]
+        used_bytes = len(prefix.encode("utf-8"))
+        while True:
+            sentence = (
+                topic_sentences[rng.randrange(len(topic_sentences))]
+                if rng.randrange(4)
+                else _SCALE_SHARED_SENTENCES[rng.randrange(len(_SCALE_SHARED_SENTENCES))]
+            )
+            sentence_bytes = len(sentence.encode("utf-8"))
+            if used_bytes + sentence_bytes > body_bytes:
+                break
+            parts.append(sentence)
+            used_bytes += sentence_bytes
+        parts.append(" " * (body_bytes - used_bytes))
+        body = "".join(parts)
+        assert len(body.encode("utf-8")) == body_bytes
+        old_body = f"旧版独有标记 {page_id}" if index % 7 == 0 else None
+        documents.append(
+            ScaleDocument(
+                page_id=page_id,
+                library_id=f"library-{index % 3}",
+                section_id=f"section-{index % 3}-{(index // 3) % 4}",
+                book_id=f"book-{index % 3}-{(index // 3) % 4}-{(index // 12) % 2}",
+                revision_id=f"revision-{index:05d}-current",
+                title=f"合成资料 {index:05d} 技术观察",
+                tags=(("video", "shared", "research")[(index // 3) % 3],)
+                + (("common",) if index % 5 == 0 else ()),
+                occurred_at=base_time + index * 1_000_000,
+                body=body,
+                old_body=old_body,
+                deleted=index % 19 == 0,
+            )
+        )
+    return tuple(documents)
+
+
+def _scale_queries(documents: tuple[ScaleDocument, ...]) -> tuple[ScaleQuery, ...]:
+    base_time = documents[0].occurred_at
+    return (
+        ScaleQuery("han_1", ("库",), ("library-0",)),
+        ScaleQuery("han_2", ("知识",), ("library-0",)),
+        ScaleQuery("han_3", ("知识库",), ("library-0",)),
+        ScaleQuery("english", ("report",), ("library-0",)),
+        ScaleQuery("rare", ("独家信号",), ("library-2",)),
+        ScaleQuery("no_match", ("绝不会出现的测试词",), ("library-0",)),
+        ScaleQuery("old_revision_only", ("旧版独有标记",), ("library-0",)),
+        ScaleQuery("deleted_only", ("回收站独有标记",), ("library-0",)),
+        ScaleQuery("keywords_or", ("知识库", "report"), ("library-0", "library-1")),
+        ScaleQuery("broad_title", ("技术观察",), ("library-0",)),
+        ScaleQuery(
+            "tags_time_only",
+            (),
+            ("library-0", "library-1"),
+            ("video", "research"),
+            base_time + 40 * 1_000_000,
+            base_time + 400 * 1_000_000,
+        ),
+        ScaleQuery("time_from_only", ("技术观察",), ("library-0",), occurred_from=base_time),
+        ScaleQuery(
+            "time_before_only",
+            ("技术观察",),
+            ("library-0",),
+            occurred_before=base_time + 200 * 1_000_000,
+        ),
+    )
+
+
+def _scale_normalize(value: str) -> str:
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", value).casefold())
+
+
+def _scale_encoded_terms(candidate: ScaleCandidateName, text: str) -> tuple[str, ...]:
+    if candidate == "alpha_ngrams":
+        return application_tokens(text)
+    return tuple(
+        f"{term.kind}{term.text.encode('utf-8').hex()}" for term in extract_term_frequencies(text)
+    )
+
+
+def _scale_scope_term(library_id: str, term: str) -> str:
+    return f"l{hashlib.sha256(library_id.encode()).hexdigest()}x{term}"
+
+
+def _scale_index_text(candidate: ScaleCandidateName, library_id: str, text: str) -> str:
+    if candidate == "trigram":
+        return text
+    return " ".join(
+        _scale_scope_term(library_id, term) for term in _scale_encoded_terms(candidate, text)
+    )
+
+
+def _scale_create_database(path: Path, candidate: ScaleCandidateName) -> sqlite3.Connection:
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE scale_documents (page_id TEXT PRIMARY KEY, library_id TEXT NOT NULL, "
+        "section_id TEXT NOT NULL, book_id TEXT NOT NULL, revision_id TEXT NOT NULL, "
+        "title TEXT NOT NULL, tags TEXT NOT NULL, occurred_at INTEGER NOT NULL, "
+        "body TEXT NOT NULL, deleted INTEGER NOT NULL)"
+    )
+    connection.execute(
+        "CREATE INDEX scale_documents_scope ON scale_documents(library_id, occurred_at, page_id)"
+    )
+    connection.execute(
+        "CREATE TABLE scale_old_revisions (page_id TEXT PRIMARY KEY, body TEXT NOT NULL)"
+    )
+    connection.execute(
+        "CREATE TABLE scale_tags (page_id TEXT NOT NULL, tag TEXT NOT NULL, "
+        "PRIMARY KEY (page_id, tag))"
+    )
+    connection.execute("CREATE INDEX scale_tags_lookup ON scale_tags(tag, page_id)")
+    tokenizer = "trigram" if candidate == "trigram" else "unicode61"
+    connection.execute(
+        "CREATE VIRTUAL TABLE scale_index USING fts5("
+        "page_id UNINDEXED, library_id UNINDEXED, title, body, "
+        f"tokenize='{tokenizer}')"
+    )
+    return connection
+
+
+def _scale_build(
+    path: Path, candidate: ScaleCandidateName, documents: tuple[ScaleDocument, ...]
+) -> dict[str, object]:
+    started = time.perf_counter_ns()
+    connection = _scale_create_database(path, candidate)
+    try:
+        with connection:
+            for document in documents:
+                connection.execute(
+                    "INSERT INTO scale_documents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        document.page_id,
+                        document.library_id,
+                        document.section_id,
+                        document.book_id,
+                        document.revision_id,
+                        document.title,
+                        ",".join(document.tags),
+                        document.occurred_at,
+                        document.body,
+                        int(document.deleted),
+                    ),
+                )
+                connection.executemany(
+                    "INSERT INTO scale_tags VALUES (?, ?)",
+                    ((document.page_id, tag) for tag in document.tags),
+                )
+                if document.old_body is not None:
+                    connection.execute(
+                        "INSERT INTO scale_old_revisions VALUES (?, ?)",
+                        (document.page_id, document.old_body),
+                    )
+                if not document.deleted:
+                    connection.execute(
+                        "INSERT INTO scale_index VALUES (?, ?, ?, ?)",
+                        (
+                            document.page_id,
+                            document.library_id,
+                            _scale_index_text(candidate, document.library_id, document.title),
+                            _scale_index_text(candidate, document.library_id, document.body),
+                        ),
+                    )
+        return {
+            "build_ms": round((time.perf_counter_ns() - started) / 1_000_000, 3),
+            "database_bytes": _database_bytes(connection),
+            "indexed_pages": cast(
+                int, connection.execute("SELECT count(*) FROM scale_index").fetchone()[0]
+            ),
+            "old_revisions": cast(
+                int, connection.execute("SELECT count(*) FROM scale_old_revisions").fetchone()[0]
+            ),
+        }
+    finally:
+        connection.close()
+
+
+def _scale_query_sql(
+    candidate: ScaleCandidateName, query: ScaleQuery
+) -> tuple[str, tuple[object, ...]] | None:
+    if not query.libraries:
+        raise ValueError("Scale query must select explicit authorized Libraries.")
+    values: list[object] = []
+    if query.keywords:
+        if candidate == "trigram":
+            expressions = [
+                compile_literal_query(keyword) for keyword in query.keywords if len(keyword) >= 3
+            ]
+        else:
+            expressions = [
+                "(" + " AND ".join(f'"{_scale_scope_term(library, term)}"' for term in terms) + ")"
+                for library in query.libraries
+                for keyword in query.keywords
+                if (terms := _scale_encoded_terms(candidate, keyword))
+            ]
+        if not expressions:
+            return None
+        source = "scale_index JOIN scale_documents AS d ON d.page_id = scale_index.page_id"
+        conditions = ["scale_index MATCH ?"]
+        values.append(" OR ".join(dict.fromkeys(expressions)))
+    else:
+        source = "scale_documents AS d"
+        conditions = []
+    placeholders = ", ".join("?" for _ in query.libraries)
+    conditions.extend((f"d.library_id IN ({placeholders})", "d.deleted = 0"))
+    values.extend(query.libraries)
+    if query.tags_any:
+        tag_placeholders = ", ".join("?" for _ in query.tags_any)
+        conditions.append(
+            "EXISTS (SELECT 1 FROM scale_tags AS t WHERE t.page_id = d.page_id "
+            f"AND t.tag IN ({tag_placeholders}))"
+        )
+        values.extend(query.tags_any)
+    if query.occurred_from is not None:
+        conditions.append("d.occurred_at >= ?")
+        values.append(query.occurred_from)
+    if query.occurred_before is not None:
+        conditions.append("d.occurred_at < ?")
+        values.append(query.occurred_before)
+    sql = (
+        "SELECT d.page_id, d.library_id, d.revision_id, d.title, d.body, d.tags "
+        f"FROM {source} WHERE {' AND '.join(conditions)}"
+    )
+    return sql, tuple(values)
+
+
+def _scale_rank(
+    page_id: str, title: str, body: str, tags: tuple[str, ...], query: ScaleQuery
+) -> tuple[int, str] | None:
+    normalized_title = _scale_normalize(title)
+    normalized_body = _scale_normalize(body)
+    normalized_keywords = tuple(_scale_normalize(keyword) for keyword in query.keywords)
+    matched = [
+        keyword
+        for keyword in normalized_keywords
+        if keyword in normalized_title or keyword in normalized_body
+    ]
+    if normalized_keywords and not matched:
+        return None
+    score = sum(
+        10 * (keyword in normalized_title) + (keyword in normalized_body) for keyword in matched
+    )
+    score += 6 * sum(tag in query.tags_any for tag in tags)
+    return (-score, page_id)
+
+
+def _scale_search(
+    connection: sqlite3.Connection, candidate: ScaleCandidateName, query: ScaleQuery
+) -> tuple[tuple[str, ...], int]:
+    statement = _scale_query_sql(candidate, query)
+    if statement is None:
+        return (), 0
+    sql, values = statement
+    ranked: list[tuple[int, str]] = []
+    candidate_count = 0
+    # Exhaust the complete authorized/filter-matching candidate set before
+    # applying Top K. No legacy 256-candidate shortcut is used here.
+    for page_id, _library_id, _revision_id, title, body, tags_text in connection.execute(
+        sql, values
+    ):
+        candidate_count += 1
+        tags = tuple(cast(str, tags_text).split(","))
+        rank = _scale_rank(cast(str, page_id), cast(str, title), cast(str, body), tags, query)
+        if rank is not None:
+            ranked.append(rank)
+    ranked.sort()
+    return tuple(page_id for _score, page_id in ranked), candidate_count
+
+
+def _scale_expected(documents: tuple[ScaleDocument, ...], query: ScaleQuery) -> tuple[str, ...]:
+    ranked: list[tuple[int, str]] = []
+    for document in documents:
+        if (
+            document.deleted
+            or document.library_id not in query.libraries
+            or (query.tags_any and not set(document.tags).intersection(query.tags_any))
+            or (query.occurred_from is not None and document.occurred_at < query.occurred_from)
+            or (query.occurred_before is not None and document.occurred_at >= query.occurred_before)
+        ):
+            continue
+        rank = _scale_rank(document.page_id, document.title, document.body, document.tags, query)
+        if rank is not None:
+            ranked.append(rank)
+    ranked.sort()
+    return tuple(page_id for _score, page_id in ranked)
+
+
+def evaluate_scale(
+    page_count: int = SCALE_DEFAULT_PAGES,
+    body_bytes: int = SCALE_DEFAULT_BODY_BYTES,
+) -> dict[str, object]:
+    """Compare experimental candidate recall without changing production search."""
+
+    documents = generate_scale_corpus(page_count, body_bytes)
+    queries = _scale_queries(documents)
+    expected = {query.name: _scale_expected(documents, query) for query in queries}
+    candidate_reports: list[dict[str, object]] = []
+    with tempfile.TemporaryDirectory(prefix="patchouli-fts-scale-") as temporary_directory:
+        for candidate in SCALE_CANDIDATES:
+            path = Path(temporary_directory) / f"{candidate}.sqlite3"
+            build = _scale_build(path, candidate, documents)
+            cold_samples: list[float] = []
+            warm_samples: list[float] = []
+            query_reports: list[dict[str, object]] = []
+            for query in queries:
+                started = time.perf_counter_ns()
+                with closing(sqlite3.connect(path)) as connection:
+                    hits, candidate_count = _scale_search(connection, candidate, query)
+                    fresh_ms = (time.perf_counter_ns() - started) / 1_000_000
+                    cold_samples.append(fresh_ms)
+                    query_warm_samples: list[float] = []
+                    for _ in range(2):
+                        started = time.perf_counter_ns()
+                        warm_hits, warm_count = _scale_search(connection, candidate, query)
+                        warm_ms = (time.perf_counter_ns() - started) / 1_000_000
+                        query_warm_samples.append(warm_ms)
+                        warm_samples.append(warm_ms)
+                        assert (warm_hits, warm_count) == (hits, candidate_count)
+                truth = expected[query.name]
+                true_positive = len(set(hits).intersection(truth))
+                query_reports.append(
+                    {
+                        "name": query.name,
+                        "candidate_count": candidate_count,
+                        "matched_count": len(hits),
+                        "expected_count": len(truth),
+                        "recall": round(true_positive / len(truth), 6) if truth else 1.0,
+                        "precision": round(true_positive / len(hits), 6) if hits else 1.0,
+                        "candidate_precision": (
+                            round(len(hits) / candidate_count, 6) if candidate_count else 1.0
+                        ),
+                        "top_k_exact": hits[:SCALE_TOP_K] == truth[:SCALE_TOP_K],
+                        "top_k_page_ids": list(hits[:SCALE_TOP_K]),
+                        "fresh_connection_ms": round(fresh_ms, 6),
+                        "same_connection_latency_ms": _latency_summary(
+                            query_warm_samples
+                        ).as_dict(),
+                    }
+                )
+            candidate_reports.append(
+                {
+                    "name": candidate,
+                    **build,
+                    "fresh_connection_latency_ms": _latency_summary(cold_samples).as_dict(),
+                    "same_connection_latency_ms": _latency_summary(warm_samples).as_dict(),
+                    "queries": query_reports,
+                }
+            )
+    return {
+        "mode": "synthetic_scale_experiment",
+        "status": "Proposed; evaluation only; no production index or API",
+        "license": "CC0-1.0 original synthetic text",
+        "seed": 20_260_929,
+        "page_count": page_count,
+        "body_bytes_per_page": body_bytes,
+        "body_bytes_total": page_count * body_bytes,
+        "library_count": len({document.library_id for document in documents}),
+        "section_count": len({document.section_id for document in documents}),
+        "book_count": len({document.book_id for document in documents}),
+        "deleted_pages": sum(document.deleted for document in documents),
+        "old_revisions": sum(document.old_body is not None for document in documents),
+        "python_version": platform.python_version(),
+        "sqlite_version": sqlite3.sqlite_version,
+        "unicode_version": unicodedata.unidata_version,
+        "latency_scope": (
+            "Single-process local SQLite experiment; fresh connection is not cold OS cache; "
+            "measurements include full candidate enumeration and literal post-filter/ranking. "
+            "They do not establish a production latency guarantee."
+        ),
+        "limitations": (
+            "No production schema, API, authorization integration, concurrency, "
+            "rebuild interruption, or real backup/restore is exercised. "
+            "The repeated, low-vocabulary synthetic sentences stress volume but do not "
+            "represent real document vocabulary, posting-list distribution, or relevance. "
+            "Experimental scoring and tokenization are not accepted public semantics."
+        ),
+        "candidates": candidate_reports,
+    }
+
+
+def render_scale_markdown(report: dict[str, object]) -> str:
+    lines = [
+        "# Synthetic search scale experiment (Proposed, not implemented search)",
+        "",
+        f"- Pages: {report['page_count']} × {report['body_bytes_per_page']} UTF-8 body bytes.",
+        f"- Library/Section/Book counts: {report['library_count']}/"
+        f"{report['section_count']}/{report['book_count']}.",
+        f"- Deleted Pages: {report['deleted_pages']}; old Revisions: {report['old_revisions']}.",
+        f"- {report['latency_scope']}",
+        "",
+        "| Candidate | Build ms | DB bytes | Fresh-connection p95 ms | "
+        "Same-connection p95 ms | Exact Top K cases |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for candidate in cast(list[dict[str, object]], report["candidates"]):
+        cold = cast(dict[str, object], candidate["fresh_connection_latency_ms"])
+        warm = cast(dict[str, object], candidate["same_connection_latency_ms"])
+        queries = cast(list[dict[str, object]], candidate["queries"])
+        exact = sum(query["top_k_exact"] is True for query in queries)
+        lines.append(
+            f"| `{candidate['name']}` | {candidate['build_ms']} | {candidate['database_bytes']} | "
+            f"{cold['p95_ms']} | {warm['p95_ms']} | {exact}/{len(queries)} |"
+        )
+    lines.extend(("", "## Per-query observations", ""))
+    lines.extend(
+        (
+            "| Candidate | Query | Candidates | Relevant | Recall | Candidate precision | "
+            "Fresh ms | Same-connection p95 ms | Top K exact |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        )
+    )
+    for candidate in cast(list[dict[str, object]], report["candidates"]):
+        for query in cast(list[dict[str, object]], candidate["queries"]):
+            warm = cast(dict[str, object], query["same_connection_latency_ms"])
+            lines.append(
+                f"| `{candidate['name']}` | `{query['name']}` | {query['candidate_count']} | "
+                f"{query['expected_count']} | {query['recall']} | {query['candidate_precision']} | "
+                f"{query['fresh_connection_ms']} | {warm['p95_ms']} | "
+                f"{query['top_k_exact']} |"
+            )
+    lines.extend(
+        (
+            "",
+            "All matching candidates are enumerated before Top K; no Alpha 256 cap.",
+            "",
+            str(report["limitations"]),
+        )
+    )
+    return "\n".join(lines)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Evaluate SQLite FTS5 candidates on a synthetic multilingual corpus."
     )
     parser.add_argument("--fixture", default=str(DEFAULT_FIXTURE))
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
+    parser.add_argument(
+        "--scale-pages",
+        type=int,
+        help=(
+            "Run a separate deterministic scale experiment "
+            "(default dimensions: 5000 x 10240 bytes)."
+        ),
+    )
+    parser.add_argument("--scale-body-bytes", type=int, default=SCALE_DEFAULT_BODY_BYTES)
     args = parser.parse_args()
 
+    if args.scale_pages is not None:
+        scale_report = evaluate_scale(args.scale_pages, args.scale_body_bytes)
+        if args.format == "markdown":
+            print(render_scale_markdown(scale_report))
+        else:
+            print(json.dumps(scale_report, ensure_ascii=False, indent=2, sort_keys=True))
+        return
     corpus = load_corpus(Path(cast(str, args.fixture)))
     report = evaluate_all(corpus)
     if cast(str, args.format) == "markdown":

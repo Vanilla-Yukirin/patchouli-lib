@@ -332,3 +332,128 @@ def test_markdown_report_states_evaluation_boundary() -> None:
     assert "Section isolation" in rendered
     assert "## Resource measurements" in rendered
     assert "does not select a production tokenizer" in rendered
+
+
+def test_scale_corpus_is_deterministic_varied_and_keeps_history_separate() -> None:
+    module = runpy.run_path(str(EVALUATION_SCRIPT), run_name="fts_scale_for_test")
+    generate = cast(object, module["generate_scale_corpus"])
+    assert callable(generate)
+    first = generate(42, 640)
+    second = generate(42, 640)
+
+    assert first == second
+    assert len(first) == 42
+    assert {document.library_id for document in first} == {
+        "library-0",
+        "library-1",
+        "library-2",
+    }
+    assert len({document.body for document in first}) == 42
+    assert all(len(document.body.encode("utf-8")) == 640 for document in first)
+    assert "知识库" in first[0].body
+    assert "知识库" not in first[1].body
+    assert "视频摘要" in first[1].body
+    assert "视频摘要" not in first[2].body
+    assert any(document.old_body is not None for document in first)
+    assert any(document.deleted for document in first)
+    assert all("旧版独有标记" not in document.body for document in first)
+    assert all("回收站独有标记" not in document.old_body for document in first if document.old_body)
+    with pytest.raises(ValueError):
+        generate(20_000, 64 * 1024)
+
+
+def test_scale_corpus_books_have_one_parent_and_tags_cross_libraries() -> None:
+    module = runpy.run_path(str(EVALUATION_SCRIPT), run_name="fts_scale_for_test")
+    generate = cast(object, module["generate_scale_corpus"])
+    make_queries = cast(object, module["_scale_queries"])
+    expected_for = cast(object, module["_scale_expected"])
+    assert callable(generate) and callable(make_queries) and callable(expected_for)
+    documents = generate(420, 640)
+
+    section_parents: dict[str, str] = {}
+    book_parents: dict[str, tuple[str, str]] = {}
+    tag_libraries: dict[str, set[str]] = {}
+    for document in documents:
+        section_parent = section_parents.setdefault(document.section_id, document.library_id)
+        assert section_parent == document.library_id
+        book_parent = book_parents.setdefault(
+            document.book_id, (document.library_id, document.section_id)
+        )
+        assert book_parent == (document.library_id, document.section_id)
+        for tag in document.tags:
+            tag_libraries.setdefault(tag, set()).add(document.library_id)
+
+    assert len(section_parents) == 12
+    assert len(book_parents) == 24
+    assert all(
+        tag_libraries[tag] == {"library-0", "library-1", "library-2"}
+        for tag in ("video", "shared", "research")
+    )
+
+    tags_query = next(query for query in make_queries(documents) if query.name == "tags_time_only")
+    by_id = {document.page_id: document for document in documents}
+    matched = [by_id[page_id] for page_id in expected_for(documents, tags_query)]
+    assert {document.library_id for document in matched} == {"library-0", "library-1"}
+    assert {
+        tag for tag in tags_query.tags_any if any(tag in document.tags for document in matched)
+    } == {
+        "video",
+        "research",
+    }
+
+
+def test_scale_evaluation_does_not_truncate_broad_authorized_results() -> None:
+    module = runpy.run_path(str(EVALUATION_SCRIPT), run_name="fts_scale_for_test")
+    evaluate = cast(object, module["evaluate_scale"])
+    assert callable(evaluate)
+    report = cast(dict[str, object], evaluate(900, 512))
+    candidates = cast(list[dict[str, object]], report["candidates"])
+    assert report["mode"] == "synthetic_scale_experiment"
+    assert report["status"] == "Proposed; evaluation only; no production index or API"
+    assert report["page_count"] == 900
+    assert report["body_bytes_total"] == 900 * 512
+    assert report["library_count"] == 3
+    assert report["deleted_pages"] == 48
+    assert "low-vocabulary synthetic sentences" in cast(str, report["limitations"])
+    assert [candidate["name"] for candidate in candidates] == [
+        "trigram",
+        "alpha_ngrams",
+        "nfc_ngrams",
+    ]
+
+    for candidate in candidates:
+        queries = {
+            query["name"]: query for query in cast(list[dict[str, object]], candidate["queries"])
+        }
+        assert cast(int, queries["time_from_only"]["candidate_count"]) > 256
+        assert queries["time_from_only"]["matched_count"] == 284
+        assert queries["time_from_only"]["expected_count"] == 284
+        assert queries["time_from_only"]["top_k_exact"] is True
+        assert queries["tags_time_only"]["top_k_exact"] is True
+        assert cast(int, queries["tags_time_only"]["expected_count"]) > 0
+        assert (
+            queries["tags_time_only"]["matched_count"]
+            == queries["tags_time_only"]["expected_count"]
+        )
+        assert queries["old_revision_only"]["matched_count"] == 0
+        assert queries["deleted_only"]["matched_count"] == 0
+        assert queries["no_match"]["matched_count"] == 0
+        assert queries["rare"]["candidate_count"] == 1
+        assert queries["no_match"]["candidate_count"] == 0
+        assert all(
+            str(page_id).startswith("synthetic-page-")
+            for page_id in cast(list[str], queries["time_from_only"]["top_k_page_ids"])
+        )
+        assert cast(int, candidate["indexed_pages"]) == 900 - 48
+
+    trigram = candidates[0]
+    trigram_queries = {
+        query["name"]: query for query in cast(list[dict[str, object]], trigram["queries"])
+    }
+    assert trigram_queries["han_1"]["top_k_exact"] is False
+    assert trigram_queries["han_2"]["top_k_exact"] is False
+    for candidate in candidates[1:]:
+        assert all(
+            query["top_k_exact"] is True
+            for query in cast(list[dict[str, object]], candidate["queries"])
+        )
