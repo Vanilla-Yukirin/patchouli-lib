@@ -6,6 +6,7 @@ from typing import Literal
 
 from patchouli_lib.admin.read_model import (
     BookView,
+    CallerItem,
     CallerView,
     ContentActivityItem,
     LibraryItem,
@@ -183,6 +184,11 @@ _ZH_CN: dict[str, str] = {
     "No content activity yet.": "暂无内容活动。",
     "Page no longer available": "页面目前不可预览",
     "Identity details": "身份详情",
+    "Identities": "设备与身份",
+    "Agent / device": "Agent／设备",
+    "Operator": "管理员",
+    "No identities yet.": "暂无身份。",
+    "Credentials cannot be recovered.": "这里不显示凭据。现有凭据无法从校验值还原。",
     "Identity kind": "身份类型",
     "Identity description": "身份说明",
     "Identity disabled": "身份已停用",
@@ -541,6 +547,38 @@ def caller_page(csrf_token: str, view: CallerView, *, locale: AdminLocale = "en"
         body,
         crumbs=((localize(locale, "Libraries"), "/admin/libraries"),),
     )
+
+
+def callers_page(
+    csrf_token: str, callers: tuple[CallerItem, ...], *, locale: AdminLocale = "en"
+) -> str:
+    entries = ""
+    for item in callers:
+        kind = localize(locale, "Agent / device" if item.kind == "agent" else "Operator")
+        status_key = "Identity disabled" if item.disabled_at is not None else "Identity active"
+        status = localize(locale, status_key)
+        entries += (
+            "<li>"
+            f'<a href="/admin/libraries/{escape(item.library_id, quote=True)}/callers/'
+            f'{escape(item.id, quote=True)}">{escape(item.name)}</a>'
+            f'<p class="meta">{escape(item.library_name)} · {kind} · {status}'
+            f" · {localize(locale, 'Created')}: {_time(item.created_at)}</p>"
+            "</li>"
+        )
+    body = (
+        f'<ul class="item-list">{entries}</ul>'
+        if entries
+        else f"<p>{localize(locale, 'No identities yet.')}</p>"
+    )
+    content = (
+        f"{_header(escape(csrf_token, quote=True), locale, switch_path='/admin/agents')}"
+        '<div class="admin-shell">'
+        f"{_sidebar(locale, current='agents')}"
+        f"<main><h1>{localize(locale, 'Identities')}</h1>"
+        f'<p class="section-help">{localize(locale, "Credentials cannot be recovered.")}</p>'
+        f"{body}</main></div>"
+    )
+    return _document(localize(locale, "Identities"), content, locale)
 
 
 def credential_page(
@@ -944,6 +982,7 @@ def _sidebar(locale: AdminLocale, *, current: str) -> str:
     entries = (
         ("home", "Home", "/admin"),
         ("libraries", "Libraries", "/admin/libraries"),
+        ("agents", "Identities", "/admin/agents"),
         ("guide", "Guide", "/admin/guide"),
         ("agent", "Agent", "/admin/agent"),
         ("mcp", "MCP", "/admin/mcp"),
@@ -1001,6 +1040,7 @@ def _header(
   <nav aria-label="{localize(locale, "Administration")}">
     <a href="/admin"><strong>PatchouliLib</strong></a>
     <a href="/admin/libraries">{localize(locale, "Libraries")}</a>
+    <a href="/admin/agents">{localize(locale, "Identities")}</a>
     <a href="/admin/guide">{localize(locale, "Guide")}</a>
     <a href="/admin/agent">Agent</a>
     <a href="/admin/mcp">MCP</a>

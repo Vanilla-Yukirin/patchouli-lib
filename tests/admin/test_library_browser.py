@@ -136,6 +136,46 @@ def _insert_page(
     return identifier.value
 
 
+def test_identity_browser_is_protected_and_shows_metadata_only(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    anonymous = client.get("/admin/agents")
+    assert anonymous.status_code == 303
+    assert anonymous.headers["location"] == "/admin/login"
+
+    _login(client)
+    empty = client.get("/admin/agents?lang=zh-CN")
+    assert empty.status_code == 200
+    assert "暂无身份。" in empty.text
+    assert empty.headers["cache-control"] == "no-store, max-age=0"
+
+    library_id, _, _ = _seed_structure(engine)
+    caller_id = "d" * 32
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            insert(Caller).values(
+                id=caller_id,
+                library_id=library_id,
+                kind="agent",
+                name="Reader <device>",
+                description="Synthetic device",
+                policy_version=1,
+                created_at=1_000_000,
+                updated_at=1_000_000,
+            )
+        )
+
+    page = client.get("/admin/agents?lang=zh-CN")
+    assert page.status_code == 200
+    assert "设备与身份" in page.text
+    assert "Reader &lt;device&gt;" in page.text
+    assert "Reader <device>" not in page.text
+    assert f"/admin/libraries/{library_id}/callers/{caller_id}" in page.text
+    assert "现有凭据无法从校验值还原" in page.text
+    assert 'aria-current="page"' in page.text
+
+
 def test_browser_requires_session_and_empty_state(browser: tuple[TestClient, Engine]) -> None:
     client, engine = browser
     for path in ("/admin/libraries", "/admin/libraries/" + "a" * 32):

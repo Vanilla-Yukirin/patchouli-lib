@@ -108,6 +108,17 @@ class CallerView:
     disabled_at: int | None
 
 
+@dataclass(frozen=True)
+class CallerItem:
+    library_id: str
+    library_name: str
+    id: str
+    name: str
+    kind: str
+    created_at: int
+    disabled_at: int | None
+
+
 class AdminReadModel:
     """Never issues DML and does not authenticate callers; the router does that first."""
 
@@ -118,6 +129,29 @@ class AdminReadModel:
         with self._engine.connect() as connection:
             rows = connection.execute(_library_summary_query()).mappings().all()
             return tuple(_library_item(row) for row in rows)
+
+    def list_callers(self) -> tuple[CallerItem, ...]:
+        """List identity metadata, never credential verifiers or raw tokens."""
+
+        with self._engine.connect() as connection:
+            rows = (
+                connection.execute(
+                    select(
+                        Caller.library_id,
+                        Library.name.label("library_name"),
+                        Caller.id,
+                        Caller.name,
+                        Caller.kind,
+                        Caller.created_at,
+                        Caller.disabled_at,
+                    )
+                    .join(Library, Library.id == Caller.library_id)
+                    .order_by(Caller.created_at.desc(), Caller.id.desc())
+                )
+                .mappings()
+                .all()
+            )
+            return tuple(CallerItem(**row) for row in rows)
 
     def recent_content_activity(self, *, limit: int = 50) -> tuple[ContentActivityItem, ...]:
         """Show successful content writes only; this is not an API request log."""

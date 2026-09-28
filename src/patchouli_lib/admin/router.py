@@ -26,6 +26,7 @@ from patchouli_lib.admin.pages import (
     book_page,
     browser_not_found_page,
     caller_page,
+    callers_page,
     credential_page,
     dashboard_page,
     guide_page,
@@ -374,6 +375,13 @@ def create_admin_router(
         return protected_page(
             request,
             lambda csrf, locale: libraries_page(csrf, read_model.list_libraries(), locale=locale),
+        )
+
+    @router.get("/agents")
+    def agents(request: Request) -> Response:
+        return protected_page(
+            request,
+            lambda csrf, locale: callers_page(csrf, read_model.list_callers(), locale=locale),
         )
 
     @router.post("/libraries")
