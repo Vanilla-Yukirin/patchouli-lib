@@ -43,7 +43,7 @@ from patchouli_lib.content.service import legacy_page_current_etag
 from patchouli_lib.database import build_engine, immediate_transaction
 from patchouli_lib.idempotency.models import IdempotencyRecord
 from patchouli_lib.idempotency.schemas import digest_idempotency_key
-from patchouli_lib.identifiers import parse_occurrence_time
+from patchouli_lib.identifiers import canonical_utc_wire, parse_occurrence_time
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import LibraryStructureSeed, NewBook, NewSection
 from patchouli_lib.library.service import LibrarySeedService
@@ -228,6 +228,7 @@ def _build_app(
     *,
     request_id_factory: Callable[[], str] = lambda: REQUEST_ID,
     service_factory: ArchiveServiceFactory | None = None,
+    clock: Callable[[], int] = lambda: OPERATION_TIME,
 ) -> FastAPI:
     application = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     install_api_exception_handlers(application)
@@ -238,7 +239,7 @@ def _build_app(
     application.include_router(
         create_archive_router(
             fixture.engine,
-            clock=lambda: OPERATION_TIME,
+            clock=clock,
             service_factory=service_factory,
         )
     )
@@ -738,6 +739,13 @@ def test_idempotency_key_rejects_non_ascii_raw_header(
             "request_validation_failed",
         ),
         ({"title": "Missing fields"}, CONTENT, 422, "request_validation_failed"),
+        ({**CREATE_METADATA, "occurred_at": None}, CONTENT, 422, "request_validation_failed"),
+        (
+            {**CREATE_METADATA, "occurred_at": "not-a-time"},
+            CONTENT,
+            422,
+            "request_validation_failed",
+        ),
         ({**CREATE_METADATA, "unknown": True}, CONTENT, 422, "request_validation_failed"),
         (CREATE_METADATA, b"", 422, "request_validation_failed"),
         (CREATE_METADATA, b"nul\x00body", 422, "request_validation_failed"),
@@ -1130,6 +1138,41 @@ def test_same_key_replay_uses_current_request_id_and_mismatch_is_409(
         "audit_events": 1,
         "idempotency_records": 1,
     }
+
+
+def test_missing_occurrence_uses_server_time_and_replays_without_recomputing(
+    archive_api: ArchiveApiFixture,
+) -> None:
+    current_time = [OPERATION_TIME]
+    metadata = {key: value for key, value in CREATE_METADATA.items() if key != "occurred_at"}
+    with TestClient(
+        _build_app(archive_api, clock=lambda: current_time[0]), raise_server_exceptions=False
+    ) as client:
+        created = _create(client, archive_api, key="default-time-key", metadata=metadata)
+        assert created.status_code == 201
+        assert created.json()["page"]["occurred_at"] == canonical_utc_wire(OPERATION_TIME)
+        assert created.json()["occurrence_notice"] == {
+            "source": "server_utc",
+            "warning_code": "occurred_at_defaulted",
+        }
+        current_time[0] += 5_000_000
+        replay = _create(client, archive_api, key="default-time-key", metadata=metadata)
+        assert replay.status_code == 201
+        assert replay.headers["Idempotency-Replayed"] == "true"
+        assert replay.content == created.content
+        explicit = _create(
+            client,
+            archive_api,
+            key="default-time-key",
+            metadata={**metadata, "occurred_at": canonical_utc_wire(OPERATION_TIME)},
+        )
+        _problem(explicit, 409, "idempotency_mismatch")
+    assert _counts(archive_api.engine)["pages"] == 1
+    with archive_api.engine.connect() as connection:
+        page = connection.execute(select(Page.created_at, Page.occurred_at)).one()
+        revision = connection.execute(select(Revision.created_at)).one()
+    assert page == (OPERATION_TIME, OPERATION_TIME)
+    assert revision == (OPERATION_TIME,)
 
 
 def test_same_key_metadata_source_conflicts_but_wrong_route_stays_hidden(

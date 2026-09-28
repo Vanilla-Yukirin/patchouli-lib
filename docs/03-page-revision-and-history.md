@@ -1,7 +1,7 @@
 # Page 版本、历史与恢复
 
 > 当前实现只支持单份 Markdown 正文的 Revision。维护者提出的多文件完整快照、
-> 相同内容不新增 Revision、声明时间缺省和回收站界面见
+> 相同内容不新增 Revision 和回收站界面见
 > [下一阶段提案](proposals/next-phase-product-and-api.md)；其中仅软删除方向已在
 > 本文接受，不能把未来接口当作已上线。
 
@@ -72,7 +72,14 @@ Archive Page。请求须携带本 Section 的 `archive:write` bearer 凭据、`I
 校正前后的时间及当前 Revision 引用；不会创建新的 Revision，也不会返回正文。相同
 幂等请求重放原响应；旧 ETag 或并发修改返回 412；时间与当前值完全相同则返回 409；
 错误格式返回 422。数据库同时记录不可变校正链和审计，备份校验会核对该校正与
-幂等响应。创建 Page 时缺省声明时间的代填尚未实现。
+幂等响应。
+
+本开发分支创建 Archive Page 时允许省略 `occurred_at`；服务在事务内查询幂等重放后，
+以本次服务器 UTC 时间代填，并在创建响应中附加
+`occurrence_notice: {"source":"server_utc","warning_code":"occurred_at_defaulted"}`。
+同键重试重放原响应，不重新取时间；显式传入 `null` 或错误时间仍返回 422。该提示只在
+创建响应及其幂等记录中保存，普通 Page 读取仍仅展示实际声明时间，不声称保留了
+“当年代填”的独立元数据。
 
 ## 移动内容
 

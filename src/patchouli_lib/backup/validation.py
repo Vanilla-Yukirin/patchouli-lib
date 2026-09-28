@@ -940,7 +940,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
 
         row = connection.execute(
             "SELECT p.page_uid, p.book_id, p.title, p.page_type, p.occurred_at, "
-            "r.created_at, r.content_md, r.content_sha256 FROM pages AS p "
+            "r.created_at, r.content_md, r.content_sha256, p.created_at FROM pages AS p "
             "JOIN revisions AS r ON r.library_id = p.library_id AND r.page_uid = p.page_uid "
             "AND r.revision_id = ? AND r.revision_number = ? "
             "WHERE p.library_id = ? AND p.page_id = ? AND p.section_id = ?",
@@ -962,6 +962,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
             or type(row[5]) is not int
             or type(row[6]) is not bytes
             or type(row[7]) is not bytes
+            or type(row[8]) is not int
         ):
             raise BackupDatabaseError
         response_occurrence = row[4]
@@ -985,6 +986,15 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
             or body.page.type != row[3]
             or body.page.occurred_at != canonical_utc_wire(response_occurrence)
             or body.revision.created_at != canonical_utc_wire(row[5])
+        ):
+            raise BackupDatabaseError
+        if body.occurrence_notice is not None and (
+            route != CREATE_ROUTE_TEMPLATE
+            or body.revision.revision_number != 1
+            or row[8] != row[5]
+            or response_occurrence != row[5]
+            or body.page.occurred_at != original_request_timestamp
+            or etag.startswith('"page-v1-')
         ):
             raise BackupDatabaseError
         try:

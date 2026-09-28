@@ -30,6 +30,7 @@ from patchouli_client import (
     ClientResponse,
     MarkdownContent,
     Page,
+    PageDocument,
     PatchouliClient,
     ProblemError,
     ProtocolError,
@@ -243,7 +244,11 @@ def _dispatch(runtime: McpRuntime, name: str, arguments: Mapping[str, object]) -
             title=_bounded_text(
                 _required_string(arguments, "title"), label="archive title", max_bytes=65_536
             ),
-            occurred_at=parse_rfc3339(_required_string(arguments, "occurred_at")),
+            occurred_at=(
+                parse_rfc3339(_required_string(arguments, "occurred_at"))
+                if "occurred_at" in arguments
+                else None
+            ),
             source=_source(arguments),
         )
         result = runtime.application.create_archive(
@@ -389,6 +394,15 @@ def _jsonable(value: object) -> object:
             "current_revision_id": value.current_revision_id,
             "current_revision_number": value.current_revision_number,
         }
+    if isinstance(value, PageDocument):
+        result = {
+            "page": _jsonable(value.page),
+            "revision": _jsonable(value.revision),
+            "citation": _jsonable(value.citation),
+        }
+        if value.occurrence_notice is not None:
+            result["occurrence_notice"] = _jsonable(value.occurrence_notice)
+        return result
     if isinstance(value, Mapping):
         return {str(key): _jsonable(item) for key, item in value.items()}
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
@@ -513,7 +527,7 @@ def _tool_inventory() -> list[types.Tool]:
                 "content": _string_schema(max_length=MAX_ARCHIVE_BYTES),
                 "operation_id": _nullable_string_schema(max_length=36),
             },
-            ["section_id", "book_id", "title", "occurred_at", "source_kind", "content"],
+            ["section_id", "book_id", "title", "source_kind", "content"],
             write,
         ),
         _tool(

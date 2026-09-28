@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -10,12 +11,27 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import Engine
 
+from patchouli_lib.auth.repository import AuthRepository
+from patchouli_lib.auth.schemas import NewCredential
+from patchouli_lib.auth.tokens import generate_token
 from patchouli_lib.backup import BACKUP_FILENAME, BackupDatabaseError, validate_database
 from patchouli_lib.backup.manifest import (
     INTERMEDIATE_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
 )
+from patchouli_lib.content.schemas import (
+    AppendArchiveRevisionCommand,
+    ArchiveIdempotencyKey,
+    ArchiveMutationSuccess,
+    ArchiveSourceInput,
+    CorrectArchiveOccurrenceCommand,
+    CreateArchiveCommand,
+)
+from patchouli_lib.content.service import ArchiveService
+from patchouli_lib.database import immediate_transaction
+from patchouli_lib.idempotency.schemas import digest_idempotency_key
+from patchouli_lib.identifiers import parse_occurrence_time
 
 from .test_service import _create, _legacy_bundle_with_binary_file
 
@@ -305,6 +321,99 @@ def test_validation_rejects_semantically_unreconstructable_replays(
             "trg_idempotency_records_immutable_update",
             statement,
             ignore_checks=True,
+        )
+    with pytest.raises(BackupDatabaseError):
+        validate_database(database)
+
+
+def test_validation_accepts_server_defaulted_occurrence_and_rejects_forged_marker(
+    complete_engine: Engine,
+    tmp_path: Path,
+) -> None:
+    operation_at = parse_occurrence_time("2026-08-13T10:00:01.000000Z").utc_microseconds
+    token = generate_token()
+    with immediate_transaction(complete_engine) as connection:
+        AuthRepository(connection).add_credential(
+            NewCredential(
+                id="9" * 32,
+                library_id="1" * 32,
+                caller_id="b" * 32,
+                selector=token.selector,
+                token_version=token.version,
+                verifier=token.verifier,
+                expires_at=operation_at + 10_000_000,
+                created_at=operation_at - 1_000_000,
+                updated_at=operation_at - 1_000_000,
+            )
+        )
+        created = ArchiveService(connection, clock=lambda: operation_at).create_archive(
+            token.value,
+            CreateArchiveCommand(
+                library_id="1" * 32,
+                section_id="2" * 32,
+                book_id="3" * 32,
+                title="Defaulted Synthetic Page",
+                content_md=b"# Defaulted synthetic page\n",
+                source=ArchiveSourceInput(kind="synthetic"),
+                request_id="req_" + "a" * 32,
+            ),
+            ArchiveIdempotencyKey(
+                key_digest=digest_idempotency_key("defaulted-backup-synthetic-key")
+            ),
+        )
+        assert isinstance(created, ArchiveMutationSuccess)
+
+    database = _database_copy(complete_engine, tmp_path, "valid-defaulted")
+    validate_database(database)
+
+    with immediate_transaction(complete_engine) as connection:
+        appended = ArchiveService(connection, clock=lambda: operation_at + 100).append_revision(
+            token.value,
+            AppendArchiveRevisionCommand(
+                library_id="1" * 32,
+                section_id="2" * 32,
+                page_id=created.page.page_id,
+                expected_etag=created.response.response_etag,
+                content_md=b"# Later synthetic revision\n",
+                source=ArchiveSourceInput(kind="synthetic"),
+                request_id="req_" + "c" * 32,
+            ),
+            ArchiveIdempotencyKey(key_digest=digest_idempotency_key("defaulted-later-revision")),
+        )
+        assert isinstance(appended, ArchiveMutationSuccess)
+    with immediate_transaction(complete_engine) as connection:
+        corrected = ArchiveService(connection, clock=lambda: operation_at + 200).correct_occurrence(
+            token.value,
+            CorrectArchiveOccurrenceCommand(
+                library_id="1" * 32,
+                section_id="2" * 32,
+                page_id=created.page.page_id,
+                expected_etag=appended.response.response_etag,
+                occurred_at=operation_at + 1_000_000,
+                request_id="req_" + "d" * 32,
+            ),
+            ArchiveIdempotencyKey(key_digest=digest_idempotency_key("defaulted-correction")),
+        )
+        assert corrected.response_status == 200
+    validate_database(_database_copy(complete_engine, tmp_path, "defaulted-after-edits"))
+
+    with closing(sqlite3.connect(database)) as connection:
+        old_body = connection.execute(
+            "SELECT response_body FROM idempotency_records WHERE response_etag LIKE ?",
+            ('"page-v1-%',),
+        ).fetchone()
+        assert old_body is not None
+        forged = json.loads(old_body[0])
+        forged["occurrence_notice"] = {
+            "source": "server_utc",
+            "warning_code": "occurred_at_defaulted",
+        }
+        _replace_trigger(
+            connection,
+            "trg_idempotency_records_immutable_update",
+            "UPDATE idempotency_records SET response_body = x'"
+            + json.dumps(forged, separators=(",", ":")).encode().hex()
+            + "' WHERE response_etag LIKE '\"page-v1-%'",
         )
     with pytest.raises(BackupDatabaseError):
         validate_database(database)

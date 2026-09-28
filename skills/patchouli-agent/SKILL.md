@@ -112,9 +112,14 @@ patchouli --output json page revision --section SECTION_ID --page PAGE_ID --revi
 patchouli --output json archive create --section SECTION_ID --book BOOK_ID --metadata-file METADATA_FILE --content-file MARKDOWN_FILE
 ```
 
-对 MCP `archive_create`，传入 `section_id`、`book_id`、`title`、`occurred_at`、
-`source_kind`、可选的 `source_locator` 和完整 `content`。绝不要传入凭据、端点、
+对 MCP `archive_create`，传入 `section_id`、`book_id`、`title`、`source_kind`、
+完整 `content`，以及可选的 `occurred_at`、`source_locator`。绝不要传入凭据、端点、
 本地文件名、日志位置或幂等键。
+
+若确实不知道内容发生时间，可以完全省略 `occurred_at`（CLI 元数据和 MCP 参数都
+如此），服务器会以本次 UTC 时间代填，并在创建响应给出 `occurred_at_defaulted`
+警告；显式 `null` 或无效时间不会代填。重试时保持“省略”这一状态，不要把后来
+看到的服务器时间填回同一个操作 ID。
 
 客户端会在变更前持久化准备受权限限制的操作日志。保留返回的非机密
 `operation_id`。遇到结果不确定的失败后，只重放完全相同的 CLI 命令并添加

@@ -268,6 +268,54 @@ def test_create_archive_multipart_and_response_headers() -> None:
     assert result.metadata.idempotency_replayed is True
 
 
+def test_create_archive_omits_time_across_retry_and_preserves_default_notice() -> None:
+    requests: list[httpx.Request] = []
+    response_body = sample_page()
+    response_body["occurrence_notice"] = {
+        "source": "server_utc",
+        "warning_code": "occurred_at_defaulted",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(503)
+        return httpx.Response(
+            201,
+            headers=protected_headers(
+                Location=(
+                    "/api/v1/sections/sec_synthetic/pages/20260811t091500123z-synthetic-session"
+                ),
+                ETag='"revision-synthetic-1"',
+            ),
+            json=response_body,
+        )
+
+    with PatchouliClient(
+        "https://patchouli.example.invalid",
+        http_transport=httpx.MockTransport(handler),
+        sleep=lambda _: None,
+    ) as client:
+        result = client.create_archive(
+            "sec_synthetic",
+            "book_synthetic",
+            ArchiveCreateMetadata(
+                title="Synthetic session", source=SourceInput(kind="conversation")
+            ),
+            MarkdownContent.from_text("# Synthetic archive"),
+            token=BearerToken("cred_synthetic_123"),
+            idempotency_key=IdempotencyKey("op_synthetic_123"),
+        )
+
+    assert len(requests) == 2
+    assert requests[0].content == requests[1].content
+    assert requests[0].headers["Idempotency-Key"] == requests[1].headers["Idempotency-Key"]
+    assert b'"occurred_at"' not in requests[0].content
+    assert b'"source":{"kind":"conversation"}' in requests[0].content
+    assert result.value.occurrence_notice is not None
+    assert result.value.occurrence_notice.warning_code == "occurred_at_defaulted"
+
+
 def test_revise_archive_requires_and_sends_strong_if_match() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path.endswith("/revisions")

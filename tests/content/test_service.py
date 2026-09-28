@@ -206,6 +206,38 @@ def test_create_archive_persists_exact_atomic_graph_and_safe_replay(
         )
         assert result.response.response_location != result.citation.href
         wire = json.loads(result.response.response_body)
+        assert "occurrence_notice" not in wire
+        legacy_shape = {
+            "page": {
+                "section_id": archive_scope.section_id,
+                "book_id": archive_scope.book_id,
+                "page_id": result.page.page_id,
+                "title": command.title,
+                "type": "archive",
+                "occurred_at": canonical_utc_wire(OCCURRED_AT),
+                "current_revision_id": result.revision.revision_id,
+                "current_revision_number": 1,
+            },
+            "revision": {
+                "page_id": result.page.page_id,
+                "revision_id": result.revision.revision_id,
+                "revision_number": 1,
+                "created_at": canonical_utc_wire(OPERATION_TIME),
+                "content_type": "text/markdown;charset=utf-8",
+                "content_sha256": result.revision.content_sha256.hex(),
+                "content": command.content_md.decode("utf-8"),
+            },
+            "citation": {
+                "section_id": archive_scope.section_id,
+                "page_id": result.page.page_id,
+                "revision_id": result.revision.revision_id,
+                "revision_number": 1,
+                "href": result.citation.href,
+            },
+        }
+        assert result.response.response_body == json.dumps(
+            legacy_shape, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
         assert wire["revision"]["content"] == command.content_md.decode("utf-8")
         assert wire["revision"]["content_type"] == "text/markdown;charset=utf-8"
         assert wire["citation"]["href"].endswith("/revisions/1")
@@ -235,6 +267,62 @@ def test_create_archive_persists_exact_atomic_graph_and_safe_replay(
         assert replay.response.response_body == result.response.response_body
         assert replay.response.presentation_headers()["Idempotency-Replayed"] == "true"
         assert _counts(connection) == (1, 1, 1, 1, 1, 1)
+
+
+def test_missing_occurrence_uses_one_transaction_time_and_replays_original_result(
+    content_engine: Engine,
+    archive_scope: ArchiveScope,
+) -> None:
+    explicit = _create_command(archive_scope)
+    omitted = explicit.model_copy(update={"occurred_at": None})
+    key = _key("default-occurrence")
+    assert ArchiveService._create_fingerprint(explicit) != ArchiveService._create_fingerprint(
+        omitted
+    )
+    with immediate_transaction(content_engine) as connection:
+        created = _service(connection).create_archive(archive_scope.token.value, omitted, key)
+        assert isinstance(created, ArchiveMutationSuccess)
+        assert created.page.occurred_at == OPERATION_TIME
+        assert created.page.created_at == OPERATION_TIME
+        assert created.revision.created_at == OPERATION_TIME
+        assert created.page.id_timestamp_micros == (OPERATION_TIME // 1_000) * 1_000
+        body = json.loads(created.response.response_body)
+        assert body["page"]["occurred_at"] == canonical_utc_wire(OPERATION_TIME)
+        assert body["occurrence_notice"] == {
+            "source": "server_utc",
+            "warning_code": "occurred_at_defaulted",
+        }
+
+    with immediate_transaction(content_engine) as connection:
+        replay = ArchiveService(
+            connection,
+            clock=lambda: OPERATION_TIME + 1_000_000,
+        ).create_archive(
+            archive_scope.token.value,
+            omitted.model_copy(update={"request_id": f"req_{'f' * 32}"}),
+            key,
+        )
+        assert isinstance(replay, ArchiveMutationReplay)
+        assert replay.response.response_body == created.response.response_body
+        assert replay.body.page.occurred_at == canonical_utc_wire(OPERATION_TIME)
+        assert replay.body.occurrence_notice is not None
+        assert _counts(connection) == (1, 1, 1, 1, 1, 1)
+
+    with (
+        immediate_transaction(content_engine) as connection,
+        pytest.raises(IdempotencyConflictError, match="different request"),
+    ):
+        _service(connection).create_archive(archive_scope.token.value, explicit, key)
+
+
+@pytest.mark.parametrize("invalid", ["2026-08-13T10:00:01Z", True, 253_402_300_800_000_000])
+def test_present_invalid_occurrence_is_not_defaulted(
+    archive_scope: ArchiveScope, invalid: object
+) -> None:
+    values = _create_command(archive_scope).model_dump()
+    values["occurred_at"] = invalid
+    with pytest.raises(ValidationError):
+        CreateArchiveCommand.model_validate(values)
 
 
 def test_same_key_changed_semantics_conflicts_without_second_mutation(

@@ -504,16 +504,20 @@ def _create_command(
     request_id: str,
 ) -> CreateArchiveCommand:
     metadata = _metadata_object(metadata_bytes)
-    if set(metadata) != {"title", "occurred_at", "source"}:
+    if set(metadata) not in ({"title", "source"}, {"title", "occurred_at", "source"}):
         raise _validation_problem()
     try:
-        occurrence = parse_occurrence_time(metadata["occurred_at"])
+        occurrence = (
+            parse_occurrence_time(metadata["occurred_at"]).utc_microseconds
+            if "occurred_at" in metadata
+            else None
+        )
         return CreateArchiveCommand(
             library_id=context.authenticated.caller.library_id,
             section_id=section_id,
             book_id=book_id,
             title=metadata["title"],
-            occurred_at=occurrence.utc_microseconds,
+            occurred_at=occurrence,
             content_md=content,
             source=_source_input(metadata["source"]),
             request_id=request_id,

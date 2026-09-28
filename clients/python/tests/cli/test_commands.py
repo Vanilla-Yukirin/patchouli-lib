@@ -153,6 +153,7 @@ def test_read_command_surface_uses_shared_client_and_stable_json(
     if operation in {"page.current", "page.revision"}:
         assert payload["data"]["page"]["type"] == "archive"
         assert "page_type" not in payload["data"]["page"]
+        assert "occurrence_notice" not in payload["data"]
 
 
 def test_search_reads_private_query_from_file_and_uses_post_json(tmp_path: Path) -> None:
@@ -276,6 +277,58 @@ def test_archive_content_stdin_preserves_exact_bytes(tmp_path: Path) -> None:
     assert result.status == ExitCode.SUCCESS
 
 
+def test_archive_create_without_time_omits_field_and_surfaces_server_notice(tmp_path: Path) -> None:
+    (tmp_path / "metadata.json").write_text(
+        '{"title":"Synthetic session","source":{"kind":"conversation"}}', encoding="utf-8"
+    )
+    (tmp_path / "content.md").write_text("# Synthetic archive", encoding="utf-8")
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert b'"occurred_at"' not in request.content
+        assert b'"source":{"kind":"conversation"}' in request.content
+        response = sample_page()
+        response["occurrence_notice"] = {
+            "source": "server_utc",
+            "warning_code": "occurred_at_defaulted",
+        }
+        return httpx.Response(
+            201,
+            headers=protected_headers(
+                Location=f"/api/v1/sections/sec_synthetic/pages/{_PAGE_ID}",
+                ETag='"revision-synthetic-1"',
+            ),
+            json=response,
+        )
+
+    result = invoke_cli(
+        [
+            "--output",
+            "json",
+            "archive",
+            "create",
+            "--section",
+            "sec_synthetic",
+            "--book",
+            "book_synthetic",
+            "--metadata-file",
+            "metadata.json",
+            "--content-file",
+            "content.md",
+        ],
+        handler=handler,
+        tmp_path=tmp_path,
+        observed_requests=requests,
+    )
+    assert result.status == ExitCode.SUCCESS
+    assert len(requests) == 2  # whoami plus create
+    payload = json.loads(result.stdout)
+    assert payload["data"]["occurrence_notice"] == {
+        "source": "server_utc",
+        "warning_code": "occurred_at_defaulted",
+    }
+
+
 def test_archive_create_journals_before_request_and_reuses_exact_key(tmp_path: Path) -> None:
     metadata_path = tmp_path / "metadata.json"
     content_path = tmp_path / "content.md"
@@ -335,6 +388,7 @@ def test_archive_create_journals_before_request_and_reuses_exact_key(tmp_path: P
         observed_requests=requests,
     )
     first_payload = json.loads(first.stdout)
+    assert "occurrence_notice" not in first_payload["data"]
     operation_id = first_payload["metadata"]["operation_id"]
     second = invoke_cli(
         [*base_args, "--operation-id", operation_id],

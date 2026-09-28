@@ -49,10 +49,15 @@ GET /api/v1/sections/{section_id}/pages/{page_id}/revisions/{revision_number}
 `POST /api/v1/sections/{section_id}/books/{book_id}/pages` 只创建新的 Archive Page。
 请求包含新的 `Idempotency-Key`，`multipart/form-data` 必须正好有两部分：
 
-- `metadata`: `application/json`，UTF-8 JSON 对象，字段正好是 `title`、
-  `occurred_at`（带时区的 RFC 3339 时间）和 `source`，例如
+- `metadata`: `application/json`，UTF-8 JSON 对象，必须有 `title`、`source`；
+  `occurred_at` 可选，提供时必须是带时区的 RFC 3339 时间。例如
   `{"title":"Synthetic archive","occurred_at":"2026-08-11T09:15:00Z","source":{"kind":"conversation"}}`。
 - `content`: `text/markdown; charset=utf-8`，本机 Markdown 文件的完整字节。
+
+仅在确实不知道发生时间时省略 `occurred_at`；服务器会用本次 UTC 时间代填，
+创建响应增加 `occurrence_notice`，其中 `warning_code` 为
+`occurred_at_defaulted`。显式 `null` 或错误时间返回 422。同键重试必须保持字段
+仍然省略，不能把服务器返回的时间填回原请求。
 
 修订既有 Archive Page 使用
 `POST /api/v1/sections/{section_id}/pages/{page_id}/revisions`；先 GET 当前 Page
@@ -121,7 +126,8 @@ manifest = json.loads(get("/api/v1/agent/skill/manifest"))
 ```
 
 下例演示如何从本机文件新建单份 Markdown 归档。把它追加到上述本机脚本中，
-仅在用户明确指定目标 Section、Book、标题、发生时间和文件后才调用。先从本机文件
+仅在用户明确指定目标 Section、Book、标题和文件后才调用。已知发生时间就传入；
+确实未知时令 `occurred_at=None` 以省略字段。先从本机文件
 读取一次正文，再将固定的 `markdown_bytes` 传入函数；`operation_key` 是本次写入的
 非秘密幂等标识。若响应丢失，重试须复用相同的键、元数据和正文字节，不能重新读取
 可能已变化的原文件。需要跨进程重试时，应在本机受控位置保留原始内容和键，不必
@@ -134,8 +140,11 @@ from pathlib import Path
 
 def create_archive(section_id, book_id, title, occurred_at, markdown_bytes, operation_key):
     boundary = "patchouli-" + secrets.token_hex(16)
+    metadata_value = {"title": title, "source": {"kind": "conversation"}}
+    if occurred_at is not None:
+        metadata_value["occurred_at"] = occurred_at
     metadata = json.dumps(
-        {"title": title, "occurred_at": occurred_at, "source": {"kind": "conversation"}},
+        metadata_value,
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")

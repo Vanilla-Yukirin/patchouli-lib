@@ -289,7 +289,7 @@ def seed_complete_database(path: Path, monkeypatch: pytest.MonkeyPatch) -> Engin
                 "route": CREATE_ROUTE_TEMPLATE,
                 "key": hashlib.sha256(b"synthetic key").digest(),
                 "fingerprint": hashlib.sha256(b"synthetic request").digest(),
-                "body": body.model_dump_json().encode("utf-8"),
+                "body": body.model_dump_json(exclude={"occurrence_notice"}).encode("utf-8"),
                 "location": f"/api/v1/sections/{section_id}/pages/{page.page_id}",
                 "etag": legacy_page_current_etag(
                     page.page_uid,

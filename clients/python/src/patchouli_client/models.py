@@ -4,7 +4,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import cast
+from typing import Literal, cast
 from urllib.parse import quote, urlsplit
 
 from patchouli_client.errors import ProtocolError
@@ -359,10 +359,25 @@ class PageMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class OccurrenceNotice:
+    source: Literal["server_utc"]
+    warning_code: Literal["occurred_at_defaulted"]
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> OccurrenceNotice:
+        if set(data) != {"source", "warning_code"}:
+            raise ProtocolError("occurrence notice did not contain the expected fields")
+        if data["source"] != "server_utc" or data["warning_code"] != "occurred_at_defaulted":
+            raise ProtocolError("occurrence notice contained an unknown defaulting reason")
+        return cls(source="server_utc", warning_code="occurred_at_defaulted")
+
+
+@dataclass(frozen=True, slots=True)
 class PageDocument:
     page: Page
     revision: Revision
     citation: Citation
+    occurrence_notice: OccurrenceNotice | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -383,10 +398,18 @@ class PageDocument:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> PageDocument:
+        notice = (
+            OccurrenceNotice.from_dict(
+                _object(data["occurrence_notice"], context="occurrence notice")
+            )
+            if "occurrence_notice" in data
+            else None
+        )
         return cls(
             page=Page.from_dict(_object(data.get("page"), context="page")),
             revision=Revision.from_dict(_object(data.get("revision"), context="revision")),
             citation=Citation.from_dict(_object(data.get("citation"), context="citation")),
+            occurrence_notice=notice,
         )
 
 
@@ -438,27 +461,40 @@ class SourceInput:
         return result
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ArchiveCreateMetadata:
     title: str = field(repr=False)
-    occurred_at: datetime
+    occurred_at: datetime | None
     source: SourceInput
+
+    def __init__(
+        self,
+        title: str,
+        occurred_at: datetime | None = None,
+        source: SourceInput | None = None,
+    ) -> None:
+        # Preserve the original positional order while allowing callers to omit
+        # occurred_at with source=... .  An omitted time stays absent on the wire.
+        object.__setattr__(self, "title", title)
+        object.__setattr__(self, "occurred_at", occurred_at)
+        object.__setattr__(self, "source", source)
+        self.__post_init__()
 
     def __post_init__(self) -> None:
         if not isinstance(self.title, str) or not self.title:
             raise ValueError("archive title must not be empty")
-        if not isinstance(self.occurred_at, datetime):
+        if self.occurred_at is not None and not isinstance(self.occurred_at, datetime):
             raise ValueError("archive occurrence time must be a datetime")
         if not isinstance(self.source, SourceInput):
             raise ValueError("archive source must be SourceInput")
-        format_rfc3339_utc(self.occurred_at)
+        if self.occurred_at is not None:
+            format_rfc3339_utc(self.occurred_at)
 
     def to_wire(self) -> dict[str, object]:
-        return {
-            "title": self.title,
-            "occurred_at": format_rfc3339_utc(self.occurred_at),
-            "source": self.source.to_wire(),
-        }
+        result: dict[str, object] = {"title": self.title, "source": self.source.to_wire()}
+        if self.occurred_at is not None:
+            result["occurred_at"] = format_rfc3339_utc(self.occurred_at)
+        return result
 
 
 @dataclass(frozen=True, slots=True)

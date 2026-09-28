@@ -158,7 +158,58 @@ def test_tool_inventory_and_schemas_expose_no_secret_or_path_fields(tmp_path: Pa
         assert forbidden not in serialized
     for tool in tools:
         assert tool.inputSchema["additionalProperties"] is False
+    create_tool = next(tool for tool in tools if tool.name == "archive_create")
+    assert "occurred_at" not in create_tool.inputSchema["required"]
+    assert "occurred_at" in create_tool.inputSchema["properties"]
     assert harness.clients[0].close_calls == 1
+
+
+def test_archive_create_without_time_omits_field_and_returns_notice(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/v1/auth/whoami":
+            return httpx.Response(200, headers=protected_headers(), json=whoami_body())
+        assert request.url.path == "/api/v1/sections/sec_synthetic/books/book_synthetic/pages"
+        assert b'"occurred_at"' not in request.content
+        response = sample_page()
+        response["occurrence_notice"] = {
+            "source": "server_utc",
+            "warning_code": "occurred_at_defaulted",
+        }
+        return httpx.Response(
+            201,
+            headers=protected_headers(
+                Location=f"/api/v1/sections/sec_synthetic/pages/{_PAGE_ID}",
+                ETag='"revision-synthetic-1"',
+            ),
+            json=response,
+        )
+
+    harness = RuntimeHarness(tmp_path, httpx.MockTransport(handler))
+    arguments: dict[str, object] = {
+        "section_id": "sec_synthetic",
+        "book_id": "book_synthetic",
+        "title": "Synthetic",
+        "source_kind": "conversation",
+        "content": "# Synthetic",
+    }
+
+    async def action(session: ClientSession) -> list[mcp_types.CallToolResult]:
+        created = await session.call_tool("archive_create", arguments)
+        rejected = await session.call_tool("archive_create", {**arguments, "occurred_at": None})
+        return [created, rejected]
+
+    created, rejected = _run_session(harness, action)
+    assert not created.isError
+    assert rejected.isError
+    assert len(requests) == 2  # only the successful call reaches whoami and create
+    data = cast(dict[str, object], _payload(created)["data"])
+    assert data["occurrence_notice"] == {
+        "source": "server_utc",
+        "warning_code": "occurred_at_defaulted",
+    }
 
 
 def test_read_tools_use_exact_typed_client_requests_and_redact_credential_id(
@@ -232,6 +283,8 @@ def test_read_tools_use_exact_typed_client_requests_and_redact_credential_id(
 
     results = _run_session(harness, action)
     assert all(not result.isError for result in results)
+    assert "occurrence_notice" not in cast(dict[str, object], _payload(results[5])["data"])
+    assert "occurrence_notice" not in cast(dict[str, object], _payload(results[6])["data"])
     assert "credential_must_not_escape" not in json.dumps(_payload(results[1]))
     assert [(request.method, request.url.path) for request in requests] == [
         ("GET", "/api/v1/capabilities"),
@@ -306,6 +359,7 @@ def test_create_and_revise_are_explicit_and_keep_operation_key_internal(tmp_path
     assert not create_result.isError
     assert not revise_result.isError
     create_payload = _payload(create_result)
+    assert "occurrence_notice" not in cast(dict[str, object], create_payload["data"])
     revise_payload = _payload(revise_result)
     assert "operation_id" in cast(dict[str, object], create_payload["metadata"])
     serialized = json.dumps([create_payload, revise_payload])
@@ -404,10 +458,13 @@ def test_concurrent_failed_mutations_keep_call_local_operation_ids(
     assert (tmp_path / "state" / "default" / f"{second_operation}.json").is_file()
 
 
-def test_cli_and_mcp_share_identical_journal_fingerprint_and_replay_key(tmp_path: Path) -> None:
+@pytest.mark.parametrize("omit_time", [False, True])
+def test_cli_and_mcp_share_identical_journal_fingerprint_and_replay_key(
+    tmp_path: Path, omit_time: bool
+) -> None:
+    occurred_at_field = "" if omit_time else '"occurred_at":"2026-08-11T09:15:00Z",'
     (tmp_path / "metadata.json").write_text(
-        '{"title":"Synthetic","occurred_at":"2026-08-11T09:15:00Z",'
-        '"source":{"kind":"conversation"}}',
+        '{"title":"Synthetic",' + occurred_at_field + '"source":{"kind":"conversation"}}',
         encoding="utf-8",
     )
     (tmp_path / "content.md").write_text("# Synthetic", encoding="utf-8")
@@ -449,17 +506,19 @@ def test_cli_and_mcp_share_identical_journal_fingerprint_and_replay_key(tmp_path
     harness = RuntimeHarness(tmp_path, httpx.MockTransport(handler))
 
     async def action(session: ClientSession) -> mcp_types.CallToolResult:
+        arguments = {
+            "section_id": "sec_synthetic",
+            "book_id": "book_synthetic",
+            "title": "Synthetic",
+            "source_kind": "conversation",
+            "content": "# Synthetic",
+            "operation_id": operation_id,
+        }
+        if not omit_time:
+            arguments["occurred_at"] = "2026-08-11T09:15:00Z"
         return await session.call_tool(
             "archive_create",
-            {
-                "section_id": "sec_synthetic",
-                "book_id": "book_synthetic",
-                "title": "Synthetic",
-                "occurred_at": "2026-08-11T09:15:00Z",
-                "source_kind": "conversation",
-                "content": "# Synthetic",
-                "operation_id": operation_id,
-            },
+            arguments,
         )
 
     result = _run_session(harness, action)

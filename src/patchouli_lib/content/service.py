@@ -25,6 +25,7 @@ from patchouli_lib.content.schemas import (
     ArchiveMutationReplay,
     ArchiveMutationResult,
     ArchiveMutationSuccess,
+    ArchiveOccurrenceNotice,
     ArchivePageView,
     ArchiveResponseBody,
     ArchiveRevisionView,
@@ -250,8 +251,9 @@ class ArchiveService:
         if replay is not None:
             return self._replay_result(replay)
 
+        occurred_at = operation_at if command.occurred_at is None else command.occurred_at
         try:
-            generated = self._allocate_page_id(command)
+            generated = self._allocate_page_id(command.library_id, command.title, occurred_at)
             page_uid = self._allocate_page_uid(command.library_id)
             revision_id = self._allocate_revision_id(command.library_id)
             markdown = MarkdownContent.from_bytes(command.content_md)
@@ -263,12 +265,12 @@ class ArchiveService:
                     book_id=book.id,
                     page_id=generated.value,
                     id_scheme=PAGE_ID_SCHEME,
-                    id_timestamp_micros=(command.occurred_at // 1_000) * 1_000,
+                    id_timestamp_micros=(occurred_at // 1_000) * 1_000,
                     base_slug=generated.base_slug,
                     collision_ordinal=generated.collision_ordinal,
                     title=command.title,
                     page_type="archive",
-                    occurred_at=command.occurred_at,
+                    occurred_at=occurred_at,
                     current_revision_id=revision_id,
                     current_revision_number=1,
                     created_at=operation_at,
@@ -308,6 +310,7 @@ class ArchiveService:
                 revision,
                 command.request_id,
                 revision_location=False,
+                occurrence_defaulted=command.occurred_at is None,
             )
             audit = self._auth_repository.add_audit_event(
                 NewAuditEvent(
@@ -603,16 +606,16 @@ class ArchiveService:
                 return candidate
         raise IdentifierGenerationError
 
-    def _allocate_page_id(self, command: CreateArchiveCommand) -> GeneratedPageId:
+    def _allocate_page_id(self, library_id: str, title: str, occurred_at: int) -> GeneratedPageId:
         occurrence = OccurrenceTime(
-            utc_microseconds=command.occurred_at,
-            canonical_utc=canonical_utc_wire(command.occurred_at),
+            utc_microseconds=occurred_at,
+            canonical_utc=canonical_utc_wire(occurred_at),
         )
-        base = generate_page_id(occurrence, command.title)
+        base = generate_page_id(occurrence, title)
         counter = self._content.get_collision_counter(
-            command.library_id,
+            library_id,
             PAGE_ID_SCHEME,
-            (command.occurred_at // 1_000) * 1_000,
+            (occurred_at // 1_000) * 1_000,
             base.base_slug,
         )
         if counter is None:
@@ -622,15 +625,15 @@ class ArchiveService:
                     break
                 candidate = generate_page_id(
                     occurrence,
-                    command.title,
+                    title,
                     collision_ordinal=ordinal,
                 )
-                if not self._content.identifier_exists(command.library_id, candidate.value):
+                if not self._content.identifier_exists(library_id, candidate.value):
                     self._content.add_collision_counter(
                         NewPageIdCollisionCounter(
-                            library_id=command.library_id,
+                            library_id=library_id,
                             id_scheme=PAGE_ID_SCHEME,
-                            id_timestamp_micros=(command.occurred_at // 1_000) * 1_000,
+                            id_timestamp_micros=(occurred_at // 1_000) * 1_000,
                             base_slug=base.base_slug,
                             next_ordinal=ordinal + 1,
                         )
@@ -652,10 +655,10 @@ class ArchiveService:
             counter = advanced
             candidate = generate_page_id(
                 occurrence,
-                command.title,
+                title,
                 collision_ordinal=ordinal,
             )
-            if not self._content.identifier_exists(command.library_id, candidate.value):
+            if not self._content.identifier_exists(library_id, candidate.value):
                 return candidate
         raise ArchiveIdentifierExhaustedError
 
@@ -689,6 +692,7 @@ class ArchiveService:
         request_id: str,
         *,
         revision_location: bool,
+        occurrence_defaulted: bool = False,
     ) -> tuple[OriginalResponse, ArchiveCitation]:
         href = build_api_v1_path(
             "sections",
@@ -725,6 +729,7 @@ class ArchiveService:
                 content=revision.content_md.decode("utf-8"),
             ),
             citation=citation,
+            occurrence_notice=ArchiveOccurrenceNotice() if occurrence_defaulted else None,
         )
         page_location = build_api_v1_path(
             "sections",
@@ -734,7 +739,9 @@ class ArchiveService:
         )
         response = OriginalResponse(
             response_status=201,
-            response_body=body.model_dump_json().encode("utf-8"),
+            response_body=body.model_dump_json(
+                exclude=None if occurrence_defaulted else {"occurrence_notice"}
+            ).encode("utf-8"),
             response_location=citation.href if revision_location else page_location,
             response_etag=page_current_etag(
                 page.page_uid,

@@ -132,6 +132,24 @@ def test_page_and_revision_identifiers_remain_opaque() -> None:
     assert document.revision.revision_id == "rev_0123456789abcdef0123456789abcdef"
     assert document.citation.page_id == document.page.page_id
     assert document.page.occurred_at == datetime(2026, 8, 11, 9, 15, 0, 123456, tzinfo=UTC)
+    assert document.occurrence_notice is None
+
+
+def test_page_document_parses_only_the_known_occurrence_default_notice() -> None:
+    response = sample_page()
+    response["occurrence_notice"] = {
+        "source": "server_utc",
+        "warning_code": "occurred_at_defaulted",
+    }
+    parsed = PageDocument.from_dict(response)
+    assert parsed.occurrence_notice is not None
+    assert parsed.occurrence_notice.source == "server_utc"
+    assert parsed.occurrence_notice.warning_code == "occurred_at_defaulted"
+
+    for invalid in (None, {}, {"source": "client", "warning_code": "occurred_at_defaulted"}):
+        response["occurrence_notice"] = invalid
+        with pytest.raises(ProtocolError):
+            PageDocument.from_dict(response)
 
 
 def test_problem_details_preserve_unknown_extensions() -> None:
@@ -164,6 +182,25 @@ def test_request_models_are_strict_and_canonical() -> None:
         "occurred_at": "2026-08-11T17:15:00.000000Z",
         "source": {"kind": "conversation"},
     }
+    omitted = ArchiveCreateMetadata(
+        title="Synthetic session", source=SourceInput(kind="conversation")
+    )
+    assert omitted.occurred_at is None
+    assert omitted.to_wire() == {
+        "title": "Synthetic session",
+        "source": {"kind": "conversation"},
+    }
+    assert "occurred_at" not in omitted.to_wire()
+    assert (
+        ArchiveCreateMetadata(
+            "Synthetic session",
+            datetime(2026, 8, 11, 17, 15, tzinfo=UTC),
+            SourceInput("conversation"),
+        ).to_wire()
+        == metadata.to_wire()
+    )
+    with pytest.raises(ValueError, match="source must be SourceInput"):
+        ArchiveCreateMetadata(title="Synthetic session")
     with pytest.raises(TypeError):
         SearchRequest(query="synthetic", future=True)  # type: ignore[call-arg]
     with pytest.raises(ValueError, match="UTC offset"):

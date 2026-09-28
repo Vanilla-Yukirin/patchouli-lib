@@ -407,7 +407,7 @@ class CreateArchiveCommand(ContentSchema):
     section_id: OpaqueId
     book_id: OpaqueId
     title: Annotated[str, Field(min_length=1)]
-    occurred_at: OccurrenceMicros
+    occurred_at: OccurrenceMicros | None = None
     content_md: Annotated[
         StrictBytes,
         Field(min_length=1, max_length=MAX_MARKDOWN_BYTES, repr=False),
@@ -533,10 +533,18 @@ class ArchiveCitation(ContentSchema):
         return validate_api_v1_path(value)
 
 
+class ArchiveOccurrenceNotice(ContentSchema):
+    """The declared Page time was supplied by the server, not the caller."""
+
+    source: Literal["server_utc"] = "server_utc"
+    warning_code: Literal["occurred_at_defaulted"] = "occurred_at_defaulted"
+
+
 class ArchiveResponseBody(ContentSchema):
     page: ArchivePageView
     revision: ArchiveRevisionView
     citation: ArchiveCitation
+    occurrence_notice: ArchiveOccurrenceNotice | None = None
 
     @model_validator(mode="after")
     def require_consistent_identity(self) -> Self:
@@ -621,6 +629,7 @@ __all__ = [
     "ArchiveMutationReplay",
     "ArchiveMutationResult",
     "ArchiveMutationSuccess",
+    "ArchiveOccurrenceNotice",
     "ArchivePageView",
     "ArchiveResponseBody",
     "ArchiveRevisionView",

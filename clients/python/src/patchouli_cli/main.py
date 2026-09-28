@@ -468,16 +468,20 @@ def _parse_json_object(data: bytes, *, label: str) -> dict[str, object]:
 
 
 def _create_metadata(data: Mapping[str, object]) -> ArchiveCreateMetadata:
-    if set(data) != {"title", "occurred_at", "source"}:
-        raise input_error("create metadata requires exactly title, occurred_at, and source")
+    if not {"title", "source"} <= set(data) <= {"title", "occurred_at", "source"}:
+        raise input_error("create metadata requires title, source, and optional occurred_at")
     title = data["title"]
-    occurred_at = data["occurred_at"]
-    if not isinstance(title, str) or not isinstance(occurred_at, str):
-        raise input_error("create metadata title and occurred_at must be strings")
-    try:
-        timestamp: datetime = parse_rfc3339(occurred_at)
-    except ProtocolError as exc:
-        raise input_error("create metadata occurred_at must be accepted RFC 3339") from exc
+    if not isinstance(title, str):
+        raise input_error("create metadata title must be a string")
+    timestamp: datetime | None = None
+    if "occurred_at" in data:
+        occurred_at = data["occurred_at"]
+        if not isinstance(occurred_at, str):
+            raise input_error("create metadata occurred_at must be a string")
+        try:
+            timestamp = parse_rfc3339(occurred_at)
+        except ProtocolError as exc:
+            raise input_error("create metadata occurred_at must be accepted RFC 3339") from exc
     return ArchiveCreateMetadata(title=title, occurred_at=timestamp, source=_source(data["source"]))
 
 

@@ -9,7 +9,7 @@ from typing import TextIO
 
 from patchouli_cli.errors import CliError
 from patchouli_client.headers import ResponseMetadata
-from patchouli_client.models import Page, format_rfc3339_utc
+from patchouli_client.models import Page, PageDocument, format_rfc3339_utc
 
 
 def emit_success(
@@ -99,6 +99,15 @@ def to_jsonable(value: object) -> object:
             "current_revision_id": value.current_revision_id,
             "current_revision_number": value.current_revision_number,
         }
+    if isinstance(value, PageDocument):
+        result = {
+            "page": to_jsonable(value.page),
+            "revision": to_jsonable(value.revision),
+            "citation": to_jsonable(value.citation),
+        }
+        if value.occurrence_notice is not None:
+            result["occurrence_notice"] = to_jsonable(value.occurrence_notice)
+        return result
     if isinstance(value, Mapping):
         return {str(key): to_jsonable(item) for key, item in value.items()}
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
