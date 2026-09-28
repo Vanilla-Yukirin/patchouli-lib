@@ -363,6 +363,24 @@ def create_admin_router(
 
         return protected_page(request, render)
 
+    @router.get(
+        "/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages/{page_id}"
+        "/revisions/{revision_number}"
+    )
+    def page_revision_detail(
+        request: Request,
+        library_id: str,
+        section_id: str,
+        book_id: str,
+        page_id: str,
+        revision_number: int,
+    ) -> Response:
+        def render(csrf: str, locale: AdminLocale) -> str | None:
+            view = read_model.get_page(library_id, section_id, book_id, page_id, revision_number)
+            return None if view is None else page_preview_page(csrf, view, locale=locale)
+
+        return protected_page(request, render)
+
     @router.post("/login")
     async def login_submit(request: Request) -> Response:
         locale = locale_for(request)

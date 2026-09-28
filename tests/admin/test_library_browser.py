@@ -271,7 +271,77 @@ def test_browser_hides_deleted_pages_and_translates_labels(
     assert missing.status_code == 404
     assert "Synthetic archive" not in missing.text
     assert missing.headers["content-language"] == "zh-CN"
+    assert client.get(f"{page_path}/revisions/1").status_code == 404
 
     english = client.get("/admin/libraries?lang=en")
     assert english.headers["content-language"] == "en"
     assert "Page count: 0" in english.text
+
+
+def test_browser_reads_historical_revision_without_crossing_page_scope(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    library, section, book = _seed_structure(engine)
+    other_library, other_section, other_book = _seed_structure(engine, prefix="4", label="Other")
+    page_id = _insert_page(engine, library, section, book, markdown=b"# Original\n")
+    _, _, _, page_path = _paths(library, section, book, page_id)
+    revision_id = "rev_" + "3" * 32
+    with immediate_transaction(engine) as connection:
+        page = (
+            connection.execute(
+                Page.__table__.select().where(Page.library_id == library, Page.page_id == page_id)
+            )
+            .mappings()
+            .one()
+        )
+        ContentRepository(connection).add_revision(
+            NewRevision(
+                library_id=library,
+                revision_id=revision_id,
+                page_uid=page["page_uid"],
+                revision_number=2,
+                created_at=3_000_000,
+                **MarkdownContent.from_bytes(
+                    b"# Updated\n<script>alert(1)</script>\n"
+                ).model_dump(),
+            )
+        )
+        connection.execute(
+            update(Page)
+            .where(Page.library_id == library, Page.page_id == page_id)
+            .values(
+                current_revision_id=revision_id,
+                current_revision_number=2,
+                updated_at=3_000_000,
+            )
+        )
+
+    history_path = f"{page_path}/revisions/1"
+    assert client.get(history_path).status_code == 303
+    _login(client)
+    current = client.get(page_path)
+    assert current.status_code == 200
+    assert "# Updated" in current.text
+    assert "Version history" in current.text
+    assert f'href="{history_path}"' in current.text
+    historical = client.get(history_path)
+    assert historical.status_code == 200
+    assert "# Original" in historical.text
+    assert "# Updated" not in historical.text
+    assert "Back to current version" in historical.text
+    assert historical.headers["cache-control"] == "no-store, max-age=0"
+    second = client.get(f"{page_path}/revisions/2")
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in second.text
+    assert "<script>alert(1)</script>" not in second.text
+    for path in (
+        f"{page_path}/revisions/0",
+        f"{page_path}/revisions/3",
+        f"{page_path}/revisions/{1 << 63}",
+        f"/admin/libraries/{other_library}/sections/{other_section}/books/"
+        f"{other_book}/pages/{page_id}/revisions/1",
+    ):
+        assert client.get(path).status_code == 404
+    chinese = client.get(f"{history_path}?lang=zh-CN")
+    assert "版本历史" in chinese.text
+    assert "返回当前版本" in chinese.text

@@ -72,6 +72,15 @@ class PageView:
     book: BookItem
     page: PageItem
     markdown: str
+    selected_revision_number: int
+    selected_revision_created_at: int
+    revisions: tuple[RevisionItem, ...]
+
+
+@dataclass(frozen=True)
+class RevisionItem:
+    number: int
+    created_at: int
 
 
 class AdminReadModel:
@@ -144,30 +153,43 @@ class AdminReadModel:
         section_id: str,
         book_id: str,
         page_id: str,
+        revision_number: int | None = None,
     ) -> PageView | None:
+        if revision_number is not None and not 1 <= revision_number <= (1 << 63) - 1:
+            return None
         with self._engine.connect() as connection:
             library = _get_library(connection, library_id)
             section = _get_section(connection, library_id, section_id)
             book = _get_book(connection, library_id, section_id, book_id)
             if library is None or section is None or book is None:
                 return None
+            revision_match = (
+                and_(
+                    Revision.revision_number == Page.current_revision_number,
+                    Revision.revision_id == Page.current_revision_id,
+                )
+                if revision_number is None
+                else Revision.revision_number == revision_number
+            )
             row = (
                 connection.execute(
                     select(
                         Page.page_id,
+                        Page.page_uid,
                         Page.title,
                         Page.page_type,
                         Page.occurred_at,
                         Page.current_revision_number,
                         Revision.content_md,
+                        Revision.revision_number.label("selected_revision_number"),
+                        Revision.created_at.label("selected_revision_created_at"),
                     )
                     .join(
                         Revision,
                         and_(
                             Revision.library_id == Page.library_id,
                             Revision.page_uid == Page.page_uid,
-                            Revision.revision_id == Page.current_revision_id,
-                            Revision.revision_number == Page.current_revision_number,
+                            revision_match,
                         ),
                     )
                     .where(
@@ -183,12 +205,26 @@ class AdminReadModel:
             )
             if row is None:
                 return None
+            revisions = tuple(
+                RevisionItem(item["revision_number"], item["created_at"])
+                for item in connection.execute(
+                    select(Revision.revision_number, Revision.created_at)
+                    .where(
+                        Revision.library_id == library_id,
+                        Revision.page_uid == row["page_uid"],
+                    )
+                    .order_by(Revision.revision_number.desc())
+                ).mappings()
+            )
             return PageView(
                 library,
                 section,
                 book,
                 _page_item(row),
                 bytes(row["content_md"]).decode("utf-8"),
+                row["selected_revision_number"],
+                row["selected_revision_created_at"],
+                revisions,
             )
 
 

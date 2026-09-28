@@ -179,6 +179,11 @@ _ZH_CN: dict[str, str] = {
     "Current revision": "当前版本",
     "Page type": "页面类型",
     "Current Markdown": "当前 Markdown 正文",
+    "Markdown body": "Markdown 正文",
+    "Version history": "版本历史",
+    "Version": "版本",
+    "Recorded": "记录时间",
+    "Back to current version": "返回当前版本",
     "No libraries yet.": "暂无知识库。",
     "No sections yet.": "暂无分区。",
     "No books yet.": "暂无书籍。",
@@ -751,12 +756,30 @@ def page_preview_page(
     section_path = f"{library_path}/sections/{escape(view.section.id, quote=True)}"
     book_path = f"{section_path}/books/{escape(view.book.id, quote=True)}"
     base = f"{book_path}/pages/{escape(view.page.id, quote=True)}"
+    history = "".join(
+        f'<li><a href="{base}/revisions/{item.number}">'
+        f"{localize(locale, 'Version')} {item.number}</a>"
+        f'<p class="meta">{localize(locale, "Recorded")}: {_time(item.created_at)}</p></li>'
+        for item in view.revisions
+    )
+    current = view.selected_revision_number == view.page.revision_number
+    heading = "Current Markdown" if current else "Markdown body"
     body = (
         f'<p class="meta">{localize(locale, "Page type")}: {escape(view.page.page_type)} · '
         f"{localize(locale, 'Occurred')}: {_time(view.page.occurred_at)} · "
         f"{localize(locale, 'Current revision')}: {view.page.revision_number}</p>"
-        f"<h2>{localize(locale, 'Current Markdown')}</h2>"
+        f'<p class="meta">{localize(locale, "Version")}: '
+        f"{view.selected_revision_number} · "
+        f"{localize(locale, 'Recorded')}: {_time(view.selected_revision_created_at)}</p>"
+        + (
+            ""
+            if current
+            else f'<p><a href="{base}">{localize(locale, "Back to current version")}</a></p>'
+        )
+        + f"<h2>{localize(locale, heading)}</h2>"
         f'<pre class="markdown-preview">{escape(view.markdown)}</pre>'
+        f"<h2>{localize(locale, 'Version history')}</h2>"
+        f'<ul class="item-list">{history}</ul>'
     )
     return _browser_document(
         csrf_token,
