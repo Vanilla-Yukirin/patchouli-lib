@@ -139,6 +139,8 @@ def whoami_body(
         "caller_id": caller_id,
         "credential_id": credential_id,
         "kind": "agent",
+        "name": "Synthetic Agent",
+        "description": "Synthetic client fixture",
         "expires_at": "2027-01-01T00:00:00.000000Z",
         "policy_version": 3,
         "grants": [{"section_id": "sec_synthetic", "actions": ["archive:write"]}],

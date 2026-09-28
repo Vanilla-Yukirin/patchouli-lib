@@ -14,6 +14,7 @@ from patchouli_lib.api.contracts import (
     WireModel,
 )
 from patchouli_lib.auth.schemas import CallerKind, SectionAction
+from patchouli_lib.library.schemas import BoundedText, ResourceName
 
 MAX_CONTENT_BYTES = 2 * 1024 * 1024
 MAX_QUERY_BYTES = 4_096
@@ -79,6 +80,8 @@ class WhoAmIResponse(WireModel):
     caller_id: OpaqueIdentifier
     credential_id: OpaqueIdentifier
     kind: CallerKind
+    name: ResourceName = Field(repr=False)
+    description: BoundedText = Field(repr=False)
     expires_at: RFC3339UTC
     policy_version: Annotated[int, Field(ge=1)]
     grants: tuple[EffectiveSectionGrant, ...]
@@ -122,6 +125,8 @@ def whoami_response(context: AuthenticatedRequestContext) -> WhoAmIResponse:
         caller_id=authenticated.caller.id,
         credential_id=authenticated.credential.id,
         kind=authenticated.caller.kind,
+        name=authenticated.caller.name,
+        description=authenticated.caller.description,
         expires_at=_timestamp_datetime(authenticated.credential.expires_at),
         policy_version=authenticated.caller.policy_version,
         grants=_effective_grants(context),

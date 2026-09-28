@@ -20,6 +20,7 @@ from patchouli_client import (
     RetryPolicy,
     SearchRequest,
     SourceInput,
+    WhoAmI,
 )
 
 
@@ -55,6 +56,8 @@ def test_capabilities_and_whoami_are_typed_and_token_is_call_scoped() -> None:
                 "caller_id": "caller_synthetic",
                 "credential_id": "credential_synthetic",
                 "kind": "agent",
+                "name": "Synthetic Agent",
+                "description": "Synthetic client fixture",
                 "expires_at": "2026-09-01T00:00:00.000000Z",
                 "policy_version": 3,
                 "grants": [
@@ -82,10 +85,28 @@ def test_capabilities_and_whoami_are_typed_and_token_is_call_scoped() -> None:
         "page:read",
         "archive:write",
     )
+    assert whoami.value.name == "Synthetic Agent"
+    assert whoami.value.description == "Synthetic client fixture"
     assert all(
         request.headers["Authorization"] == "Bearer cred_synthetic_123" for request in requests
     )
     assert not hasattr(client, "token")
+
+
+def test_whoami_accepts_older_server_without_display_fields() -> None:
+    legacy = WhoAmI.from_dict(
+        {
+            "caller_id": "caller_synthetic",
+            "credential_id": "credential_synthetic",
+            "kind": "agent",
+            "expires_at": "2026-09-01T00:00:00.000000Z",
+            "policy_version": 1,
+            "grants": [],
+        }
+    )
+
+    assert legacy.name is None
+    assert legacy.description is None
 
 
 def test_collection_routes_expose_opaque_cursor() -> None:

@@ -426,6 +426,8 @@ def test_agent_whoami_is_minimal_deterministic_and_client_parseable(
         "caller_id",
         "credential_id",
         "kind",
+        "name",
+        "description",
         "expires_at",
         "policy_version",
         "grants",
@@ -434,6 +436,8 @@ def test_agent_whoami_is_minimal_deterministic_and_client_parseable(
         "caller_id": auth_api.agent_caller_id,
         "credential_id": auth_api.agent_credential_id,
         "kind": "agent",
+        "name": "Synthetic agent a",
+        "description": "Synthetic route fixture",
         "expires_at": "1970-01-01T00:16:40.000000Z",
         "policy_version": 1,
         "grants": [
@@ -447,14 +451,19 @@ def test_agent_whoami_is_minimal_deterministic_and_client_parseable(
             },
         ],
     }
+    wire = WhoAmIResponse.model_validate(payload)
+    assert wire.name == "Synthetic agent a"
+    assert wire.description == "Synthetic route fixture"
+    assert "Synthetic agent a" not in repr(wire)
+    assert "Synthetic route fixture" not in repr(wire)
     client_model = cast(Any, _client_model(monkeypatch, "WhoAmI"))
     parsed = client_model.from_dict(payload)
     assert parsed.caller_id == auth_api.agent_caller_id
+    assert parsed.name == "Synthetic agent a"
+    assert parsed.description == "Synthetic route fixture"
     assert parsed.grants[0].actions == ("page:read", "section:query")
     forbidden = {
         "library_id",
-        "name",
-        "description",
         "selector",
         "verifier",
         "token_version",
@@ -558,6 +567,8 @@ def test_operator_may_use_diagnostics_but_receives_no_content_grants(
     assert capabilities.status_code == 200
     parsed = WhoAmIResponse.model_validate(whoami.json())
     assert parsed.kind is CallerKind.OPERATOR
+    assert parsed.name == "Synthetic operator b"
+    assert parsed.description == "Synthetic route fixture"
     assert parsed.grants == ()
 
 

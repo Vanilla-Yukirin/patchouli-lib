@@ -203,6 +203,8 @@ class WhoAmI:
     expires_at: datetime
     policy_version: int
     grants: tuple[Grant, ...]
+    name: str | None = field(default=None, repr=False)
+    description: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> WhoAmI:
@@ -216,6 +218,8 @@ class WhoAmI:
                 Grant.from_dict(_object(item, context="grant"))
                 for item in _object_list(data, "grants")
             ),
+            name=_optional_string(data, "name"),
+            description=_optional_string(data, "description"),
         )
 
 
