@@ -292,7 +292,16 @@ def test_real_browser_can_switch_language_and_submit_same_origin_login(tmp_path:
 
             assert path == "/admin"
             assert devtools.evaluate("document.documentElement.lang") == "zh-CN"
-            assert devtools.evaluate("document.querySelector('h1')?.textContent") == "管理面板"
+            assert devtools.evaluate("document.querySelector('h1')?.textContent") == "主页"
+            devtools.command("Page.navigate", {"url": f"{origin}/admin/setup"})
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    if devtools.evaluate("document.querySelector('#library_name') !== null"):
+                        break
+                except TimeoutError:
+                    pass
+                time.sleep(0.05)
             setup_help = devtools.evaluate(
                 """
                 (() => {
