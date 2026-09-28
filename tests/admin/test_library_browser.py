@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,7 @@ from patchouli_lib.admin.passwords import hash_password
 from patchouli_lib.app import create_app
 from patchouli_lib.auth.models import AuditEvent, Caller, Credential
 from patchouli_lib.config import Settings
-from patchouli_lib.content.models import Page, Revision
+from patchouli_lib.content.models import Page, Revision, RevisionFile
 from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import MarkdownContent, NewPage, NewPageIdentifier, NewRevision
 from patchouli_lib.database import immediate_transaction
@@ -120,6 +121,18 @@ def _insert_page(
                 revision_number=1,
                 created_at=2_000_000,
                 **MarkdownContent.from_bytes(markdown).model_dump(),
+            )
+        )
+        connection.execute(
+            insert(RevisionFile).values(
+                library_id=library_id,
+                page_uid=page_uid,
+                revision_id=revision_id,
+                revision_number=1,
+                filename="content.md",
+                content_bytes=markdown,
+                size_bytes=len(markdown),
+                content_sha256=sha256(markdown).digest(),
             )
         )
         repository.add_identifier(
@@ -265,6 +278,8 @@ def test_browser_reads_scoped_hierarchy_and_escapes_markdown(
     assert f'href="{page_path}"' in book_response.text
     assert preview.status_code == 200
     assert '<pre class="markdown-preview"># Synthetic preview' in preview.text
+    assert "Files in this version" in preview.text
+    assert "content.md" in preview.text
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in preview.text
     assert "<script>alert(1)</script>" not in preview.text
     assert "<img src=x onerror=alert(1)>" not in preview.text
@@ -328,6 +343,7 @@ def test_browser_reads_historical_revision_without_crossing_page_scope(
     page_id = _insert_page(engine, library, section, book, markdown=b"# Original\n")
     _, _, _, page_path = _paths(library, section, book, page_id)
     revision_id = "rev_" + "3" * 32
+    updated_markdown = b"# Updated\n<script>alert(1)</script>\n"
     with immediate_transaction(engine) as connection:
         page = (
             connection.execute(
@@ -343,9 +359,19 @@ def test_browser_reads_historical_revision_without_crossing_page_scope(
                 page_uid=page["page_uid"],
                 revision_number=2,
                 created_at=3_000_000,
-                **MarkdownContent.from_bytes(
-                    b"# Updated\n<script>alert(1)</script>\n"
-                ).model_dump(),
+                **MarkdownContent.from_bytes(updated_markdown).model_dump(),
+            )
+        )
+        connection.execute(
+            insert(RevisionFile).values(
+                library_id=library,
+                page_uid=page["page_uid"],
+                revision_id=revision_id,
+                revision_number=2,
+                filename="content.md",
+                content_bytes=updated_markdown,
+                size_bytes=len(updated_markdown),
+                content_sha256=sha256(updated_markdown).digest(),
             )
         )
         connection.execute(
@@ -365,10 +391,13 @@ def test_browser_reads_historical_revision_without_crossing_page_scope(
     assert current.status_code == 200
     assert "# Updated" in current.text
     assert "Version history" in current.text
+    assert sha256(updated_markdown).hexdigest() in current.text
     assert f'href="{history_path}"' in current.text
     historical = client.get(history_path)
     assert historical.status_code == 200
     assert "# Original" in historical.text
+    assert sha256(b"# Original\n").hexdigest() in historical.text
+    assert sha256(updated_markdown).hexdigest() not in historical.text
     assert "# Updated" not in historical.text
     assert "Back to current version" in historical.text
     assert historical.headers["cache-control"] == "no-store, max-age=0"

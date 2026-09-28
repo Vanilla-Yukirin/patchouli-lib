@@ -202,6 +202,7 @@ _ZH_CN: dict[str, str] = {
     "Back to activity": "返回近况",
     "Occurred": "发生时间",
     "Current revision": "当前版本",
+    "Files in this version": "此版本的文件",
     "Page type": "页面类型",
     "Current Markdown": "当前 Markdown 正文",
     "Markdown body": "Markdown 正文",
@@ -934,6 +935,12 @@ def page_preview_page(
         f'<p class="meta">{localize(locale, "Recorded")}: {_time(item.created_at)}</p></li>'
         for item in view.revisions
     )
+    files = "".join(
+        f"<li><code>{escape(item.name)}</code>"
+        f'<p class="meta">{item.size_bytes} B · SHA-256: '
+        f"<code>{item.sha256_hex}</code></p></li>"
+        for item in view.files
+    )
     current = view.selected_revision_number == view.page.revision_number
     heading = "Current Markdown" if current else "Markdown body"
     body = (
@@ -950,6 +957,8 @@ def page_preview_page(
         )
         + f"<h2>{localize(locale, heading)}</h2>"
         f'<pre class="markdown-preview">{escape(view.markdown)}</pre>'
+        f"<h2>{localize(locale, 'Files in this version')}</h2>"
+        f'<ul class="item-list">{files}</ul>'
         f"<h2>{localize(locale, 'Version history')}</h2>"
         f'<ul class="item-list">{history}</ul>'
     )

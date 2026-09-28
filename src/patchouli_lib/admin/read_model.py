@@ -10,7 +10,7 @@ from sqlalchemy.engine import RowMapping
 from sqlalchemy.sql import Select
 
 from patchouli_lib.auth.models import AuditEvent, Caller
-from patchouli_lib.content.models import Page, Revision
+from patchouli_lib.content.models import Page, Revision, RevisionFile
 from patchouli_lib.library.models import Book, Library, Section
 
 
@@ -75,7 +75,15 @@ class PageView:
     markdown: str
     selected_revision_number: int
     selected_revision_created_at: int
+    files: tuple[RevisionFileItem, ...]
     revisions: tuple[RevisionItem, ...]
+
+
+@dataclass(frozen=True)
+class RevisionFileItem:
+    name: str
+    size_bytes: int
+    sha256_hex: str
 
 
 @dataclass(frozen=True)
@@ -371,6 +379,7 @@ class AdminReadModel:
                         Page.occurred_at,
                         Page.current_revision_number,
                         Revision.content_md,
+                        Revision.revision_id.label("selected_revision_id"),
                         Revision.revision_number.label("selected_revision_number"),
                         Revision.created_at.label("selected_revision_created_at"),
                     )
@@ -395,6 +404,25 @@ class AdminReadModel:
             )
             if row is None:
                 return None
+            files = tuple(
+                RevisionFileItem(
+                    item["filename"], item["size_bytes"], bytes(item["content_sha256"]).hex()
+                )
+                for item in connection.execute(
+                    select(
+                        RevisionFile.filename,
+                        RevisionFile.size_bytes,
+                        RevisionFile.content_sha256,
+                    )
+                    .where(
+                        RevisionFile.library_id == library_id,
+                        RevisionFile.page_uid == row["page_uid"],
+                        RevisionFile.revision_id == row["selected_revision_id"],
+                        RevisionFile.revision_number == row["selected_revision_number"],
+                    )
+                    .order_by(RevisionFile.filename)
+                ).mappings()
+            )
             revisions = tuple(
                 RevisionItem(item["revision_number"], item["created_at"])
                 for item in connection.execute(
@@ -414,6 +442,7 @@ class AdminReadModel:
                 bytes(row["content_md"]).decode("utf-8"),
                 row["selected_revision_number"],
                 row["selected_revision_created_at"],
+                files,
                 revisions,
             )
 
