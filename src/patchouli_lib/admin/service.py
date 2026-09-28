@@ -4,13 +4,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from uuid import uuid4
 
-from sqlalchemy import Connection, Engine, insert
+from sqlalchemy import Connection, Engine, insert, select
 
 from patchouli_lib.admin.contracts import (
     BootstrapInput,
+    PageTagFormInput,
     ProvisionAgentInput,
     RecoverOperatorInput,
     RevokeAgentCredentialInput,
+    TagFormInput,
 )
 from patchouli_lib.auth.models import AdminStructureAuditEvent
 from patchouli_lib.auth.repository import AuthRepository
@@ -20,7 +22,8 @@ from patchouli_lib.auth.schemas import (
     LocalOperatorRecovery,
     OperatorBootstrap,
 )
-from patchouli_lib.auth.service import utc_microseconds
+from patchouli_lib.auth.service import AuthenticationService, utc_microseconds
+from patchouli_lib.content.models import Page
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import (
@@ -39,6 +42,7 @@ from patchouli_lib.operator.service import (
     OperatorService,
     ResourceNotFoundError,
 )
+from patchouli_lib.tags.service import TagNotFoundError, TagService
 
 Clock = Callable[[], int]
 RequestIdFactory = Callable[[], str]
@@ -285,6 +289,56 @@ class AdminActionService:
                 library_id=library_id,
                 caller_id=request.caller_id,
                 credential_id=request.credential_id,
+                request_id=self._request_id_factory(),
+            )
+
+    def create_tag(self, library_id: str, request: TagFormInput) -> tuple[str, bool]:
+        token = request.operator_token.get_secret_value()
+        now = self._clock()
+        with immediate_transaction(self._engine) as connection:
+            AuthenticationService(AuthRepository(connection), clock=lambda: now).require_operator(
+                token, library_id=library_id
+            )
+            tag, created = TagService(connection, clock=lambda: now).create_tag(
+                token,
+                library_id=library_id,
+                name=request.name,
+                request_id=self._request_id_factory(),
+            )
+        return tag.id, created
+
+    def set_page_tag(
+        self,
+        library_id: str,
+        section_id: str,
+        book_id: str,
+        page_id: str,
+        request: PageTagFormInput,
+    ) -> bool:
+        token = request.operator_token.get_secret_value()
+        now = self._clock()
+        with immediate_transaction(self._engine) as connection:
+            AuthenticationService(AuthRepository(connection), clock=lambda: now).require_operator(
+                token, library_id=library_id
+            )
+            page_uid = connection.execute(
+                select(Page.page_uid).where(
+                    Page.library_id == library_id,
+                    Page.section_id == section_id,
+                    Page.book_id == book_id,
+                    Page.page_id == page_id,
+                    Page.deleted_at.is_(None),
+                )
+            ).scalar_one_or_none()
+            if page_uid is None:
+                raise TagNotFoundError
+            return TagService(connection, clock=lambda: now).set_page_tag(
+                token,
+                library_id=library_id,
+                section_id=section_id,
+                page_id=page_id,
+                tag_id=request.tag_id,
+                attach=request.operation == "attach",
                 request_id=self._request_id_factory(),
             )
 

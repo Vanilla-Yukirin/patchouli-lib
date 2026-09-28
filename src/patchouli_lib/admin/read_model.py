@@ -64,6 +64,13 @@ class TaggedPageItem:
 
 
 @dataclass(frozen=True)
+class PageTagChoice:
+    id: str
+    name: str
+    attached: bool
+
+
+@dataclass(frozen=True)
 class TagDirectoryView:
     library: LibraryItem
     tags: tuple[TagItem, ...]
@@ -108,6 +115,7 @@ class PageView:
     selected_revision_created_at: int
     files: tuple[RevisionFileItem, ...]
     revisions: tuple[RevisionItem, ...]
+    tag_choices: tuple[PageTagChoice, ...]
 
 
 @dataclass(frozen=True)
@@ -519,6 +527,22 @@ class AdminReadModel:
                     .order_by(Revision.revision_number.desc())
                 ).mappings()
             )
+            tag_choices = tuple(
+                PageTagChoice(item["id"], item["display_name"], item["tag_id"] is not None)
+                for item in connection.execute(
+                    select(Tag.id, Tag.display_name, PageTag.tag_id)
+                    .outerjoin(
+                        PageTag,
+                        and_(
+                            PageTag.library_id == Tag.library_id,
+                            PageTag.tag_id == Tag.id,
+                            PageTag.page_uid == row["page_uid"],
+                        ),
+                    )
+                    .where(Tag.library_id == library_id)
+                    .order_by(Tag.match_key, Tag.id)
+                ).mappings()
+            )
             return PageView(
                 library,
                 section,
@@ -529,6 +553,7 @@ class AdminReadModel:
                 row["selected_revision_created_at"],
                 files,
                 revisions,
+                tag_choices,
             )
 
 

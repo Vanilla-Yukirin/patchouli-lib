@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
@@ -77,9 +77,36 @@ class RevokeAgentCredentialInput(AdminActionInput):
         return value
 
 
+class TagFormInput(AdminActionInput):
+    name: Annotated[str, Field(min_length=1, max_length=100)]
+    operator_token: SecretStr = Field(min_length=1, max_length=256, repr=False)
+
+    @field_validator("operator_token", mode="before")
+    @classmethod
+    def reject_padded_operator_token(cls, value: object) -> object:
+        if isinstance(value, str) and value != value.strip():
+            raise ValueError("Operator credential must not contain whitespace.")
+        return value
+
+
+class PageTagFormInput(AdminActionInput):
+    tag_id: OpaqueId
+    operation: Literal["attach", "detach"]
+    operator_token: SecretStr = Field(min_length=1, max_length=256, repr=False)
+
+    @field_validator("operator_token", mode="before")
+    @classmethod
+    def reject_padded_operator_token(cls, value: object) -> object:
+        if isinstance(value, str) and value != value.strip():
+            raise ValueError("Operator credential must not contain whitespace.")
+        return value
+
+
 __all__ = [
     "BootstrapInput",
     "ProvisionAgentInput",
     "RecoverOperatorInput",
     "RevokeAgentCredentialInput",
+    "TagFormInput",
+    "PageTagFormInput",
 ]

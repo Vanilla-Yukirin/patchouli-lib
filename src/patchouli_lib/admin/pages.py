@@ -20,6 +20,10 @@ from patchouli_lib.admin.service import DeliveredCredential
 from patchouli_lib.auth.schemas import SectionAction
 
 AdminLocale = Literal["en", "zh-CN"]
+_TAG_TOKEN_HELP = (
+    "Enter this Library's Operator token for each Tag change. "
+    "It is not saved in the browser session."
+)
 
 STYLESHEET = """
 :root {
@@ -188,6 +192,21 @@ _ZH_CN: dict[str, str] = {
     "Tagged pages": "标记的页面",
     "No tags yet.": "暂无标签。",
     "No tagged pages yet.": "暂无已标记的页面。",
+    "Create Tag": "创建标签",
+    "Tag name": "标签名称",
+    "Manage page tags": "管理页面标签",
+    "Choose a tag": "选择标签",
+    "Attach tag": "关联标签",
+    "Remove tag": "移除标签",
+    "Create a Tag in this Library first.": "请先在本知识库创建标签。",
+    _TAG_TOKEN_HELP: "每次更改标签都需输入本知识库的管理员令牌；令牌不会保存在管理会话中。",
+    "Tag created.": "标签已创建。",
+    "Tag already exists; nothing changed.": "标签已存在，没有改动。",
+    "Tag attached.": "标签已关联。",
+    "Tag was already attached; nothing changed.": "标签原本就已关联，没有改动。",
+    "Tag removed.": "标签已移除。",
+    "Tag was not attached; nothing changed.": "标签原本就未关联，没有改动。",
+    "The requested Tag or page was not found.": "未找到指定标签或页面。",
     "Created": "创建时间",
     "Content activity": "内容近况",
     "Created a page": "创建了页面",
@@ -853,6 +872,8 @@ def tag_directory_page(
     view: TagDirectoryView,
     *,
     locale: AdminLocale = "en",
+    message: str | None = None,
+    error: bool = False,
 ) -> str:
     library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
     base = f"{library_path}/tags"
@@ -866,6 +887,20 @@ def tag_directory_page(
         f'<ul class="item-list">{cards}</ul>'
         if view.tags
         else f'<p class="card">{localize(locale, "No tags yet.")}</p>'
+    )
+    body = (
+        (_notice(localize(locale, message), error=error) if message is not None else "")
+        + body
+        + '<section class="card"><h2>'
+        + localize(locale, "Create Tag")
+        + "</h2>"
+        + f'<p class="section-help">{localize(locale, _TAG_TOKEN_HELP)}</p>'
+        + f'<form method="post" action="{base}" autocomplete="off">'
+        + _csrf(escape(csrf_token, quote=True))
+        + _text("name", "Tag name", locale, max_length=100)
+        + _secret("operator_token", "Current operator credential", locale)
+        + f'<button type="submit">{localize(locale, "Create Tag")}</button>'
+        + "</form></section>"
     )
     return _browser_document(
         csrf_token,
@@ -885,6 +920,8 @@ def tag_detail_page(
     view: TagView,
     *,
     locale: AdminLocale = "en",
+    message: str | None = None,
+    error: bool = False,
 ) -> str:
     library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
     tag_path = f"{library_path}/tags"
@@ -906,6 +943,8 @@ def tag_detail_page(
             else f'<p class="card">{localize(locale, "No tagged pages yet.")}</p>'
         )
     )
+    if message is not None:
+        body = _notice(localize(locale, message), error=error) + body
     return _browser_document(
         csrf_token,
         locale,
@@ -1003,6 +1042,8 @@ def page_preview_page(
     view: PageView,
     *,
     locale: AdminLocale = "en",
+    message: str | None = None,
+    error: bool = False,
 ) -> str:
     library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
     section_path = f"{library_path}/sections/{escape(view.section.id, quote=True)}"
@@ -1041,6 +1082,37 @@ def page_preview_page(
         f"<h2>{localize(locale, 'Version history')}</h2>"
         f'<ul class="item-list">{history}</ul>'
     )
+    tag_path = f"{library_path}/tags"
+    tag_choices = "".join(
+        f'<option value="{escape(item.id, quote=True)}">{escape(item.name)}'
+        + (" ✓" if item.attached else "")
+        + "</option>"
+        for item in view.tag_choices
+    )
+    if current and view.tag_choices:
+        body += (
+            '<section class="card"><h2>'
+            + localize(locale, "Manage page tags")
+            + "</h2>"
+            + f'<p class="section-help">{localize(locale, _TAG_TOKEN_HELP)}</p>'
+            + f'<form method="post" action="{base}/tags" autocomplete="off">'
+            + _csrf(escape(csrf_token, quote=True))
+            + f'<label for="tag_id">{localize(locale, "Choose a tag")}</label>'
+            + f'<select id="tag_id" name="tag_id" required>{tag_choices}</select>'
+            + _secret("operator_token", "Current operator credential", locale)
+            + '<button type="submit" name="operation" value="attach">'
+            + f"{localize(locale, 'Attach tag')}</button> "
+            + '<button type="submit" name="operation" value="detach">'
+            + f"{localize(locale, 'Remove tag')}</button>"
+            + "</form></section>"
+        )
+    elif current:
+        body += (
+            f'<p><a href="{tag_path}">'
+            f"{localize(locale, 'Create a Tag in this Library first.')}</a></p>"
+        )
+    if message is not None:
+        body = _notice(localize(locale, message), error=error) + body
     return _browser_document(
         csrf_token,
         locale,
@@ -1213,13 +1285,14 @@ def _text(
     locale: AdminLocale,
     *,
     help_text: str | None = None,
+    max_length: int = 200,
 ) -> str:
     escaped_name = escape(name, quote=True)
     described_by, help_markup = _field_help(escaped_name, help_text, locale)
     return (
         f'<label for="{escaped_name}">{escape(localize(locale, label))}</label>'
         f'<input id="{escaped_name}" name="{escaped_name}" type="text" '
-        f'maxlength="200"{described_by} required>{help_markup}'
+        f'maxlength="{max_length}"{described_by} required>{help_markup}'
     )
 
 

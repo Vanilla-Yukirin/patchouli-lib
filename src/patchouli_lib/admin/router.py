@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import hmac
+import json
+import time
 from collections.abc import Callable
 from ipaddress import IPv6Address
 from typing import Final, cast
@@ -15,9 +20,11 @@ from starlette.concurrency import run_in_threadpool
 
 from patchouli_lib.admin.contracts import (
     BootstrapInput,
+    PageTagFormInput,
     ProvisionAgentInput,
     RecoverOperatorInput,
     RevokeAgentCredentialInput,
+    TagFormInput,
 )
 from patchouli_lib.admin.pages import (
     STYLESHEET,
@@ -57,10 +64,17 @@ from patchouli_lib.operator.service import (
     PolicyConflictError,
     ResourceNotFoundError,
 )
+from patchouli_lib.tags.service import (
+    TagAuthorizationError,
+    TagNotFoundError,
+    TagValidationError,
+)
 
 _SESSION_COOKIE: Final[str] = "patchouli_admin_session"
 _LOCALE_COOKIE: Final[str] = "patchouli_admin_locale"
+_TAG_FLASH_COOKIE: Final[str] = "patchouli_admin_tag_result"
 _LOCALE_COOKIE_MAX_AGE: Final[int] = 31_536_000
+_TAG_FLASH_MAX_AGE: Final[int] = 60
 _MAX_FORM_BYTES: Final[int] = 16_384
 _MAX_FORM_FIELDS: Final[int] = 32
 _SECURITY_HEADERS: Final[dict[str, str]] = {
@@ -353,6 +367,103 @@ def create_admin_router(
             status_code=status if page is not None else 404,
         )
 
+    async def tag_action(
+        request: Request,
+        *,
+        allowed_fields: frozenset[str],
+        action: Callable[[FormValues], tuple[str, str]],
+        render: Callable[[str, AdminLocale, str | None, bool], str | None],
+    ) -> Response:
+        locale = locale_for(request)
+        if not _same_origin_submission(request):
+            return forbidden(request)
+        session = current_session(request)
+        if session is None:
+            return html(
+                login_page(locale=locale, message="Sign in again."),
+                locale=locale,
+                status_code=401,
+            )
+        try:
+            values = await _read_form(request, allowed_fields=allowed_fields | {"csrf_token"})
+            _require_csrf(values, session)
+            location, result = await run_in_threadpool(action, values)
+        except _FormError as exc:
+            status, message = exc.status_code, exc.safe_message
+        except (ValidationError, ValueError, TagValidationError):
+            status, message = 422, "Check the submitted fields and try again."
+        except (AuthenticationError, AuthorizationError, TagAuthorizationError):
+            status, message = 403, "The operator credential was rejected."
+        except TagNotFoundError:
+            status, message = 404, "The requested Tag or page was not found."
+        except IntegrityError:
+            status, message = 409, "The action conflicts with current local state."
+        except Exception:
+            status, message = 500, "The action could not be completed."
+        else:
+            response = redirect(location)
+            payload = json.dumps(
+                {"path": location, "result": result, "at": int(time.time())},
+                separators=(",", ":"),
+            ).encode("utf-8")
+            signature = hmac.new(
+                signing_secret.encode("utf-8"),
+                b"patchouli-lib/admin-tag-result/v1\x00" + session.audit_fingerprint() + payload,
+                hashlib.sha256,
+            ).hexdigest()
+            encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+            response.set_cookie(
+                _TAG_FLASH_COOKIE,
+                f"{encoded}.{signature}",
+                max_age=_TAG_FLASH_MAX_AGE,
+                path="/admin",
+                secure=secure_cookie(request),
+                httponly=True,
+                samesite="strict",
+            )
+            return response
+        page = render(session.csrf_token, locale, message, True)
+        return html(
+            page if page is not None else browser_not_found_page(session.csrf_token, locale=locale),
+            locale=locale,
+            status_code=status if page is not None else 404,
+        )
+
+    def result_message(request: Request, mapping: dict[str, str]) -> str | None:
+        session = current_session(request)
+        raw = request.cookies.get(_TAG_FLASH_COOKIE, "")
+        if session is None or len(raw) > 2048 or raw.count(".") != 1:
+            return None
+        encoded, supplied_signature = raw.split(".", 1)
+        try:
+            payload = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+            expected_signature = hmac.new(
+                signing_secret.encode("utf-8"),
+                b"patchouli-lib/admin-tag-result/v1\x00" + session.audit_fingerprint() + payload,
+                hashlib.sha256,
+            ).hexdigest()
+            data = json.loads(payload)
+        except (ValueError, UnicodeDecodeError, binascii.Error):
+            return None
+        if not hmac.compare_digest(supplied_signature, expected_signature):
+            return None
+        now = int(time.time())
+        if (
+            type(data) is not dict
+            or set(data) != {"path", "result", "at"}
+            or data["path"] != request.url.path
+            or type(data["result"]) is not str
+            or type(data["at"]) is not int
+            or not 0 <= now - data["at"] <= _TAG_FLASH_MAX_AGE
+        ):
+            return None
+        return mapping.get(data["result"])
+
+    def consume_tag_result(request: Request, response: Response) -> Response:
+        if _TAG_FLASH_COOKIE in request.cookies:
+            response.delete_cookie(_TAG_FLASH_COOKIE, path="/admin")
+        return response
+
     @router.get("")
     def dashboard(request: Request) -> Response:
         return protected_page(
@@ -427,13 +538,52 @@ def create_admin_router(
 
         return protected_page(request, render)
 
+    @router.post("/libraries/{library_id}/tags")
+    async def create_library_tag(request: Request, library_id: str) -> Response:
+        def action(values: FormValues) -> tuple[str, str]:
+            tag_id, created = service.create_tag(library_id, TagFormInput.model_validate(values))
+            return (
+                f"/admin/libraries/{library_id}/tags/{tag_id}",
+                "created" if created else "existing",
+            )
+
+        def render(csrf: str, locale: AdminLocale, message: str | None, error: bool) -> str | None:
+            view = read_model.list_library_tags(library_id)
+            return (
+                None
+                if view is None
+                else tag_directory_page(csrf, view, locale=locale, message=message, error=error)
+            )
+
+        return await tag_action(
+            request,
+            allowed_fields=frozenset(TagFormInput.model_fields),
+            action=action,
+            render=render,
+        )
+
     @router.get("/libraries/{library_id}/tags/{tag_id}")
     def library_tag_detail(request: Request, library_id: str, tag_id: str) -> Response:
         def render(csrf: str, locale: AdminLocale) -> str | None:
             view = read_model.get_library_tag(library_id, tag_id)
-            return None if view is None else tag_detail_page(csrf, view, locale=locale)
+            return (
+                None
+                if view is None
+                else tag_detail_page(
+                    csrf,
+                    view,
+                    locale=locale,
+                    message=result_message(
+                        request,
+                        {
+                            "created": "Tag created.",
+                            "existing": "Tag already exists; nothing changed.",
+                        },
+                    ),
+                )
+            )
 
-        return protected_page(request, render)
+        return consume_tag_result(request, protected_page(request, render))
 
     @router.post("/libraries/{library_id}/sections")
     async def create_section(request: Request, library_id: str) -> Response:
@@ -512,9 +662,61 @@ def create_admin_router(
     ) -> Response:
         def render(csrf: str, locale: AdminLocale) -> str | None:
             view = read_model.get_page(library_id, section_id, book_id, page_id)
-            return None if view is None else page_preview_page(csrf, view, locale=locale)
+            return (
+                None
+                if view is None
+                else page_preview_page(
+                    csrf,
+                    view,
+                    locale=locale,
+                    message=result_message(
+                        request,
+                        {
+                            "attached": "Tag attached.",
+                            "already-attached": "Tag was already attached; nothing changed.",
+                            "removed": "Tag removed.",
+                            "not-attached": "Tag was not attached; nothing changed.",
+                        },
+                    ),
+                )
+            )
 
-        return protected_page(request, render)
+        return consume_tag_result(request, protected_page(request, render))
+
+    @router.post(
+        "/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages/{page_id}/tags"
+    )
+    async def set_page_tag(
+        request: Request, library_id: str, section_id: str, book_id: str, page_id: str
+    ) -> Response:
+        base = (
+            f"/admin/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages/{page_id}"
+        )
+
+        def action(values: FormValues) -> tuple[str, str]:
+            submitted = PageTagFormInput.model_validate(values)
+            changed = service.set_page_tag(library_id, section_id, book_id, page_id, submitted)
+            result = (
+                ("attached" if changed else "already-attached")
+                if submitted.operation == "attach"
+                else ("removed" if changed else "not-attached")
+            )
+            return base, result
+
+        def render(csrf: str, locale: AdminLocale, message: str | None, error: bool) -> str | None:
+            view = read_model.get_page(library_id, section_id, book_id, page_id)
+            return (
+                None
+                if view is None
+                else page_preview_page(csrf, view, locale=locale, message=message, error=error)
+            )
+
+        return await tag_action(
+            request,
+            allowed_fields=frozenset(PageTagFormInput.model_fields),
+            action=action,
+            render=render,
+        )
 
     @router.get(
         "/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages/{page_id}"
