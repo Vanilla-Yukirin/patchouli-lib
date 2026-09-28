@@ -23,6 +23,8 @@
 - [下一阶段改造清单](next-phase-todo.md)：只列待办大纲，不代表已实现。
 - [下一阶段管理后台、内容模型与 Agent 接入设计](proposals/next-phase-product-and-api.md)：
   产品目标已确认，接口、存储、安全和迁移方案仍为提案中。
+- [当前 Page 搜索 v2 提案](proposals/current-page-search-v2.md)：跨知识库字符倒排、
+  筛选、排序与索引恢复的待审契约；不代表生产搜索已启用。
 - [开发、验证与交付](development-and-delivery.md)
 - [网页管理面板](admin-web-console.md) / [简体中文兼容文件](admin-web-console.zh-CN.md)
 - [Agent 贡献工作流](agent-contribution-workflow.md)
