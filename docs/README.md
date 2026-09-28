@@ -20,6 +20,9 @@
 ## 工程文档
 
 - [实施路线图与当前状态](../ROADMAP.md)
+- [下一阶段改造清单](next-phase-todo.md)：只列待办大纲，不代表已实现。
+- [下一阶段管理后台、内容模型与 Agent 接入设计](proposals/next-phase-product-and-api.md)：
+  产品目标已确认，接口、存储、安全和迁移方案仍为提案中。
 - [开发、验证与交付](development-and-delivery.md)
 - [网页管理面板](admin-web-console.md) / [简体中文兼容文件](admin-web-console.zh-CN.md)
 - [Agent 贡献工作流](agent-contribution-workflow.md)
@@ -27,6 +30,10 @@
 - [ADR 0002：由管理员发起的私有更新](decisions/0002-manual-private-updates.md)
 - [ADR 0003：受限的网页管理面板](decisions/0003-admin-web-console.md)
 - [管理面板入口简化提案](proposals/admin-request-origin.md)
+
+下一阶段设计包含与当前已接受的单文件 Page、一次性 Token 展示和按 Section 授权
+不一致的目标。读者应以现有文档和代码判断**当前行为**；新提案不能自行取代既有
+决策，也不能被当成已经上线的能力。
 
 ## 状态词汇
 

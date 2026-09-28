@@ -1,5 +1,9 @@
 # 稳定标识符与引用
 
+> 下一阶段允许校正 Page 的声明发生时间，但要求稳定 Page ID 不变。当前数据校验
+> 把 ID 的初始时间分量与 `occurred_at` 绑定；解耦方案和迁移须先通过
+> [下一阶段提案](proposals/next-phase-product-and-api.md)的实施审查。
+
 ## Page 标识符
 
 当前设计方向使用一个可排序的事件发生时间部分和一个简短 ASCII slug：

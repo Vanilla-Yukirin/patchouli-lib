@@ -1,5 +1,10 @@
 # Page 版本、历史与恢复
 
+> 当前实现只支持单份 Markdown 正文的 Revision。维护者提出的多文件完整快照、
+> 相同内容不新增 Revision、声明时间校正和回收站界面见
+> [下一阶段提案](proposals/next-phase-product-and-api.md)；其中仅软删除方向已在
+> 本文接受，不能把未来接口当作已上线。
+
 ## 不变量
 
 - 普通编辑会创建新的不可变 Revision。
