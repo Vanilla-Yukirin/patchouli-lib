@@ -23,12 +23,19 @@ from patchouli_lib.admin.pages import (
     STYLESHEET,
     AdminLocale,
     action_result_page,
+    book_page,
+    browser_not_found_page,
     credential_page,
     dashboard_page,
     guide_page,
+    libraries_page,
+    library_page,
     login_page,
+    page_preview_page,
+    section_page,
 )
 from patchouli_lib.admin.passwords import password_matches
+from patchouli_lib.admin.read_model import AdminReadModel
 from patchouli_lib.admin.service import AdminActionService, DeliveredCredential
 from patchouli_lib.admin.session import AdminSession, AdminSessionCodec
 from patchouli_lib.auth.service import AuthenticationError, AuthorizationError
@@ -89,6 +96,7 @@ def create_admin_router(
         ttl_seconds=settings.admin_session_ttl_seconds,
     )
     service = action_service or AdminActionService(engine)
+    read_model = AdminReadModel(engine)
     router = APIRouter(prefix="/admin", include_in_schema=False)
 
     def secure_cookie(request: Request) -> bool:
@@ -159,7 +167,7 @@ def create_admin_router(
 
     def protected_page(
         request: Request,
-        render: Callable[[str, AdminLocale], str],
+        render: Callable[[str, AdminLocale], str | None],
     ) -> Response:
         locale = locale_for(request)
         session = current_session(request)
@@ -168,7 +176,14 @@ def create_admin_router(
             _clear_cookie(redirect_response, secure=secure_cookie(request))
             remember_requested_locale(redirect_response, request)
             return redirect_response
-        page_response = html(render(session.csrf_token, locale), locale=locale)
+        rendered = render(session.csrf_token, locale)
+        page_response = html(
+            rendered
+            if rendered is not None
+            else browser_not_found_page(session.csrf_token, locale=locale),
+            locale=locale,
+            status_code=200 if rendered is not None else 404,
+        )
         remember_requested_locale(page_response, request)
         return page_response
 
@@ -306,6 +321,47 @@ def create_admin_router(
         page_response = html(login_page(locale=locale), locale=locale)
         remember_requested_locale(page_response, request)
         return page_response
+
+    @router.get("/libraries")
+    def libraries(request: Request) -> Response:
+        return protected_page(
+            request,
+            lambda csrf, locale: libraries_page(csrf, read_model.list_libraries(), locale=locale),
+        )
+
+    @router.get("/libraries/{library_id}")
+    def library_detail(request: Request, library_id: str) -> Response:
+        def render(csrf: str, locale: AdminLocale) -> str | None:
+            view = read_model.get_library(library_id)
+            return None if view is None else library_page(csrf, view, locale=locale)
+
+        return protected_page(request, render)
+
+    @router.get("/libraries/{library_id}/sections/{section_id}")
+    def section_detail(request: Request, library_id: str, section_id: str) -> Response:
+        def render(csrf: str, locale: AdminLocale) -> str | None:
+            view = read_model.get_section(library_id, section_id)
+            return None if view is None else section_page(csrf, view, locale=locale)
+
+        return protected_page(request, render)
+
+    @router.get("/libraries/{library_id}/sections/{section_id}/books/{book_id}")
+    def book_detail(request: Request, library_id: str, section_id: str, book_id: str) -> Response:
+        def render(csrf: str, locale: AdminLocale) -> str | None:
+            view = read_model.get_book(library_id, section_id, book_id)
+            return None if view is None else book_page(csrf, view, locale=locale)
+
+        return protected_page(request, render)
+
+    @router.get("/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages/{page_id}")
+    def page_detail(
+        request: Request, library_id: str, section_id: str, book_id: str, page_id: str
+    ) -> Response:
+        def render(csrf: str, locale: AdminLocale) -> str | None:
+            view = read_model.get_page(library_id, section_id, book_id, page_id)
+            return None if view is None else page_preview_page(csrf, view, locale=locale)
+
+        return protected_page(request, render)
 
     @router.post("/login")
     async def login_submit(request: Request) -> Response:

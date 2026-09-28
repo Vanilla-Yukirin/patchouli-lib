@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from html import escape
 from typing import Literal
 
+from patchouli_lib.admin.read_model import (
+    BookView,
+    LibraryItem,
+    LibraryView,
+    PageView,
+    SectionView,
+)
 from patchouli_lib.admin.service import DeliveredCredential
 from patchouli_lib.auth.schemas import SectionAction
 
@@ -92,8 +100,41 @@ small { color: #526259; }
   line-height: 1.4;
   margin-top: .3rem;
 }
+.admin-shell {
+  display: grid;
+  grid-template-columns: 13rem minmax(0, 1fr);
+  max-width: 90rem;
+  margin: 0 auto;
+}
+.admin-shell main { min-width: 0; max-width: none; margin: 0; }
+.side-nav { padding: 2rem 1rem; border-right: 1px solid #d6ddd5; }
+.side-nav a { display: block; padding: .6rem .75rem; border-radius: .4rem; text-decoration: none; }
+.side-nav a[aria-current="page"] { background: #dce9de; font-weight: 700; }
+.breadcrumb {
+  display: flex;
+  gap: .5rem;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+.item-list { list-style: none; padding: 0; display: grid; gap: .8rem; }
+.item-list li { background: #fff; border: 1px solid #d6ddd5; border-radius: .6rem; padding: 1rem; }
+.item-list a { font-weight: 700; }
+.item-list p { margin-bottom: 0; overflow-wrap: anywhere; }
+.meta { color: #526259; font-size: .9rem; }
+.markdown-preview { white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 40rem) {
   .nav-actions { width: 100%; margin-left: 0; justify-content: space-between; }
+  .admin-shell { display: block; }
+  .side-nav {
+    display: flex;
+    gap: .3rem;
+    padding: .5rem 1rem;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid #d6ddd5;
+  }
+  .side-nav a { white-space: nowrap; }
 }
 """.strip()
 
@@ -128,6 +169,22 @@ _ZH_CN: dict[str, str] = {
     "Library ID": "知识库 ID",
     "Library initialized": "知识库已初始化",
     "Library name": "知识库名称",
+    "Libraries": "知识库",
+    "Home": "主页",
+    "Sections": "分区",
+    "Books": "书籍",
+    "Pages": "页面",
+    "Created": "创建时间",
+    "Occurred": "发生时间",
+    "Current revision": "当前版本",
+    "Page type": "页面类型",
+    "Current Markdown": "当前 Markdown 正文",
+    "No libraries yet.": "暂无知识库。",
+    "No sections yet.": "暂无分区。",
+    "No books yet.": "暂无书籍。",
+    "No pages yet.": "暂无页面。",
+    "Page count": "页面数",
+    "The requested item was not found.": "找不到请求的内容。",
     "MCP setup": "MCP 配置",
     "Only URL-encoded forms are accepted.": "只接受 URL 编码的表单。",
     "Operator credential recovered": "管理员凭据已恢复",
@@ -341,6 +398,8 @@ def dashboard_page(
     )
     content = f"""
 {_header(csrf, locale)}
+<div class="admin-shell">
+{_sidebar(locale, current="home")}
 <main>
   <h1>{localize(locale, "Administration")}</h1>
   <p class="notice">{credential_notice}</p>
@@ -394,6 +453,7 @@ def dashboard_page(
     </section>
   </div>
 </main>
+</div>
 """
     return _document(localize(locale, "Administration"), content, locale)
 
@@ -445,13 +505,16 @@ def action_result_page(
     localized_heading = localize(locale, heading)
     content = f"""
 {_header(csrf, locale)}
-<main class="narrow">
+<div class="admin-shell">
+{_sidebar(locale, current="home")}
+<main>
   <section class="card">
     <h1>{escape(localized_heading)}</h1>
     {_notice(localize(locale, message))}
     <p><a href="/admin">{localize(locale, "Return to administration")}</a></p>
   </section>
 </main>
+</div>
 """
     return _document(localized_heading, content, locale)
 
@@ -550,10 +613,228 @@ secret store.</p>
         "mcp": "/admin/mcp",
     }[page]
     content = (
-        f'{_header(csrf, locale, switch_path=switch_path)}<main><section class="card">'
-        f"<h1>{localized_title}</h1>{body}</section></main>"
+        f"{_header(csrf, locale, switch_path=switch_path)}"
+        f'<div class="admin-shell">{_sidebar(locale, current=page)}'
+        f'<main><section class="card"><h1>{localized_title}</h1>{body}</section></main></div>'
     )
     return _document(localized_title, content, locale)
+
+
+def libraries_page(
+    csrf_token: str,
+    libraries: tuple[LibraryItem, ...],
+    *,
+    locale: AdminLocale = "en",
+) -> str:
+    cards = "".join(
+        '<li><a href="/admin/libraries/'
+        f'{escape(item.id, quote=True)}">{escape(item.name)}</a>'
+        f'<p class="meta">{localize(locale, "Created")}: {_time(item.created_at)} · '
+        f"{localize(locale, 'Page count')}: {item.page_count}</p></li>"
+        for item in libraries
+    )
+    body = (
+        f'<ul class="item-list">{cards}</ul>'
+        if libraries
+        else f'<p class="card">{localize(locale, "No libraries yet.")}</p>'
+    )
+    return _browser_document(
+        csrf_token, locale, localize(locale, "Libraries"), "/admin/libraries", body
+    )
+
+
+def library_page(
+    csrf_token: str,
+    view: LibraryView,
+    *,
+    locale: AdminLocale = "en",
+) -> str:
+    base = f"/admin/libraries/{escape(view.library.id, quote=True)}"
+    cards = "".join(
+        f'<li><a href="{base}/sections/{escape(item.id, quote=True)}">'
+        f"{escape(item.name)}</a><p>{escape(item.description)}</p></li>"
+        for item in view.sections
+    )
+    body = (
+        f'<p class="meta">{localize(locale, "Created")}: {_time(view.library.created_at)} · '
+        f"{localize(locale, 'Page count')}: {view.library.page_count}</p>"
+        f"<h2>{localize(locale, 'Sections')}</h2>"
+        + (
+            f'<ul class="item-list">{cards}</ul>'
+            if view.sections
+            else f'<p class="card">{localize(locale, "No sections yet.")}</p>'
+        )
+    )
+    return _browser_document(
+        csrf_token,
+        locale,
+        view.library.name,
+        base,
+        body,
+        crumbs=((localize(locale, "Libraries"), "/admin/libraries"),),
+    )
+
+
+def section_page(
+    csrf_token: str,
+    view: SectionView,
+    *,
+    locale: AdminLocale = "en",
+) -> str:
+    library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
+    base = f"{library_path}/sections/{escape(view.section.id, quote=True)}"
+    cards = "".join(
+        f'<li><a href="{base}/books/{escape(item.id, quote=True)}">'
+        f"{escape(item.name)}</a><p>{escape(item.summary)}</p></li>"
+        for item in view.books
+    )
+    body = f"<p>{escape(view.section.description)}</p><h2>{localize(locale, 'Books')}</h2>" + (
+        f'<ul class="item-list">{cards}</ul>'
+        if view.books
+        else f'<p class="card">{localize(locale, "No books yet.")}</p>'
+    )
+    return _browser_document(
+        csrf_token,
+        locale,
+        view.section.name,
+        base,
+        body,
+        crumbs=(
+            (localize(locale, "Libraries"), "/admin/libraries"),
+            (view.library.name, library_path),
+        ),
+    )
+
+
+def book_page(
+    csrf_token: str,
+    view: BookView,
+    *,
+    locale: AdminLocale = "en",
+) -> str:
+    library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
+    section_path = f"{library_path}/sections/{escape(view.section.id, quote=True)}"
+    base = f"{section_path}/books/{escape(view.book.id, quote=True)}"
+    cards = "".join(
+        f'<li><a href="{base}/pages/{escape(item.id, quote=True)}">'
+        f'{escape(item.title)}</a><p class="meta">'
+        f"{localize(locale, 'Occurred')}: {_time(item.occurred_at)} · "
+        f"{localize(locale, 'Current revision')}: {item.revision_number}</p></li>"
+        for item in view.pages
+    )
+    body = f"<p>{escape(view.book.summary)}</p><h2>{localize(locale, 'Pages')}</h2>" + (
+        f'<ul class="item-list">{cards}</ul>'
+        if view.pages
+        else f'<p class="card">{localize(locale, "No pages yet.")}</p>'
+    )
+    return _browser_document(
+        csrf_token,
+        locale,
+        view.book.name,
+        base,
+        body,
+        crumbs=(
+            (localize(locale, "Libraries"), "/admin/libraries"),
+            (view.library.name, library_path),
+            (view.section.name, section_path),
+        ),
+    )
+
+
+def page_preview_page(
+    csrf_token: str,
+    view: PageView,
+    *,
+    locale: AdminLocale = "en",
+) -> str:
+    library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
+    section_path = f"{library_path}/sections/{escape(view.section.id, quote=True)}"
+    book_path = f"{section_path}/books/{escape(view.book.id, quote=True)}"
+    base = f"{book_path}/pages/{escape(view.page.id, quote=True)}"
+    body = (
+        f'<p class="meta">{localize(locale, "Page type")}: {escape(view.page.page_type)} · '
+        f"{localize(locale, 'Occurred')}: {_time(view.page.occurred_at)} · "
+        f"{localize(locale, 'Current revision')}: {view.page.revision_number}</p>"
+        f"<h2>{localize(locale, 'Current Markdown')}</h2>"
+        f'<pre class="markdown-preview">{escape(view.markdown)}</pre>'
+    )
+    return _browser_document(
+        csrf_token,
+        locale,
+        view.page.title,
+        base,
+        body,
+        crumbs=(
+            (localize(locale, "Libraries"), "/admin/libraries"),
+            (view.library.name, library_path),
+            (view.section.name, section_path),
+            (view.book.name, book_path),
+        ),
+    )
+
+
+def browser_not_found_page(csrf_token: str, *, locale: AdminLocale = "en") -> str:
+    return _browser_document(
+        csrf_token,
+        locale,
+        localize(locale, "The requested item was not found."),
+        "/admin/libraries",
+        "",
+    )
+
+
+def _browser_document(
+    csrf_token: str,
+    locale: AdminLocale,
+    title: str,
+    path: str,
+    body: str,
+    *,
+    crumbs: tuple[tuple[str, str], ...] = (),
+) -> str:
+    links = "".join(
+        f'<a href="{escape(href, quote=True)}">{escape(label)}</a><span aria-hidden="true">/</span>'
+        for label, href in crumbs
+    )
+    heading = escape(title)
+    content = (
+        f"{_header(escape(csrf_token, quote=True), locale, switch_path=path)}"
+        '<div class="admin-shell">'
+        f"{_sidebar(locale, current='libraries')}"
+        f'<main><div class="breadcrumb">{links}<span>{heading}</span></div>'
+        f"<h1>{heading}</h1>{body}</main></div>"
+    )
+    return _document(title, content, locale)
+
+
+def _sidebar(locale: AdminLocale, *, current: str) -> str:
+    entries = (
+        ("home", "Home", "/admin"),
+        ("libraries", "Libraries", "/admin/libraries"),
+        ("guide", "Guide", "/admin/guide"),
+        ("agent", "Agent", "/admin/agent"),
+        ("mcp", "MCP", "/admin/mcp"),
+    )
+    links = "".join(
+        f'<a href="{path}"'
+        + (' aria-current="page"' if key == current else "")
+        + f">{escape(localize(locale, label))}</a>"
+        for key, label, path in entries
+    )
+    return (
+        f'<aside class="side-nav" aria-label="{localize(locale, "Administration")}">{links}</aside>'
+    )
+
+
+def _time(timestamp_micros: int) -> str:
+    try:
+        value = datetime.fromtimestamp(timestamp_micros / 1_000_000, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        # SQLite accepts timestamps beyond datetime's supported year range.
+        # Keep the read-only browser usable without inventing a calendar date.
+        return f"{timestamp_micros} µs (UTC)"
+    iso = value.isoformat(timespec="seconds")
+    return f'<time datetime="{iso}">{value:%Y-%m-%d %H:%M} UTC</time>'
 
 
 def _header(
@@ -567,6 +848,7 @@ def _header(
 <header>
   <nav aria-label="{localize(locale, "Administration")}">
     <a href="/admin"><strong>PatchouliLib</strong></a>
+    <a href="/admin/libraries">{localize(locale, "Libraries")}</a>
     <a href="/admin/guide">{localize(locale, "Guide")}</a>
     <a href="/admin/agent">Agent</a>
     <a href="/admin/mcp">MCP</a>
