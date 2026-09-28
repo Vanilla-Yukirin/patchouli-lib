@@ -176,6 +176,9 @@ _ZH_CN: dict[str, str] = {
     "Library name": "知识库名称",
     "Libraries": "知识库",
     "Home": "主页",
+    "Setup and credentials": "初始化与凭据",
+    "Return to setup": "返回初始化与凭据",
+    "Manage setup and credentials.": "在这里管理初始结构和现有凭据。",
     "Sections": "分区",
     "Books": "书籍",
     "Pages": "页面",
@@ -317,12 +320,11 @@ def login_page(*, locale: AdminLocale = "en", message: str | None = None) -> str
     return _document(localize(locale, "Administration sign in"), content, locale)
 
 
-def dashboard_page(
+def operations_page(
     csrf_token: str,
     *,
     locale: AdminLocale = "en",
     message: str | None = None,
-    activities: tuple[ContentActivityItem, ...] | None = None,
 ) -> str:
     csrf = escape(csrf_token, quote=True)
     notice = "" if message is None else _notice(localize(locale, message), error=True)
@@ -428,12 +430,12 @@ def dashboard_page(
         else "Revokes active operator credentials and issues one replacement."
     )
     content = f"""
-{_header(csrf, locale)}
+{_header(csrf, locale, switch_path="/admin/setup")}
 <div class="admin-shell">
-{_sidebar(locale, current="home")}
+{_sidebar(locale, current="setup")}
 <main>
-  <h1>{localize(locale, "Administration")}</h1>
-  {"" if activities is None else _content_activity_timeline(activities, locale)}
+  <h1>{localize(locale, "Setup and credentials")}</h1>
+  <p class="section-help">{localize(locale, "Manage setup and credentials.")}</p>
   <p class="notice">{credential_notice}</p>
   {notice}
   <div class="grid">
@@ -487,7 +489,27 @@ def dashboard_page(
 </main>
 </div>
 """
-    return _document(localize(locale, "Administration"), content, locale)
+    return _document(localize(locale, "Setup and credentials"), content, locale)
+
+
+def dashboard_page(
+    csrf_token: str,
+    *,
+    locale: AdminLocale = "en",
+    activities: tuple[ContentActivityItem, ...] = (),
+) -> str:
+    csrf = escape(csrf_token, quote=True)
+    content = f"""
+{_header(csrf, locale)}
+<div class="admin-shell">
+{_sidebar(locale, current="home")}
+<main>
+  <h1>{localize(locale, "Home")}</h1>
+  {_content_activity_timeline(activities, locale)}
+</main>
+</div>
+"""
+    return _document(localize(locale, "Home"), content, locale)
 
 
 def _content_activity_timeline(
@@ -612,7 +634,7 @@ def credential_page(
       <dt>{localize(locale, "Caller ID")}</dt><dd>{escape(result.caller_id)}</dd>
       <dt>{localize(locale, "Credential ID")}</dt><dd>{escape(result.credential_id)}</dd>
     </dl>
-    <p><a href="/admin">{localize(locale, "Return to administration")}</a></p>
+    <p><a href="/admin/setup">{localize(locale, "Return to setup")}</a></p>
   </section>
 </main>
 """
@@ -629,14 +651,14 @@ def action_result_page(
     csrf = escape(csrf_token, quote=True)
     localized_heading = localize(locale, heading)
     content = f"""
-{_header(csrf, locale)}
+{_header(csrf, locale, switch_path="/admin/setup")}
 <div class="admin-shell">
-{_sidebar(locale, current="home")}
+{_sidebar(locale, current="setup")}
 <main>
   <section class="card">
     <h1>{escape(localized_heading)}</h1>
     {_notice(localize(locale, message))}
-    <p><a href="/admin">{localize(locale, "Return to administration")}</a></p>
+    <p><a href="/admin/setup">{localize(locale, "Return to setup")}</a></p>
   </section>
 </main>
 </div>
@@ -985,6 +1007,7 @@ def _sidebar(locale: AdminLocale, *, current: str) -> str:
         ("home", "Home", "/admin"),
         ("libraries", "Libraries", "/admin/libraries"),
         ("agents", "Identities", "/admin/agents"),
+        ("setup", "Setup and credentials", "/admin/setup"),
         ("guide", "Guide", "/admin/guide"),
         ("agent", "Agent", "/admin/agent"),
         ("mcp", "MCP", "/admin/mcp"),

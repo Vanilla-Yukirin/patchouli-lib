@@ -33,6 +33,7 @@ from patchouli_lib.admin.pages import (
     libraries_page,
     library_page,
     login_page,
+    operations_page,
     page_preview_page,
     section_page,
 )
@@ -222,7 +223,7 @@ def create_admin_router(
             result = await run_in_threadpool(action, values)
         except _FormError as exc:
             return html(
-                dashboard_page(
+                operations_page(
                     session.csrf_token,
                     locale=locale,
                     message=exc.safe_message,
@@ -232,7 +233,7 @@ def create_admin_router(
             )
         except (ValidationError, ValueError):
             return html(
-                dashboard_page(
+                operations_page(
                     session.csrf_token,
                     locale=locale,
                     message="Check the submitted fields and try again.",
@@ -242,7 +243,7 @@ def create_admin_router(
             )
         except (AuthenticationError, AuthorizationError):
             return html(
-                dashboard_page(
+                operations_page(
                     session.csrf_token,
                     locale=locale,
                     message="The operator credential was rejected.",
@@ -252,7 +253,7 @@ def create_admin_router(
             )
         except ResourceNotFoundError:
             return html(
-                dashboard_page(
+                operations_page(
                     session.csrf_token,
                     locale=locale,
                     message="The requested local resource was not found.",
@@ -269,7 +270,7 @@ def create_admin_router(
             PolicyConflictError,
         ):
             return html(
-                dashboard_page(
+                operations_page(
                     session.csrf_token,
                     locale=locale,
                     message="The action conflicts with current local state.",
@@ -279,7 +280,7 @@ def create_admin_router(
             )
         except Exception:
             return html(
-                dashboard_page(
+                operations_page(
                     session.csrf_token,
                     locale=locale,
                     message="The action could not be completed.",
@@ -357,6 +358,13 @@ def create_admin_router(
             lambda csrf, locale: dashboard_page(
                 csrf, locale=locale, activities=read_model.recent_content_activity()
             ),
+        )
+
+    @router.get("/setup")
+    def setup(request: Request) -> Response:
+        return protected_page(
+            request,
+            lambda csrf, locale: operations_page(csrf, locale=locale),
         )
 
     @router.get("/login")

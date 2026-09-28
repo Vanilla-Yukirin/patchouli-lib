@@ -510,6 +510,7 @@ def test_chinese_language_persists_across_dashboard_guides_and_form_errors(
 
     csrf = _login(admin_web)
     dashboard = admin_web.client.get("/admin")
+    setup = admin_web.client.get("/admin/setup")
     guide = admin_web.client.get("/admin/guide")
     agent = admin_web.client.get("/admin/agent")
     mcp = admin_web.client.get("/admin/mcp")
@@ -525,33 +526,36 @@ def test_chinese_language_persists_across_dashboard_guides_and_form_errors(
     )
 
     assert dashboard.headers["content-language"] == "zh-CN"
-    assert "首次设置" in dashboard.text
-    assert "只有明确要新建另一个知识库时才再次填写" in dashboard.text
-    assert "个人使用通常一个知识库就够了" in dashboard.text
-    assert "Agent 权限的边界" in dashboard.text
-    assert "首次生成的管理员令牌可以使用多久" in dashboard.text
-    assert "管理员令牌有效期（秒）" in dashboard.text
-    assert 'aria-describedby="library_name-help"' in dashboard.text
-    assert 'class="field-help" id="library_name-help"' in dashboard.text
-    assert dashboard.text.count("可选。") >= 3
-    assert "当前管理员凭据" in dashboard.text
+    assert "内容近况" in dashboard.text
+    assert 'href="/admin/setup"' in dashboard.text
+    assert "首次设置" in setup.text
+    assert "只有明确要新建另一个知识库时才再次填写" in setup.text
+    assert "个人使用通常一个知识库就够了" in setup.text
+    assert "Agent 权限的边界" in setup.text
+    assert "首次生成的管理员令牌可以使用多久" in setup.text
+    assert "管理员令牌有效期（秒）" in setup.text
+    assert 'aria-describedby="library_name-help"' in setup.text
+    assert 'class="field-help" id="library_name-help"' in setup.text
+    assert setup.text.count("可选。") >= 3
+    assert "当前管理员凭据" in setup.text
     assert "退出登录" in dashboard.text
     assert "管理员指南" in guide.text
     assert "恢复管理员凭据会使此前仍有效的管理员凭据失效" in guide.text
     assert "Agent 使用说明" in agent.text
     assert "MCP 配置" in mcp.text
     assert "提交的表单包含未知字段。" in invalid_form.text
-    assert 'href="/admin?lang=en"' in invalid_form.text
+    assert 'href="/admin/setup?lang=en"' in invalid_form.text
     assert "/admin/bootstrap?lang=" not in invalid_form.text
     assert initialized.status_code == 200
     assert "知识库已初始化" in initialized.text
+    assert 'href="/admin/setup"' in initialized.text
     assert "此值仅在本次响应中显示" in initialized.text
     assert "知识库 ID" in initialized.text
     assert "调用方 ID" in initialized.text
     assert "凭据 ID" in initialized.text
     assert 'class="language-switch"' not in initialized.text
     assert "/admin/bootstrap?lang=" not in initialized.text
-    for response in (dashboard, guide, agent, mcp, invalid_form, initialized):
+    for response in (dashboard, setup, guide, agent, mcp, invalid_form, initialized):
         _assert_security_headers(response)
 
 
@@ -559,16 +563,20 @@ def test_login_session_protected_guides_and_logout(admin_web: AdminWeb) -> None:
     unauthenticated = admin_web.client.get("/admin")
     assert unauthenticated.status_code == 303
     assert unauthenticated.headers["location"] == "/admin/login"
+    assert admin_web.client.get("/admin/setup").status_code == 303
     sign_in = admin_web.client.get("/admin/login")
     assert "run host commands" in sign_in.text
 
     csrf = _login(admin_web)
     dashboard = admin_web.client.get("/admin")
-    assert "First-time setup" in dashboard.text
-    assert "One Library is usually enough for personal use" in dashboard.text
-    assert "only when you deliberately want another Library" in dashboard.text
-    assert "3600 seconds is one hour" in dashboard.text
-    assert _ADMIN_PASSWORD not in dashboard.text
+    setup = admin_web.client.get("/admin/setup")
+    assert "Content activity" in dashboard.text
+    assert "First-time setup" not in dashboard.text
+    assert "First-time setup" in setup.text
+    assert "One Library is usually enough for personal use" in setup.text
+    assert "only when you deliberately want another Library" in setup.text
+    assert "3600 seconds is one hour" in setup.text
+    assert _ADMIN_PASSWORD not in setup.text
 
     guide = admin_web.client.get("/admin/guide")
     agent = admin_web.client.get("/admin/agent")
@@ -579,7 +587,7 @@ def test_login_session_protected_guides_and_logout(admin_web: AdminWeb) -> None:
     assert "Standard HTTP" in agent.text
     assert "patchouli-mcp" in mcp.text
     assert stylesheet.headers["content-type"].startswith("text/css")
-    for response in (dashboard, guide, agent, mcp, stylesheet):
+    for response in (dashboard, setup, guide, agent, mcp, stylesheet):
         _assert_security_headers(response)
 
     rejected = _post(
@@ -791,6 +799,7 @@ def test_bootstrap_recovery_provision_and_revoke_without_secret_retention(
     )
     assert revoked.status_code == 200
     assert "no longer active" in revoked.text
+    assert 'href="/admin/setup"' in revoked.text
     assert recovered_token not in revoked.text
 
     with admin_web.engine.connect() as connection, pytest.raises(AuthenticationError):
