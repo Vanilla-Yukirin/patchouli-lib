@@ -142,6 +142,20 @@ def test_application_registers_exact_agent_access_routes(tmp_path: Path) -> None
             ("/api/v1/auth/whoami", "GET"),
             ("/api/v1/agent/skill/manifest", "GET"),
             ("/api/v1/agent/skill/files/{resource_path}", "GET"),
+            ("/api/v1/libraries/{library_id}/tags", "GET"),
+            ("/api/v1/libraries/{library_id}/tags", "POST"),
+            ("/api/v1/libraries/{library_id}/tags/{tag_id}/pages", "GET"),
+            ("/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/tags", "GET"),
+            (
+                "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/tags/"
+                "{tag_id}",
+                "PUT",
+            ),
+            (
+                "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/tags/"
+                "{tag_id}",
+                "DELETE",
+            ),
             (
                 "/api/v1/sections/{section_id}/pages/{page_id}/revisions/{revision_number}/files",
                 "GET",
@@ -194,7 +208,7 @@ def test_application_does_not_register_retrieval_without_cursor_secret(tmp_path:
                 headers={"Authorization": f"Bearer {token}"},
             )
             assert capabilities.status_code == 200
-            assert capabilities.json()["features"] == ["archive"]
+            assert capabilities.json()["features"] == ["archive", "tags"]
             assert (
                 client.get(
                     "/api/v1/sections",
@@ -234,7 +248,7 @@ def test_integrated_archive_create_replay_and_revise(tmp_path: Path) -> None:
             headers={"Authorization": f"Bearer {token}"},
         )
         assert capabilities.status_code == 200
-        assert capabilities.json()["features"] == ["archive", "retrieval"]
+        assert capabilities.json()["features"] == ["archive", "retrieval", "tags"]
         assert capabilities.json()["idempotency"] == {
             "content_mutations": True,
             "successful_replay_retention": "indefinite-alpha",

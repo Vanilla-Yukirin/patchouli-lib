@@ -16,6 +16,7 @@ from patchouli_lib.api.errors import install_api_exception_handlers
 from patchouli_lib.api.request_ids import RequestIDMiddleware
 from patchouli_lib.api.retrieval_routes import create_retrieval_router
 from patchouli_lib.api.search_routes import create_search_router
+from patchouli_lib.api.tag_routes import create_tag_router
 from patchouli_lib.config import Settings
 from patchouli_lib.database import DatabaseNotReadyError, build_engine, check_database
 from patchouli_lib.retrieval.cursor import CursorCodec
@@ -36,7 +37,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     engine = build_engine(resolved_settings.database_url)
     cursor_secret = resolved_settings.retrieval_cursor_signing_secret
     capabilities = CapabilityConfiguration(
-        features=("archive", "retrieval") if cursor_secret is not None else ("archive",),
+        features=("archive", "retrieval", "tags")
+        if cursor_secret is not None
+        else ("archive", "tags"),
         content_mutation_idempotency=True,
         successful_replay_retention="indefinite-alpha",
     )
@@ -64,6 +67,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
     )
     application.include_router(create_archive_router(engine))
+    application.include_router(create_tag_router(engine))
     application.include_router(create_search_router(engine))
     application.include_router(create_agent_skill_router(engine))
     if cursor_secret is not None:

@@ -182,6 +182,31 @@ Bash 和 PowerShell 的交互式输入方式见 [本机凭据输入](local-token
 同一标准库脚本。后续上传程序应从本机文件读取 Markdown 与元数据、在进程内存里
 组装 multipart、通过请求头提交随机幂等键；不要把敏感正文拼进 Shell 参数。
 
-目前没有多文件 Page 上传、Tag、回收站、跨 Library 授权或真实搜索；对应目标仍见
-公开设计提案。已有 CLI/MCP 若可用，仍能完成其已实现的单份 Markdown 流程，
-但并非下载本 Skill 或调用 HTTP API 的前提。
+## 已实现的 Tag 接口
+
+Tag 是当前 Library 内的标记，不改变 Page 的 Section／Book 归属。所有请求都带设备
+Token；此阶段仍沿用 Section 授权，并非提案中的跨 Library 读／写开关。
+
+```text
+GET    /api/v1/libraries/{library_id}/tags?q={name}&limit=20&offset=0
+POST   /api/v1/libraries/{library_id}/tags
+GET    /api/v1/libraries/{library_id}/tags/{tag_id}/pages?limit=20&offset=0
+GET    /api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/tags
+PUT    /api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/tags/{tag_id}
+DELETE /api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/tags/{tag_id}
+```
+
+创建请求是 `application/json` 的 `{"name":"示例标签"}`，目前只允许本地管理员凭据。
+已存在的规范化名称返回原 Tag。列表可用 `limit`、`offset` 分页，Tag 名称可用 `q`
+过滤；按 Tag 列 Page、列 Page 的 Tag 也支持同样的分页参数。响应中的
+`next_offset` 为 `null` 表示没有下一页。关联和解除关联没有请求体，返回
+`{"changed":true}` 或 `{"changed":false}`；重复操作不会产生第二条关联。
+
+Agent 列 Tag 与列 Tag 下 Page 只会看到同时获 `section:query`、`page:read` 授权的
+Section 中仍有效的 Page；列指定 Page 的 Tag 需要 `page:read`，修改关联还需要
+`archive:write`。不应把一个 Library 的 Tag ID 用于另一个 Library，也不要把 Tag
+列表当作全文检索结果。
+
+目前没有多文件 Page 上传、回收站、跨 Library 授权或真实搜索；对应目标仍见公开
+设计提案。已有 CLI/MCP 若可用，仍能完成其已实现的单份 Markdown 流程，但并非
+下载本 Skill 或调用 HTTP API 的前提。

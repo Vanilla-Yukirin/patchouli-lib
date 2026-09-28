@@ -54,7 +54,9 @@ Tag 是跨层级的多对多标记和检索投影，不替代 Library／Section�
 
 本开发分支已加入 Tag 的持久化底座：显示名采用 Unicode NFC，匹配键采用
 NFC→casefold→NFC，同一 Library 内唯一；关联记录用 Library 与 Page 的准确身份
-约束。它尚未提供 Tag 的管理、授权或搜索接口，也不表示本提案其余内容已获接受。
+约束。当前开发分支还提供受保护的 Tag 创建、列举、Page 关联与按 Tag 列 Page
+接口，但仍沿用旧 Section 授权；Tag 与关键词、时间的组合搜索尚未实现。这些切片
+不表示本提案其余内容已获接受。
 
 ## 3. Page 是平面多文件内容单元
 

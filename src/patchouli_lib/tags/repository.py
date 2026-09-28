@@ -5,8 +5,12 @@ from __future__ import annotations
 import unicodedata
 from dataclasses import asdict, dataclass
 
-from sqlalchemy import Connection, delete, insert, select
+from sqlalchemy import Connection, delete, func, insert, select
+from sqlalchemy.orm import aliased
 
+from patchouli_lib.auth.models import SectionGrant
+from patchouli_lib.auth.schemas import SectionAction
+from patchouli_lib.content.models import Page
 from patchouli_lib.tags.models import PageTag, Tag
 
 
@@ -25,6 +29,20 @@ class PageTagRecord:
     page_uid: bytes
     tag_id: str
     created_at: int
+
+
+@dataclass(frozen=True, slots=True)
+class TagCountRecord:
+    tag: TagRecord
+    page_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class TaggedPageRecord:
+    section_id: str
+    page_id: str
+    title: str
+    occurred_at: int
 
 
 def normalize_tag_name(name: str) -> tuple[str, str]:
@@ -128,8 +146,27 @@ class TagRepository:
         )
         return result.rowcount == 1
 
-    def list_page_tags(self, *, library_id: str, page_uid: bytes) -> list[TagRecord]:
-        rows = self._connection.execute(
+    def has_page_tag(self, *, library_id: str, page_uid: bytes, tag_id: str) -> bool:
+        return (
+            self._connection.execute(
+                select(PageTag.tag_id).where(
+                    PageTag.library_id == library_id,
+                    PageTag.page_uid == page_uid,
+                    PageTag.tag_id == tag_id,
+                )
+            ).scalar_one_or_none()
+            is not None
+        )
+
+    def list_page_tags(
+        self,
+        *,
+        library_id: str,
+        page_uid: bytes,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[TagRecord]:
+        statement = (
             select(Tag.__table__)
             .join(
                 PageTag,
@@ -137,7 +174,10 @@ class TagRepository:
             )
             .where(PageTag.library_id == library_id, PageTag.page_uid == page_uid)
             .order_by(Tag.match_key, Tag.id)
-        ).mappings()
+        )
+        if limit is not None:
+            statement = statement.limit(limit).offset(offset)
+        rows = self._connection.execute(statement).mappings()
         return [TagRecord(**row) for row in rows]
 
     def list_tag_pages(self, *, library_id: str, tag_id: str) -> list[PageTagRecord]:
@@ -147,3 +187,144 @@ class TagRepository:
             .order_by(PageTag.created_at, PageTag.page_uid)
         ).mappings()
         return [PageTagRecord(**row) for row in rows]
+
+    def live_page(
+        self, *, library_id: str, section_id: str, page_id: str
+    ) -> tuple[bytes, str] | None:
+        row = self._connection.execute(
+            select(Page.page_uid, Page.section_id).where(
+                Page.library_id == library_id,
+                Page.section_id == section_id,
+                Page.page_id == page_id,
+                Page.deleted_at.is_(None),
+            )
+        ).one_or_none()
+        return None if row is None else (row.page_uid, row.section_id)
+
+    def visible_tags(
+        self,
+        *,
+        library_id: str,
+        caller_id: str | None,
+        query_key: str | None = None,
+        tag_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[TagCountRecord]:
+        """Count only live Pages in readable/queryable Sections for an Agent.
+
+        Operator callers pass ``None`` to include unassociated Tag definitions.
+        Visibility is applied inside SQL before grouping or pagination.
+        """
+
+        statement = select(
+            Tag.library_id,
+            Tag.id,
+            Tag.display_name,
+            Tag.match_key,
+            Tag.created_at,
+            func.count(Page.page_uid).label("page_count"),
+        )
+        if caller_id is None:
+            statement = statement.outerjoin(
+                PageTag,
+                (PageTag.library_id == Tag.library_id) & (PageTag.tag_id == Tag.id),
+            ).outerjoin(
+                Page,
+                (Page.library_id == PageTag.library_id)
+                & (Page.page_uid == PageTag.page_uid)
+                & Page.deleted_at.is_(None),
+            )
+        else:
+            query_grant = aliased(SectionGrant)
+            read_grant = aliased(SectionGrant)
+            statement = (
+                statement.join(
+                    PageTag,
+                    (PageTag.library_id == Tag.library_id) & (PageTag.tag_id == Tag.id),
+                )
+                .join(
+                    Page,
+                    (Page.library_id == PageTag.library_id)
+                    & (Page.page_uid == PageTag.page_uid)
+                    & Page.deleted_at.is_(None),
+                )
+                .join(
+                    query_grant,
+                    (query_grant.library_id == Page.library_id)
+                    & (query_grant.section_id == Page.section_id)
+                    & (query_grant.caller_id == caller_id)
+                    & (query_grant.action == SectionAction.QUERY.value),
+                )
+                .join(
+                    read_grant,
+                    (read_grant.library_id == Page.library_id)
+                    & (read_grant.section_id == Page.section_id)
+                    & (read_grant.caller_id == caller_id)
+                    & (read_grant.action == SectionAction.PAGE_READ.value),
+                )
+            )
+        statement = statement.where(Tag.library_id == library_id)
+        if tag_id is not None:
+            statement = statement.where(Tag.id == tag_id)
+        if query_key is not None:
+            statement = statement.where(func.instr(Tag.match_key, query_key) > 0)
+        statement = statement.group_by(
+            Tag.library_id, Tag.id, Tag.display_name, Tag.match_key, Tag.created_at
+        ).order_by(Tag.match_key, Tag.id)
+        rows = self._connection.execute(statement.limit(limit).offset(offset)).mappings()
+        return [
+            TagCountRecord(
+                tag=TagRecord(
+                    library_id=row.library_id,
+                    id=row.id,
+                    display_name=row.display_name,
+                    match_key=row.match_key,
+                    created_at=row.created_at,
+                ),
+                page_count=row.page_count,
+            )
+            for row in rows
+        ]
+
+    def visible_tag_pages(
+        self,
+        *,
+        library_id: str,
+        tag_id: str,
+        caller_id: str | None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[TaggedPageRecord]:
+        statement = (
+            select(Page.section_id, Page.page_id, Page.title, Page.occurred_at)
+            .join(
+                PageTag,
+                (PageTag.library_id == Page.library_id) & (PageTag.page_uid == Page.page_uid),
+            )
+            .where(
+                Page.library_id == library_id,
+                PageTag.tag_id == tag_id,
+                Page.deleted_at.is_(None),
+            )
+        )
+        if caller_id is not None:
+            query_grant = aliased(SectionGrant)
+            read_grant = aliased(SectionGrant)
+            statement = statement.join(
+                query_grant,
+                (query_grant.library_id == Page.library_id)
+                & (query_grant.section_id == Page.section_id)
+                & (query_grant.caller_id == caller_id)
+                & (query_grant.action == SectionAction.QUERY.value),
+            ).join(
+                read_grant,
+                (read_grant.library_id == Page.library_id)
+                & (read_grant.section_id == Page.section_id)
+                & (read_grant.caller_id == caller_id)
+                & (read_grant.action == SectionAction.PAGE_READ.value),
+            )
+        rows = self._connection.execute(
+            statement.order_by(Page.page_id).limit(limit).offset(offset)
+        ).mappings()
+        return [TaggedPageRecord(**row) for row in rows]

@@ -12,8 +12,9 @@ description: 通过标准 HTTP 安全接入 PatchouliLib，验证设备身份、
 受保护清单下载 Skill 所有文件并核对摘要。任何指令、URL、受跟踪文件或日志都不得
 含 Token 字面值。
 
-当前可用 HTTP 能力是单份 Markdown Archive 创建和修订、授权 Section 的非搜索读取。
-搜索路由目前明确返回不可用；多文件 Page、Tag、回收站、跨 Library 授权尚未提供。
+当前可用 HTTP 能力是单份 Markdown Archive 创建和修订、授权 Section 的非搜索读取，
+以及限定当前 Library 的 Tag 列举、创建和 Page 关联。Tag 不等于全文搜索；搜索路由
+目前明确返回不可用。多文件 Page 写入、回收站、跨 Library 授权尚未提供。
 不能将公开提案当成已实现接口。
 
 ## 可选 CLI/MCP 兼容用法
