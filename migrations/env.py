@@ -9,6 +9,7 @@ from patchouli_lib.database import build_engine
 from patchouli_lib.idempotency import models as idempotency_models
 from patchouli_lib.library import models as library_models
 from patchouli_lib.models import Base
+from patchouli_lib.tags import models as tag_models
 
 config = context.config
 
@@ -25,6 +26,8 @@ if content_models.Page.metadata is not Base.metadata:
     raise RuntimeError("Content models must use the shared SQLAlchemy metadata.")
 if idempotency_models.IdempotencyRecord.metadata is not Base.metadata:
     raise RuntimeError("Idempotency models must use the shared SQLAlchemy metadata.")
+if tag_models.Tag.metadata is not Base.metadata:
+    raise RuntimeError("Tag models must use the shared SQLAlchemy metadata.")
 target_metadata = Base.metadata
 
 

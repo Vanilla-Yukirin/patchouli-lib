@@ -52,6 +52,10 @@ Tag 是跨层级的多对多标记和检索投影，不替代 Library／Section�
 授权边界。现有设计中的 Shelf 是另一种已保存的 Book 视图，不能把 Tag 管理隐式
 实现为 Shelf。Tag 和 Shelf 的关联及后者的产品必要性可在后续单独决定。
 
+本开发分支已加入 Tag 的持久化底座：显示名采用 Unicode NFC，匹配键采用
+NFC→casefold→NFC，同一 Library 内唯一；关联记录用 Library 与 Page 的准确身份
+约束。它尚未提供 Tag 的管理、授权或搜索接口，也不表示本提案其余内容已获接受。
+
 ## 3. Page 是平面多文件内容单元
 
 ### 3.1 文件模型

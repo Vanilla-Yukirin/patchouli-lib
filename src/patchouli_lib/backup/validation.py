@@ -13,6 +13,7 @@ from urllib.parse import quote
 
 from patchouli_lib.backup.errors import BackupDatabaseError
 from patchouli_lib.backup.manifest import (
+    INTERMEDIATE_SCHEMA_REVISION,
     LEGACY_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
@@ -35,6 +36,7 @@ from patchouli_lib.identifiers import (
     page_id_timestamp_prefix,
     validate_page_id,
 )
+from patchouli_lib.tags.repository import normalize_tag_name
 
 # Hashes cover every non-internal SQLite schema object at each accepted migration
 # revision. SQLite-managed objects whose names start with ``sqlite_`` are the only
@@ -200,10 +202,18 @@ _EXPECTED_SQL_HASHES_0009: Final = _EXPECTED_SQL_HASHES_0008 | {
         "cc60f9851bd52e0dc775b034b64f0090e6e7eca2710c536b25ffe4583eaa2a16"
     ),
 }
+_EXPECTED_SQL_HASHES_0010: Final = _EXPECTED_SQL_HASHES_0009 | {
+    ("index", "ix_page_tags_library_tag"): (
+        "71054d2eb530e2577436d141d2c5dd167b26fb3c4644a3c33dd41656d7f8ac43"
+    ),
+    ("table", "page_tags"): ("f68997a2d94d863f237ed3cd958ca4a47d3f4ea1cdfc381fadfb6e789947c44b"),
+    ("table", "tags"): ("994997e390e79449ed2f23caf2281fce465c1855213cf6cb289953a878ccdaf8"),
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
     PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
-    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0009,
+    INTERMEDIATE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0009,
+    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0010,
 }
 
 
@@ -508,7 +518,7 @@ def _require_revision_files(connection: sqlite3.Connection, schema_revision: str
             files.append((name, content))
         if not found_markdown:
             raise BackupDatabaseError
-        if schema_revision in {PREVIOUS_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION} and (
+        if schema_revision != LEGACY_SCHEMA_REVISION and (
             len(files) != 1 or files[0][0] != "content.md"
         ):
             raise BackupDatabaseError
@@ -732,6 +742,30 @@ def _require_idempotency_graph(connection: sqlite3.Connection) -> None:
             raise BackupDatabaseError
 
 
+def _require_tag_graph(connection: sqlite3.Connection) -> None:
+    """Reject Tag rows whose Unicode matching key disagrees with their display name."""
+
+    for display_name, match_key, created_at in connection.execute(
+        "SELECT display_name, match_key, created_at FROM tags"
+    ):
+        if (
+            type(display_name) is not str
+            or type(match_key) is not str
+            or type(created_at) is not int
+            or created_at < 0
+        ):
+            raise BackupDatabaseError
+        try:
+            canonical_display, canonical_key = normalize_tag_name(display_name)
+        except ValueError:
+            raise BackupDatabaseError from None
+        if display_name != canonical_display or match_key != canonical_key:
+            raise BackupDatabaseError
+    for (created_at,) in connection.execute("SELECT created_at FROM page_tags"):
+        if type(created_at) is not int or created_at < 0:
+            raise BackupDatabaseError
+
+
 def _validate_connection(
     connection: sqlite3.Connection, schema_revision: str
 ) -> DatabaseValidationReport:
@@ -748,6 +782,12 @@ def _validate_connection(
     ):
         raise BackupDatabaseError
     _require_page_graph(connection, schema_revision)
+    if schema_revision not in {
+        LEGACY_SCHEMA_REVISION,
+        PREVIOUS_SCHEMA_REVISION,
+        INTERMEDIATE_SCHEMA_REVISION,
+    }:
+        _require_tag_graph(connection)
     _require_auth_graph(connection)
     _require_idempotency_graph(connection)
     return DatabaseValidationReport(

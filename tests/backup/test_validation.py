@@ -11,7 +11,11 @@ from alembic.config import Config
 from sqlalchemy import Engine
 
 from patchouli_lib.backup import BACKUP_FILENAME, BackupDatabaseError, validate_database
-from patchouli_lib.backup.manifest import PREVIOUS_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION
+from patchouli_lib.backup.manifest import (
+    INTERMEDIATE_SCHEMA_REVISION,
+    PREVIOUS_SCHEMA_REVISION,
+    SUPPORTED_SCHEMA_REVISION,
+)
 
 from .test_service import _create, _legacy_bundle_with_binary_file
 
@@ -405,7 +409,10 @@ def test_0008_validation_rejects_missing_seal_or_guard(
         validate_database(database)
 
 
-@pytest.mark.parametrize("schema_revision", [PREVIOUS_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION])
+@pytest.mark.parametrize(
+    "schema_revision",
+    [PREVIOUS_SCHEMA_REVISION, INTERMEDIATE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION],
+)
 def test_sealed_validation_rejects_extra_file_even_if_write_triggers_were_bypassed(
     complete_engine: Engine,
     tmp_path: Path,
@@ -415,10 +422,10 @@ def test_sealed_validation_rejects_extra_file_even_if_write_triggers_were_bypass
     database = _database_copy(complete_engine, tmp_path, "extra-sealed-file")
     monkeypatch.setenv("PATCHOULI_DATABASE_URL", f"sqlite:///{database.as_posix()}")
     monkeypatch.setenv("PATCHOULI_ENVIRONMENT", "test")
-    if schema_revision == PREVIOUS_SCHEMA_REVISION:
+    if schema_revision != SUPPORTED_SCHEMA_REVISION:
         command.downgrade(
             Config(str(Path(__file__).resolve().parents[2] / "alembic.ini")),
-            PREVIOUS_SCHEMA_REVISION,
+            schema_revision,
         )
     validate_database(database, schema_revision=schema_revision)
     content = b"synthetic binary"
@@ -447,3 +454,61 @@ def test_sealed_validation_rejects_extra_file_even_if_write_triggers_were_bypass
         connection.commit()
     with pytest.raises(BackupDatabaseError):
         validate_database(database, schema_revision=schema_revision)
+
+
+@pytest.mark.parametrize(
+    ("display_name", "match_key"),
+    [("Cafe\u0301", "café"), ("Café", "incorrect")],
+)
+def test_0010_validation_rejects_noncanonical_tag_names(
+    complete_engine: Engine,
+    tmp_path: Path,
+    display_name: str,
+    match_key: str,
+) -> None:
+    database = _database_copy(complete_engine, tmp_path, "bad-tag")
+    validate_database(database)
+    with closing(sqlite3.connect(database)) as connection:
+        library = connection.execute("SELECT id FROM libraries LIMIT 1").fetchone()
+        assert library is not None
+        connection.execute(
+            "INSERT INTO tags (library_id, id, display_name, match_key, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (library[0], "a" * 32, display_name, match_key, 1_000_000),
+        )
+        connection.commit()
+    with pytest.raises(BackupDatabaseError):
+        validate_database(database)
+
+
+@pytest.mark.parametrize("table", ["tags", "page_tags"])
+def test_0010_validation_rejects_noninteger_tag_timestamps(
+    complete_engine: Engine, tmp_path: Path, table: str
+) -> None:
+    database = _database_copy(complete_engine, tmp_path, f"bad-{table}-time")
+    with closing(sqlite3.connect(database)) as connection:
+        page = connection.execute("SELECT library_id, page_uid FROM pages LIMIT 1").fetchone()
+        assert page is not None
+        library_id, page_uid = page
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            "INSERT INTO tags (library_id, id, display_name, match_key, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                library_id,
+                "a" * 32,
+                "Synthetic",
+                "synthetic",
+                "not-a-time" if table == "tags" else 1,
+            ),
+        )
+        if table == "page_tags":
+            connection.execute(
+                "INSERT INTO page_tags (library_id, page_uid, tag_id, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (library_id, page_uid, "a" * 32, "not-a-time"),
+            )
+        connection.execute("PRAGMA ignore_check_constraints = OFF")
+        connection.commit()
+    with pytest.raises(BackupDatabaseError):
+        validate_database(database)
