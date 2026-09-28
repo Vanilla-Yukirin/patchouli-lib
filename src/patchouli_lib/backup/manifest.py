@@ -18,7 +18,7 @@ from patchouli_lib.backup.errors import BackupManifestError
 MANIFEST_SCHEMA_VERSION: Final = 1
 BACKUP_FILENAME: Final = "database.sqlite"
 MANIFEST_FILENAME: Final = "manifest.json"
-SUPPORTED_SCHEMA_REVISION: Final = "20260813_0006"
+SUPPORTED_SCHEMA_REVISION: Final = "20260929_0007"
 MAX_MANIFEST_BYTES: Final = 16 * 1024
 MAX_IDENTITY_BYTES: Final = 256
 MAX_APP_VERSION_BYTES: Final = 100

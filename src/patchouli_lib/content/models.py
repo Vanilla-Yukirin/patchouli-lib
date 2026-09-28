@@ -15,6 +15,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
+from patchouli_lib.content.file_manifest import MAX_FILE_BYTES, MAX_FILENAME_BYTES
 from patchouli_lib.identifiers import (
     MAX_BASE_SLUG_BYTES,
     MAX_COLLISION_ORDINAL,
@@ -232,6 +233,54 @@ class Revision(Base):
         nullable=False,
     )
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class RevisionFile(Base):
+    """One immutable row for a Revision file; the file set is not yet sealed."""
+
+    __tablename__ = "revision_files"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id", "page_uid", "revision_id", "revision_number"],
+            [
+                "revisions.library_id",
+                "revisions.page_uid",
+                "revisions.revision_id",
+                "revisions.revision_number",
+            ],
+            name="fk_revision_files_exact_revision",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "typeof(filename) = 'text' AND length(filename) >= 1 "
+            f"AND length(CAST(filename AS BLOB)) <= {MAX_FILENAME_BYTES} "
+            "AND filename NOT IN ('.', '..') "
+            "AND instr(filename, '/') = 0 AND instr(filename, char(92)) = 0 "
+            "AND instr(filename, char(0)) = 0 "
+            "AND filename = trim(filename, ' ') "
+            "AND substr(filename, -1) != '.'",
+            name="ck_revision_files_flat_filename",
+        ),
+        CheckConstraint(
+            "typeof(content_bytes) = 'blob' "
+            f"AND length(content_bytes) BETWEEN 0 AND {MAX_FILE_BYTES}",
+            name="ck_revision_files_content_bytes",
+        ),
+        CheckConstraint("size_bytes = length(content_bytes)", name="ck_revision_files_size_bytes"),
+        CheckConstraint(
+            "typeof(content_sha256) = 'blob' AND length(content_sha256) = 32",
+            name="ck_revision_files_content_sha256",
+        ),
+    )
+
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
+    revision_id: Mapped[str] = mapped_column(String(REVISION_ID_LENGTH), primary_key=True)
+    revision_number: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    filename: Mapped[str] = mapped_column(Text, primary_key=True)
+    content_bytes: Mapped[bytes] = mapped_column(LargeBinary(MAX_FILE_BYTES), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    content_sha256: Mapped[bytes] = mapped_column(LargeBinary(CONTENT_SHA256_BYTES), nullable=False)
 
 
 class PageRevisionAppendGuard(Base):
@@ -465,4 +514,5 @@ __all__ = [
     "PageIdentifier",
     "PageSource",
     "Revision",
+    "RevisionFile",
 ]

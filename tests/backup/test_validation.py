@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -9,7 +10,7 @@ from sqlalchemy import Engine
 
 from patchouli_lib.backup import BackupDatabaseError, validate_database
 
-from .test_service import _create
+from .test_service import _add_second_revision_with_binary_file, _create
 
 
 def _replace_trigger(
@@ -292,3 +293,78 @@ def test_validation_rejects_corrupt_and_truncated_sqlite_files(tmp_path: Path) -
         path.write_bytes(content)
         with pytest.raises(BackupDatabaseError):
             validate_database(path)
+
+
+@pytest.mark.parametrize(
+    ("name", "trigger", "statement"),
+    [
+        (
+            "missing-markdown",
+            "trg_revision_files_no_delete",
+            "DELETE FROM revision_files WHERE revision_number = 1 AND filename = 'content.md'",
+        ),
+        (
+            "bad-binary-digest",
+            "trg_revision_files_no_update",
+            "UPDATE revision_files SET content_sha256 = zeroblob(32) WHERE filename = 'image.bin'",
+        ),
+        (
+            "bad-binary-size",
+            "trg_revision_files_no_update",
+            "UPDATE revision_files SET size_bytes = size_bytes + 1 WHERE filename = 'image.bin'",
+        ),
+    ],
+)
+def test_validation_rejects_missing_content_md_or_corrupt_recorded_files(
+    complete_engine: Engine,
+    tmp_path: Path,
+    name: str,
+    trigger: str,
+    statement: str,
+) -> None:
+    _add_second_revision_with_binary_file(complete_engine)
+    database = _database_copy(complete_engine, tmp_path, name)
+    with closing(sqlite3.connect(database)) as connection:
+        _replace_trigger(connection, trigger, statement, ignore_checks=True)
+    with pytest.raises(BackupDatabaseError):
+        validate_database(database)
+
+
+def test_validation_rejects_legacy_markdown_and_file_snapshot_divergence(
+    complete_engine: Engine,
+    tmp_path: Path,
+) -> None:
+    database = _database_copy(complete_engine, tmp_path, "diverged-markdown")
+    forged = b"# Different but internally valid Markdown\n"
+    with closing(sqlite3.connect(database)) as connection:
+        _replace_trigger(
+            connection,
+            "trg_revision_files_no_update",
+            "UPDATE revision_files SET "
+            f"content_bytes = x'{forged.hex()}', size_bytes = {len(forged)}, "
+            f"content_sha256 = x'{hashlib.sha256(forged).hexdigest()}' "
+            "WHERE filename = 'content.md'",
+        )
+    with pytest.raises(BackupDatabaseError):
+        validate_database(database)
+
+
+@pytest.mark.parametrize("name", ["CONTENT.MD", "bad\u2028name"])
+def test_validation_rejects_ambiguous_or_unsafe_file_names(
+    complete_engine: Engine,
+    tmp_path: Path,
+    name: str,
+) -> None:
+    database = _database_copy(complete_engine, tmp_path, "bad-file-name")
+    content = b"synthetic"
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(
+            "INSERT INTO revision_files (library_id, page_uid, revision_id, "
+            "revision_number, filename, content_bytes, size_bytes, content_sha256) "
+            "SELECT library_id, page_uid, revision_id, revision_number, ?, ?, ?, ? "
+            "FROM revisions WHERE revision_number = 1",
+            (name, content, len(content), hashlib.sha256(content).digest()),
+        )
+        connection.commit()
+    with pytest.raises(BackupDatabaseError):
+        validate_database(database)

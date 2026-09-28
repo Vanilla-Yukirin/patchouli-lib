@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 import subprocess
@@ -30,6 +31,7 @@ from patchouli_lib.backup import (
 )
 from patchouli_lib.backup import service as backup_service
 from patchouli_lib.backup.manifest import MAX_MANIFEST_BYTES
+from patchouli_lib.database import immediate_transaction
 
 from .conftest import APP_VERSION
 
@@ -45,6 +47,63 @@ def _create(engine: Engine, path: Path) -> BackupResult:
         artifact_identity=identity(),
         app_version=APP_VERSION,
     )
+
+
+def _add_second_revision_with_binary_file(engine: Engine) -> tuple[bytes, bytes]:
+    """Append a synthetic Revision while keeping its historic Source link."""
+
+    markdown = b"# Revised synthetic archive\n"
+    binary = b"\x00\xff\x81synthetic image bytes\x00"
+    revision_id = "rev_" + "55" * 16
+    source_id = "6" * 32
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            text(
+                "INSERT INTO revisions (library_id, revision_id, page_uid, "
+                "revision_number, content_md, content_size_bytes, content_sha256, "
+                "created_at) SELECT library_id, :revision_id, page_uid, 2, "
+                ":content, :size, :digest, 3000000 FROM revisions "
+                "WHERE revision_number = 1"
+            ),
+            {
+                "revision_id": revision_id,
+                "content": markdown,
+                "size": len(markdown),
+                "digest": hashlib.sha256(markdown).digest(),
+            },
+        )
+        connection.execute(
+            text(
+                "UPDATE pages SET current_revision_id = :revision_id, "
+                "current_revision_number = 2, updated_at = 3000000"
+            ),
+            {"revision_id": revision_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO page_sources (library_id, source_id, page_uid, "
+                "revision_id, revision_number, kind, locator, captured_at, created_at) "
+                "SELECT library_id, :source_id, page_uid, :revision_id, 2, "
+                "'synthetic', 'urn:synthetic:revision-2', captured_at, 3000000 "
+                "FROM page_sources WHERE revision_number = 1 LIMIT 1"
+            ),
+            {"source_id": source_id, "revision_id": revision_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO revision_files (library_id, page_uid, revision_id, "
+                "revision_number, filename, content_bytes, size_bytes, content_sha256) "
+                "SELECT library_id, page_uid, revision_id, revision_number, "
+                "'image.bin', :content, :size, :digest FROM revisions "
+                "WHERE revision_number = 2"
+            ),
+            {
+                "content": binary,
+                "size": len(binary),
+                "digest": hashlib.sha256(binary).digest(),
+            },
+        )
+    return markdown, binary
 
 
 @pytest.mark.parametrize("journal_mode", ["delete", "wal"])
@@ -88,7 +147,7 @@ def test_live_backup_and_restore_preserve_complete_domain_state(
             1,
         )
         assert sqlite_connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "20260813_0006",
+            "20260929_0007",
         )
         assert sqlite_connection.execute(
             "SELECT revision_id, revision_number, locator FROM page_sources"
@@ -150,6 +209,53 @@ def test_online_backup_observes_one_consistent_concurrent_snapshot(
         ).fetchone()
     assert last_used_at == updated_at
     assert last_used_at in {20, 21}
+
+
+def test_backup_restore_preserves_every_revision_file_byte(
+    complete_engine: Engine,
+    tmp_path: Path,
+) -> None:
+    revised_markdown, binary = _add_second_revision_with_binary_file(complete_engine)
+    bundle = tmp_path / "multifile-bundle"
+    _create(complete_engine, bundle)
+    restored = tmp_path / "multifile-restored.sqlite"
+    restore_backup(bundle, restored, app_version=APP_VERSION)
+    validate_database(restored)
+
+    with closing(sqlite3.connect(restored)) as connection:
+        revisions = connection.execute(
+            "SELECT revision_number, content_md FROM revisions ORDER BY revision_number"
+        ).fetchall()
+        files = connection.execute(
+            "SELECT revision_number, filename, content_bytes, size_bytes, content_sha256 "
+            "FROM revision_files ORDER BY revision_number, filename"
+        ).fetchall()
+        sources = connection.execute(
+            "SELECT revision_number FROM page_sources ORDER BY revision_number"
+        ).fetchall()
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "20260929_0007",
+        )
+
+    assert revisions == [(1, b"# Synthetic archive\n\nExact bytes.\n"), (2, revised_markdown)]
+    assert sources == [(1,), (2,)]
+    assert files == [
+        (
+            1,
+            "content.md",
+            revisions[0][1],
+            len(revisions[0][1]),
+            hashlib.sha256(revisions[0][1]).digest(),
+        ),
+        (
+            2,
+            "content.md",
+            revised_markdown,
+            len(revised_markdown),
+            hashlib.sha256(revised_markdown).digest(),
+        ),
+        (2, "image.bin", binary, len(binary), hashlib.sha256(binary).digest()),
+    ]
 
 
 def test_configuration_rejects_memory_relative_and_existing_destinations(

@@ -14,6 +14,7 @@ from .helpers import insert_page_graph, page_graph_values, seed_library_structur
 CONTENT_TABLES = {
     "pages",
     "revisions",
+    "revision_files",
     "page_identifier_registry",
     "page_id_collision_counters",
     "page_revision_append_guards",
@@ -161,6 +162,7 @@ def test_page_content_migration_upgrade_check_downgrade_upgrade(
                 "trg_revisions_create_append_guard",
                 "trg_revisions_immutable_delete",
                 "trg_revisions_immutable_update",
+                "trg_revisions_mirror_content_file",
                 "trg_revisions_sequential_insert",
             }
             content_triggers = set(
@@ -186,7 +188,7 @@ def test_page_content_migration_upgrade_check_downgrade_upgrade(
                 "trg_pages_stable_identity",
             }
             assert first.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == (
-                "20260813_0006"
+                "20260929_0007"
             )
     finally:
         engine.dispose()

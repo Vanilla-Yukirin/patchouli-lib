@@ -13,6 +13,12 @@ from urllib.parse import quote
 
 from patchouli_lib.backup.errors import BackupDatabaseError
 from patchouli_lib.backup.manifest import SUPPORTED_SCHEMA_REVISION
+from patchouli_lib.content.file_manifest import (
+    MAX_FILE_BYTES,
+    MAX_FILES_PER_PAGE,
+    MAX_PAGE_BYTES,
+    build_file_manifest,
+)
 from patchouli_lib.content.schemas import ArchiveResponseBody
 from patchouli_lib.content.service import (
     CREATE_ROUTE_TEMPLATE,
@@ -69,6 +75,9 @@ _EXPECTED_SQL_HASHES: Final = {
     ("table", "page_sources"): ("e2736429307cd28768483fb718826e686fff197abd4abc1b23aaf6f793f9e334"),
     ("table", "pages"): ("6ac4615d1122d1f5b5e7976cf865ed574086db4a0390d27643dfaaa80429d92f"),
     ("table", "revisions"): ("fc3bd5d3f0ff42d07a92ceb26477a48ce2991a7df8abedb3e821f9e6dcf529ef"),
+    ("table", "revision_files"): (
+        "ce67e84b09542184fc3c9a7ecfd797dec03c39cd770508e068048cc024db2109"
+    ),
     ("table", "schema_metadata"): (
         "257911ed87982371b26ee44aecd9e8ee23741d25d6ab87fb1fa9b28c8e3c5b32"
     ),
@@ -123,6 +132,18 @@ _EXPECTED_SQL_HASHES: Final = {
     ),
     ("trigger", "trg_revisions_immutable_update"): (
         "b02bd56b1df874099c18d7f7f68b4a986e7ffbf7f9ced85a885418689a58b25f"
+    ),
+    ("trigger", "trg_revision_files_no_update"): (
+        "49abb86c1ba94c56ebafba28df6cee774267be4bf058cadc9e6fe1436aa4c578"
+    ),
+    ("trigger", "trg_revision_files_no_delete"): (
+        "2af577ba8045fbd92f173fb8baea026ba31178c52c501f3bc507df3eb07748b7"
+    ),
+    ("trigger", "trg_revision_files_no_replace"): (
+        "1fa33224c4bcc38b03570c1215191a32c84aece8d284c6d1e68d85fa8e0623cd"
+    ),
+    ("trigger", "trg_revisions_mirror_content_file"): (
+        "0339255ca366f97c84487473de1c0145f98516ce27308280383a4648e5869a76"
     ),
     ("trigger", "trg_revisions_sequential_insert"): (
         "bfb59191beb9acd52e5fedd6c834cd7bb51fbd49c742048c51404359730e4a1e"
@@ -277,6 +298,8 @@ def _require_page_graph(connection: sqlite3.Connection) -> None:
     if missing_sources:
         raise BackupDatabaseError
 
+    _require_revision_files(connection)
+
     identifiers_by_page: dict[tuple[str, bytes], list[tuple[str, str]]] = {}
     for library_id, digest, text, kind, page_uid in connection.execute(
         "SELECT library_id, identifier_digest, identifier_text, identifier_kind, page_uid "
@@ -361,6 +384,74 @@ def _require_page_graph(connection: sqlite3.Connection) -> None:
             raise BackupDatabaseError
     if page_counter_keys != observed_counter_keys:
         raise BackupDatabaseError
+
+
+def _require_revision_files(connection: sqlite3.Connection) -> None:
+    """Check recorded file rows against their owning legacy Revision."""
+
+    revisions = connection.execute(
+        "SELECT library_id, page_uid, revision_id, revision_number, "
+        "content_md, content_size_bytes, content_sha256 FROM revisions"
+    )
+    for (
+        library_id,
+        page_uid,
+        revision_id,
+        revision_number,
+        legacy,
+        legacy_size,
+        legacy_sha,
+    ) in revisions:
+        if (
+            not isinstance(library_id, str)
+            or type(page_uid) is not bytes
+            or not isinstance(revision_id, str)
+            or type(revision_number) is not int
+            or type(legacy) is not bytes
+            or type(legacy_size) is not int
+            or type(legacy_sha) is not bytes
+        ):
+            raise BackupDatabaseError
+
+        files: list[tuple[str, bytes]] = []
+        total_size = 0
+        found_markdown = False
+        rows = connection.execute(
+            "SELECT filename, content_bytes, size_bytes, content_sha256 "
+            "FROM revision_files WHERE library_id = ? AND page_uid = ? "
+            "AND revision_id = ? AND revision_number = ? ORDER BY filename",
+            (library_id, page_uid, revision_id, revision_number),
+        )
+        for name, content, size, digest in rows:
+            if (
+                not isinstance(name, str)
+                or type(content) is not bytes
+                or type(size) is not int
+                or type(digest) is not bytes
+                or len(files) >= MAX_FILES_PER_PAGE
+                or len(content) > MAX_FILE_BYTES
+                or total_size + len(content) > MAX_PAGE_BYTES
+                or size != len(content)
+                or digest != hashlib.sha256(content).digest()
+            ):
+                raise BackupDatabaseError
+            if name == "content.md":
+                if (
+                    found_markdown
+                    or content != legacy
+                    or size != legacy_size
+                    or digest != legacy_sha
+                ):
+                    raise BackupDatabaseError
+                found_markdown = True
+            total_size += len(content)
+            files.append((name, content))
+        if not found_markdown:
+            raise BackupDatabaseError
+        try:
+            build_file_manifest(files)
+        except (TypeError, ValueError, OverflowError, UnicodeError):
+            raise BackupDatabaseError from None
 
 
 def _require_auth_graph(connection: sqlite3.Connection) -> None:
