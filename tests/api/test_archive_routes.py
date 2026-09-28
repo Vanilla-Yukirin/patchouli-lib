@@ -16,7 +16,7 @@ import httpx2
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import Connection, Engine, func, select
+from sqlalchemy import Connection, Engine, func, select, update
 
 from patchouli_lib.api.archive_routes import (
     MAX_ARCHIVE_METADATA_BYTES,
@@ -1247,6 +1247,56 @@ def test_revision_requires_strong_if_match_and_replays_old_etag_after_advance(
     assert replayed.headers["ETag"] == revised.headers["ETag"]
     assert replayed.headers["ETag"] != advanced.headers["ETag"]
     _problem(if_match_mismatch, 409, "idempotency_mismatch")
+
+
+def test_deleted_page_revision_and_prior_replay_return_404_without_mutation(
+    archive_api: ArchiveApiFixture,
+) -> None:
+    media_type, body = _multipart(
+        {"source": {"kind": "synthetic revision before deletion"}},
+        b"# Revision before deletion\n",
+    )
+    with TestClient(_build_app(archive_api), raise_server_exceptions=False) as client:
+        created = _create(client, archive_api, key="deleted-page-create-key")
+        assert created.status_code == 201
+        page_id = created.json()["page"]["page_id"]
+        path = f"/api/v1/sections/{archive_api.section_id}/pages/{page_id}/revisions"
+
+        def headers(key: str, etag: str) -> list[tuple[str, str]]:
+            return [
+                _authorization(archive_api.writer_token),
+                ("Idempotency-Key", key),
+                ("If-Match", etag),
+                ("Content-Type", media_type),
+            ]
+
+        replay_headers = headers("deleted-page-revision-key", created.headers["ETag"])
+        revised = client.post(path, headers=replay_headers, content=body)
+        assert revised.status_code == 201
+        with immediate_transaction(archive_api.engine) as connection:
+            connection.execute(
+                update(Page)
+                .where(Page.library_id == archive_api.library_id, Page.page_id == page_id)
+                .values(deleted_at=OPERATION_TIME + 1, updated_at=OPERATION_TIME + 1)
+            )
+        baseline = _counts(archive_api.engine)
+        replay = client.post(path, headers=replay_headers, content=body)
+        fresh = client.post(
+            path,
+            headers=headers("deleted-page-fresh-key", revised.headers["ETag"]),
+            content=body,
+        )
+
+    for response in (replay, fresh):
+        _problem(response, 404, "resource_not_found")
+    assert _counts(archive_api.engine) == baseline
+    with archive_api.engine.connect() as connection:
+        current = connection.execute(
+            select(Page.current_revision_id, Page.current_revision_number, Page.deleted_at).where(
+                Page.library_id == archive_api.library_id, Page.page_id == page_id
+            )
+        ).one()
+    assert current == (revised.json()["revision"]["revision_id"], 2, OPERATION_TIME + 1)
 
 
 @pytest.mark.parametrize("mutation", ["revoke", "disable", "remove"])

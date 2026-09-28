@@ -286,7 +286,7 @@ class ArchiveService:
 
         self._require_transaction()
         page = self._content.get_page(command.library_id, command.page_id)
-        if page is None or page.page_type != "archive":
+        if page is None or page.page_type != "archive" or page.deleted_at is not None:
             raise ArchiveNotFoundError
         operation_at = self._operation_time()
         authenticated = AuthenticationService(

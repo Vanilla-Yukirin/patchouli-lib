@@ -5,7 +5,7 @@ from collections.abc import Iterator
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import Connection, Engine, func, select
+from sqlalchemy import Connection, Engine, func, select, update
 
 from patchouli_lib.auth.models import AuditEvent, SectionGrant
 from patchouli_lib.auth.repository import AuthRepository
@@ -442,6 +442,62 @@ def test_revision_preconditions_append_once_keep_old_and_replay_after_advance(
         assert isinstance(create_replay, ArchiveMutationReplay)
         assert create_replay.body.page.current_revision_number == 1
         assert create_replay.response.response_etag == created.response.response_etag
+
+
+def test_deleted_page_rejects_fresh_revision_and_prior_replay_without_mutation(
+    content_engine: Engine,
+    archive_scope: ArchiveScope,
+) -> None:
+    with immediate_transaction(content_engine) as connection:
+        created = _create_once(connection, archive_scope)
+    command = AppendArchiveRevisionCommand(
+        library_id=archive_scope.library_id,
+        section_id=archive_scope.section_id,
+        page_id=created.page.page_id,
+        expected_etag=created.response.response_etag,
+        source=ArchiveSourceInput(kind="synthetic revision before deletion"),
+        content_md=b"# Revision before deletion\n",
+        request_id=f"req_{'d' * 32}",
+    )
+    replay_key = _key("revision-before-deletion")
+    with immediate_transaction(content_engine) as connection:
+        revised = _service(
+            connection,
+            revision_ids=iter((f"rev_{'d' * 32}",)),
+            opaque_ids=iter(("d" * 32, "e" * 32)),
+        ).append_revision(archive_scope.token.value, command, replay_key)
+        assert isinstance(revised, ArchiveMutationSuccess)
+    with immediate_transaction(content_engine) as connection:
+        connection.execute(
+            update(Page)
+            .where(
+                Page.library_id == archive_scope.library_id,
+                Page.page_uid == created.page.page_uid,
+            )
+            .values(deleted_at=OPERATION_TIME + 1, updated_at=OPERATION_TIME + 1)
+        )
+        baseline = _counts(connection)
+
+    fresh = command.model_copy(
+        update={
+            "expected_etag": revised.response.response_etag,
+            "request_id": f"req_{'e' * 32}",
+        }
+    )
+    for attempted, key in ((command, replay_key), (fresh, _key("revision-after-deletion"))):
+        with immediate_transaction(content_engine) as connection:
+            with pytest.raises(ArchiveNotFoundError, match="not found"):
+                _service(connection).append_revision(archive_scope.token.value, attempted, key)
+            assert _counts(connection) == baseline
+            current = connection.execute(
+                select(
+                    Page.current_revision_id, Page.current_revision_number, Page.deleted_at
+                ).where(
+                    Page.library_id == archive_scope.library_id,
+                    Page.page_uid == created.page.page_uid,
+                )
+            ).one()
+            assert current == (revised.revision.revision_id, 2, OPERATION_TIME + 1)
 
 
 def test_revision_route_section_must_match_page_without_mutation(
