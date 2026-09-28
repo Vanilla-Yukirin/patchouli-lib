@@ -17,6 +17,7 @@ from patchouli_lib.backup.manifest import (
     LEGACY_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
+    TAG_SCHEMA_REVISION,
 )
 from patchouli_lib.content.file_manifest import (
     MAX_FILE_BYTES,
@@ -209,11 +210,50 @@ _EXPECTED_SQL_HASHES_0010: Final = _EXPECTED_SQL_HASHES_0009 | {
     ("table", "page_tags"): ("f68997a2d94d863f237ed3cd958ca4a47d3f4ea1cdfc381fadfb6e789947c44b"),
     ("table", "tags"): ("994997e390e79449ed2f23caf2281fce465c1855213cf6cb289953a878ccdaf8"),
 }
+_EXPECTED_SQL_HASHES_0011: Final = _EXPECTED_SQL_HASHES_0010 | {
+    ("table", "page_occurrence_correction_guards"): (
+        "b5faf884e8022c7874b80108563edc76ed32269abf609b05b97de95ff83752ab"
+    ),
+    ("table", "page_occurrence_corrections"): (
+        "1ca1798efe1ccc6964d272e589e4c8465b4b02fe73625bdfbe89c7c3adb58fe6"
+    ),
+    ("trigger", "trg_page_occurrence_corrections_no_delete"): (
+        "3a66a805ccc45ccbe1b1f535eba42e9b4798fc34675d639228f18dea9248dc6b"
+    ),
+    ("trigger", "trg_page_occurrence_corrections_no_update"): (
+        "3c03990ed65738714f5aee5bdae6871bf376ee392b63d6d0d23d508cad6a1967"
+    ),
+    ("trigger", "trg_page_occurrence_corrections_validate_insert"): (
+        "4c389a821f8307c48b6b3eaa9fa8c93814c7f692516700e16867f5942765697a"
+    ),
+    ("trigger", "trg_page_occurrence_guards_no_update"): (
+        "d9464288878e381c9ad33bc1b1c5adbcd738063540aa1c0faf3f8875e3519ceb"
+    ),
+    ("trigger", "trg_page_occurrence_guards_safe_delete"): (
+        "11bb4f88cf8213e9217b7b25be63590751ae314359cc784e7b93b0dfca0679e9"
+    ),
+    ("trigger", "trg_page_occurrence_guards_validate_insert"): (
+        "b694bbf7a0e865bf77583b4e01932b1dfa2f88971faa933924e0cc8d403a796e"
+    ),
+    ("trigger", "trg_pages_occurrence_record"): (
+        "fda54a8097c56827ad9151fb260463f55ba5b39eb5dcb3ef80466e8228de4d58"
+    ),
+    ("trigger", "trg_pages_occurrence_require_guard"): (
+        "8390ecb33e63768a37c34af9ea735c51572f24f20f521f58898efc140909fa0a"
+    ),
+    ("trigger", "trg_pages_stable_identity"): (
+        "6e3ebd7d5e4010cd3cfba1428daf8cc9e0fe9072f11f81562ae9995bc27d627c"
+    ),
+    ("trigger", "trg_pages_updated_at_monotonic"): (
+        "78b91ef08c6ada45dda3e2871aa0c395bfa827d437587e0811218f3b353922ad"
+    ),
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
     PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
     INTERMEDIATE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0009,
-    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0010,
+    TAG_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0010,
+    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0011,
 }
 
 
@@ -370,6 +410,7 @@ def _require_page_graph(connection: sqlite3.Connection, schema_revision: str) ->
     if schema_revision != LEGACY_SCHEMA_REVISION:
         _require_revision_seals(connection)
 
+    occurrence_initials = _require_occurrence_graph(connection, schema_revision)
     identifiers_by_page: dict[tuple[str, bytes], list[tuple[str, str]]] = {}
     for library_id, digest, text, kind, page_uid in connection.execute(
         "SELECT library_id, identifier_digest, identifier_text, identifier_kind, page_uid "
@@ -422,7 +463,8 @@ def _require_page_graph(connection: sqlite3.Connection, schema_revision: str) ->
         if (
             scheme != "page-v1"
             or page_id != expected_page_id
-            or timestamp != (occurred_at // 1000) * 1000
+            or timestamp
+            != (occurrence_initials.get((library_id, page_uid), occurred_at) // 1000) * 1000
         ):
             raise BackupDatabaseError
         identifiers = identifiers_by_page.get((library_id, page_uid), [])
@@ -454,6 +496,103 @@ def _require_page_graph(connection: sqlite3.Connection, schema_revision: str) ->
             raise BackupDatabaseError
     if page_counter_keys != observed_counter_keys:
         raise BackupDatabaseError
+
+
+def _require_occurrence_graph(
+    connection: sqlite3.Connection, schema_revision: str
+) -> dict[tuple[str, bytes], int]:
+    """Validate the complete correction chain and return each Page's ID time."""
+
+    if schema_revision != SUPPORTED_SCHEMA_REVISION:
+        return {}
+    if _one_integer(connection, "SELECT count(*) FROM page_occurrence_correction_guards"):
+        raise BackupDatabaseError
+    page_rows = connection.execute(
+        "SELECT library_id, page_uid, occurred_at, current_revision_number, "
+        "created_at, updated_at FROM pages"
+    )
+    pages = {
+        (library_id, page_uid): (occurred_at, current_revision_number, created_at, updated_at)
+        for (
+            library_id,
+            page_uid,
+            occurred_at,
+            current_revision_number,
+            created_at,
+            updated_at,
+        ) in page_rows
+    }
+    revision_created = {
+        (library_id, page_uid, number): created_at
+        for library_id, page_uid, number, created_at in connection.execute(
+            "SELECT library_id, page_uid, revision_number, created_at FROM revisions"
+        )
+    }
+    chains: dict[tuple[str, bytes], list[tuple[int, int, int, int, str, int]]] = {}
+    for (
+        library_id,
+        page_uid,
+        sequence,
+        old,
+        new,
+        at_revision,
+        actor,
+        corrected_at,
+    ) in connection.execute(
+        "SELECT library_id, page_uid, sequence, old_occurred_at, new_occurred_at, "
+        "at_revision_number, actor_caller_id, corrected_at "
+        "FROM page_occurrence_corrections ORDER BY library_id, page_uid, sequence"
+    ):
+        key = (library_id, page_uid)
+        if (
+            key not in pages
+            or type(sequence) is not int
+            or type(old) is not int
+            or type(new) is not int
+            or type(at_revision) is not int
+            or type(actor) is not str
+            or type(corrected_at) is not int
+        ):
+            raise BackupDatabaseError
+        chains.setdefault(key, []).append((sequence, old, new, at_revision, actor, corrected_at))
+
+    initials: dict[tuple[str, bytes], int] = {}
+    for key, (current, current_revision, created_at, updated_at) in pages.items():
+        if (
+            type(key[0]) is not str
+            or type(key[1]) is not bytes
+            or type(current) is not int
+            or type(current_revision) is not int
+            or type(created_at) is not int
+            or type(updated_at) is not int
+        ):
+            raise BackupDatabaseError
+        chain = chains.get(key, [])
+        value = chain[0][1] if chain else current
+        initials[key] = value
+        prior_revision = 1
+        prior_time = -1
+        for expected_sequence, (sequence, old, new, at_revision, _actor, corrected_at) in enumerate(
+            chain, start=1
+        ):
+            if (
+                sequence != expected_sequence
+                or old != value
+                or new == old
+                or not prior_revision <= at_revision <= current_revision
+                or corrected_at <= prior_time
+                or corrected_at < created_at
+                or type(revision_created.get((*key, at_revision))) is not int
+                or corrected_at < revision_created[(*key, at_revision)]
+                or corrected_at > updated_at
+            ):
+                raise BackupDatabaseError
+            value = new
+            prior_revision = at_revision
+            prior_time = corrected_at
+        if value != current:
+            raise BackupDatabaseError
+    return initials
 
 
 def _require_revision_files(connection: sqlite3.Connection, schema_revision: str) -> None:
@@ -639,7 +778,7 @@ def _require_auth_graph(connection: sqlite3.Connection) -> None:
             cursor = next_row[2]
 
 
-def _require_idempotency_graph(connection: sqlite3.Connection) -> None:
+def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: str) -> None:
     def reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
         result: dict[str, object] = {}
         for key, value in pairs:
@@ -712,11 +851,26 @@ def _require_idempotency_graph(connection: sqlite3.Connection) -> None:
             or type(row[7]) is not bytes
         ):
             raise BackupDatabaseError
+        response_occurrence = row[4]
+        if schema_revision == SUPPORTED_SCHEMA_REVISION:
+            corrections = connection.execute(
+                "SELECT old_occurred_at, new_occurred_at, at_revision_number "
+                "FROM page_occurrence_corrections WHERE library_id = ? AND page_uid = ? "
+                "ORDER BY sequence",
+                (library_id, row[0]),
+            ).fetchall()
+            if corrections:
+                response_occurrence = corrections[0][0]
+                for _old, new, at_revision in corrections:
+                    if at_revision < body.revision.revision_number:
+                        response_occurrence = new
+                    else:
+                        break
         if (
             body.page.book_id != row[1]
             or body.page.title != row[2]
             or body.page.type != row[3]
-            or body.page.occurred_at != canonical_utc_wire(row[4])
+            or body.page.occurred_at != canonical_utc_wire(response_occurrence)
             or body.revision.created_at != canonical_utc_wire(row[5])
         ):
             raise BackupDatabaseError
@@ -789,7 +943,7 @@ def _validate_connection(
     }:
         _require_tag_graph(connection)
     _require_auth_graph(connection)
-    _require_idempotency_graph(connection)
+    _require_idempotency_graph(connection, schema_revision)
     return DatabaseValidationReport(
         schema_revision=schema_revision,
         sqlite_version=sqlite_version_row[0],

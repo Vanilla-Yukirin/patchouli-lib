@@ -220,14 +220,23 @@ def test_page_content_migration_upgrade_check_downgrade_upgrade(
                 "trg_page_identifier_registry_stable",
                 "trg_page_revision_append_guards_no_update",
                 "trg_page_revision_append_guards_safe_delete",
+                "trg_page_occurrence_corrections_validate_insert",
+                "trg_page_occurrence_corrections_no_update",
+                "trg_page_occurrence_corrections_no_delete",
+                "trg_page_occurrence_guards_validate_insert",
+                "trg_page_occurrence_guards_no_update",
+                "trg_page_occurrence_guards_safe_delete",
                 "trg_pages_canonical_identifier_on_insert",
+                "trg_pages_occurrence_require_guard",
+                "trg_pages_occurrence_record",
+                "trg_pages_updated_at_monotonic",
                 "trg_pages_clear_append_guard",
                 "trg_pages_current_revision_advance",
                 "trg_pages_initial_revision_number",
                 "trg_pages_stable_identity",
             }
             assert first.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == (
-                "20260929_0010"
+                "20260929_0011"
             )
     finally:
         engine.dispose()

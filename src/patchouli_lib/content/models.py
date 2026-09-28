@@ -157,6 +157,104 @@ class Page(Base):
     deleted_at: Mapped[int | None] = mapped_column(BigInteger)
 
 
+class PageOccurrenceCorrection(Base):
+    """Immutable audit of one declared-time correction, created by SQLite."""
+
+    __tablename__ = "page_occurrence_corrections"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id", "page_uid"],
+            ["pages.library_id", "pages.page_uid"],
+            name="fk_page_occurrence_corrections_page",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["actor_caller_id", "library_id"],
+            ["auth_callers.id", "auth_callers.library_id"],
+            name="fk_page_occurrence_corrections_actor",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "sequence BETWEEN 1 AND 9223372036854775807",
+            name="ck_page_occurrence_corrections_sequence",
+        ),
+        CheckConstraint(
+            f"old_occurred_at BETWEEN {MIN_OCCURRENCE_MICROSECONDS} "
+            f"AND {MAX_OCCURRENCE_MICROSECONDS} "
+            f"AND new_occurred_at BETWEEN {MIN_OCCURRENCE_MICROSECONDS} "
+            f"AND {MAX_OCCURRENCE_MICROSECONDS} "
+            "AND old_occurred_at != new_occurred_at",
+            name="ck_page_occurrence_corrections_values",
+        ),
+        CheckConstraint(
+            "at_revision_number BETWEEN 1 AND 9223372036854775807",
+            name="ck_page_occurrence_corrections_revision",
+        ),
+        CheckConstraint("corrected_at >= 0", name="ck_page_occurrence_corrections_time"),
+    )
+
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
+    sequence: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    old_occurred_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    new_occurred_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    at_revision_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    actor_caller_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+    corrected_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class PageOccurrenceCorrectionGuard(Base):
+    """Transient write authorization consumed by a Page UPDATE trigger."""
+
+    __tablename__ = "page_occurrence_correction_guards"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id", "page_uid"],
+            ["pages.library_id", "pages.page_uid"],
+            name="fk_page_occurrence_correction_guards_page",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["actor_caller_id", "library_id"],
+            ["auth_callers.id", "auth_callers.library_id"],
+            name="fk_page_occurrence_correction_guards_actor",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["library_id", "page_uid", "sequence"],
+            [
+                "page_occurrence_corrections.library_id",
+                "page_occurrence_corrections.page_uid",
+                "page_occurrence_corrections.sequence",
+            ],
+            name="fk_page_occurrence_correction_guards_completed",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        CheckConstraint(
+            "sequence BETWEEN 1 AND 9223372036854775807",
+            name="ck_page_occurrence_correction_guards_sequence",
+        ),
+        CheckConstraint(
+            f"old_occurred_at BETWEEN {MIN_OCCURRENCE_MICROSECONDS} "
+            f"AND {MAX_OCCURRENCE_MICROSECONDS} "
+            f"AND new_occurred_at BETWEEN {MIN_OCCURRENCE_MICROSECONDS} "
+            f"AND {MAX_OCCURRENCE_MICROSECONDS} "
+            "AND old_occurred_at != new_occurred_at",
+            name="ck_page_occurrence_correction_guards_values",
+        ),
+        CheckConstraint("corrected_at >= 0", name="ck_page_occurrence_correction_guards_time"),
+    )
+
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    old_occurred_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    new_occurred_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    actor_caller_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+    corrected_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
 class Revision(Base):
     __tablename__ = "revisions"
     __table_args__ = (
@@ -571,6 +669,8 @@ __all__ = [
     "MAX_OCCURRENCE_MICROSECONDS",
     "MIN_OCCURRENCE_MICROSECONDS",
     "Page",
+    "PageOccurrenceCorrection",
+    "PageOccurrenceCorrectionGuard",
     "PageIdCollisionCounter",
     "PageIdentifier",
     "PageSource",

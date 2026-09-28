@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Connection, insert, select, update
+from sqlalchemy import Connection, func, insert, select, update
 
 from patchouli_lib.content.models import (
     Page,
     PageIdCollisionCounter,
     PageIdentifier,
+    PageOccurrenceCorrection,
+    PageOccurrenceCorrectionGuard,
     PageSource,
     Revision,
 )
@@ -19,6 +21,8 @@ from patchouli_lib.content.schemas import (
     NewRevision,
     PageIdCollisionCounterRecord,
     PageIdentifierRecord,
+    PageOccurrenceCorrectionCommand,
+    PageOccurrenceCorrectionRecord,
     PageRecord,
     PageSourceRecord,
     RevisionRecord,
@@ -144,6 +148,74 @@ class ContentRepository:
         values = page.model_dump()
         self._connection.execute(insert(Page), values)
         return PageRecord.model_validate(values)
+
+    def correct_occurrence(
+        self,
+        page: PageRecord,
+        command: PageOccurrenceCorrectionCommand,
+    ) -> tuple[PageRecord, PageOccurrenceCorrectionRecord]:
+        """Atomically change declared time and append its audit row.
+
+        The caller owns the immediate write transaction and MUST first
+        authorize ``actor_caller_id``. The database consumes the short-lived
+        guard and creates the immutable audit row in the Page UPDATE trigger.
+        A stale Page or failed UPDATE aborts the surrounding transaction.
+        """
+
+        if not self._connection.in_transaction():
+            raise RuntimeError("Page occurrence correction requires a write transaction.")
+        if (
+            page.library_id != command.library_id
+            or page.page_uid != command.page_uid
+            or page.occurred_at != command.old_occurred_at
+        ):
+            raise ValueError("Page occurrence correction target is inconsistent.")
+        sequence = self._connection.scalar(
+            select(func.coalesce(func.max(PageOccurrenceCorrection.sequence), 0) + 1).where(
+                PageOccurrenceCorrection.library_id == page.library_id,
+                PageOccurrenceCorrection.page_uid == page.page_uid,
+            )
+        )
+        if type(sequence) is not int or not 1 <= sequence <= (1 << 63) - 1:
+            raise ValueError("Page occurrence correction sequence is exhausted.")
+        self._connection.execute(
+            insert(PageOccurrenceCorrectionGuard),
+            command.model_dump() | {"sequence": sequence},
+        )
+        result = self._connection.execute(
+            update(Page)
+            .where(
+                Page.library_id == page.library_id,
+                Page.page_uid == page.page_uid,
+                Page.occurred_at == page.occurred_at,
+                Page.updated_at == page.updated_at,
+                Page.current_revision_id == page.current_revision_id,
+                Page.current_revision_number == page.current_revision_number,
+            )
+            .values(occurred_at=command.new_occurred_at, updated_at=command.corrected_at)
+        )
+        if result.rowcount != 1:
+            raise RuntimeError("Page occurrence correction encountered stale content.")
+        row = (
+            self._connection.execute(
+                select(PageOccurrenceCorrection.__table__).where(
+                    PageOccurrenceCorrection.library_id == page.library_id,
+                    PageOccurrenceCorrection.page_uid == page.page_uid,
+                    PageOccurrenceCorrection.sequence == sequence,
+                )
+            )
+            .mappings()
+            .one()
+        )
+        return (
+            page.model_copy(
+                update={
+                    "occurred_at": command.new_occurred_at,
+                    "updated_at": command.corrected_at,
+                }
+            ),
+            PageOccurrenceCorrectionRecord.model_validate(dict(row)),
+        )
 
     def add_revision(self, revision: NewRevision) -> RevisionRecord:
         values = revision.model_dump()

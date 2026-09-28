@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import sqlite3
 from collections.abc import Mapping, Sequence
+from contextlib import closing
 from io import StringIO
 from pathlib import Path
 from typing import Any
 
 import pytest
+from alembic import command
 from sqlalchemy import Engine
 
 from patchouli_lib import backup_cli
 from patchouli_lib.backup import (
+    BACKUP_FILENAME,
+    MANIFEST_FILENAME,
     BackupArtifactIdentity,
     BackupCancelledError,
     BackupOperationError,
@@ -19,8 +25,14 @@ from patchouli_lib.backup import (
     validate_database,
     verify_backup_bundle,
 )
-from patchouli_lib.backup.manifest import LEGACY_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION
+from patchouli_lib.backup.manifest import (
+    LEGACY_SCHEMA_REVISION,
+    SUPPORTED_SCHEMA_REVISION,
+    TAG_SCHEMA_REVISION,
+    BackupManifestV1,
+)
 
+from .conftest import _config
 from .test_service import _legacy_bundle_with_binary_file
 
 APP_VERSION = "0.1.0a0"
@@ -257,6 +269,78 @@ def test_legacy_verify_and_restore_require_explicit_exact_revision(
         destination, schema_revision=LEGACY_SCHEMA_REVISION
     ).schema_revision == (LEGACY_SCHEMA_REVISION)
     assert destination.read_bytes() == (bundle / "database.sqlite").read_bytes()
+
+
+def test_tag_schema_bundle_requires_explicit_revision_for_verify_and_restore(
+    complete_engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_database = complete_engine.url.database
+    assert source_database is not None
+    source_path = Path(source_database)
+    command.downgrade(_config(source_path, monkeypatch), TAG_SCHEMA_REVISION)
+
+    bundle = tmp_path / "tag-schema-bundle"
+    bundle.mkdir()
+    database = bundle / BACKUP_FILENAME
+    with closing(sqlite3.connect(source_path)) as source:
+        journal_mode = source.execute("PRAGMA journal_mode").fetchone()[0]
+        with closing(sqlite3.connect(database)) as destination:
+            source.backup(destination)
+            destination.execute("PRAGMA journal_mode = DELETE")
+            destination.commit()
+    data = database.read_bytes()
+    manifest = BackupManifestV1(
+        schema_version=1,
+        backup_filename=BACKUP_FILENAME,
+        byte_size=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        created_at="2026-08-13T12:34:56.123456Z",
+        app_version=APP_VERSION,
+        schema_revision=TAG_SCHEMA_REVISION,
+        sqlite_version=sqlite3.sqlite_version,
+        source_journal_mode=journal_mode,
+        artifact_identity=IDENTITY.identity,
+        artifact_digest=IDENTITY.digest,
+    )
+    (bundle / MANIFEST_FILENAME).write_bytes(manifest.canonical_bytes())
+    destination_path = tmp_path / "tag-schema-restored.sqlite"
+
+    for arguments in (
+        ["verify", "--bundle", str(bundle)],
+        ["restore", "--bundle", str(bundle), "--destination", str(destination_path)],
+    ):
+        code, output, error = _run(arguments)
+        assert code == backup_cli.ExitCode.VALIDATION_FAILED
+        assert output == ""
+        assert error == "Backup artifact validation failed.\n"
+    assert not destination_path.exists()
+
+    code, output, error = _run(
+        ["verify", "--bundle", str(bundle), "--schema-revision", TAG_SCHEMA_REVISION]
+    )
+    assert code == backup_cli.ExitCode.SUCCESS
+    assert error == ""
+    assert f"schema_revision={TAG_SCHEMA_REVISION}\n" in output
+    code, output, error = _run(
+        [
+            "restore",
+            "--bundle",
+            str(bundle),
+            "--destination",
+            str(destination_path),
+            "--schema-revision",
+            TAG_SCHEMA_REVISION,
+        ]
+    )
+    assert code == backup_cli.ExitCode.SUCCESS
+    assert error == ""
+    assert f"schema_revision={TAG_SCHEMA_REVISION}\n" in output
+    assert validate_database(
+        destination_path, schema_revision=TAG_SCHEMA_REVISION
+    ).schema_revision == (TAG_SCHEMA_REVISION)
+    assert destination_path.read_bytes() == data
 
 
 @pytest.mark.parametrize("command", ["verify", "restore"])

@@ -167,11 +167,19 @@ def test_validation_requires_page_occurrence_and_id_timestamp_alignment(
 ) -> None:
     database = _database_copy(complete_engine, tmp_path, "occurrence-alignment")
     with closing(sqlite3.connect(database)) as connection:
+        guard_row = connection.execute(
+            "SELECT sql FROM sqlite_schema WHERE type = 'trigger' "
+            "AND name = 'trg_pages_occurrence_require_guard'"
+        ).fetchone()
+        assert guard_row is not None and isinstance(guard_row[0], str)
+        connection.execute("DROP TRIGGER trg_pages_occurrence_require_guard")
         _replace_trigger(
             connection,
             "trg_pages_stable_identity",
             "UPDATE pages SET occurred_at = occurred_at + 1000",
         )
+        connection.execute(guard_row[0])
+        connection.commit()
     with pytest.raises(BackupDatabaseError):
         validate_database(database)
 

@@ -28,6 +28,7 @@ from patchouli_lib.identifiers import (
     canonical_utc_wire,
     generate_page_id,
     page_id_registry_digest,
+    page_id_timestamp_prefix,
     validate_page_id,
     validate_page_uid,
     validate_revision_id,
@@ -174,8 +175,6 @@ class _PageStorage(ContentSchema):
 
     @model_validator(mode="after")
     def require_consistent_floor_and_lifecycle(self) -> Self:
-        if self.id_timestamp_micros != (self.occurred_at // 1_000) * 1_000:
-            raise ValueError("Page identifier timestamp is inconsistent.")
         if self.updated_at < self.created_at:
             raise ValueError("Page update time precedes creation time.")
         if (
@@ -193,6 +192,8 @@ class NewPage(_PageStorage):
 
     @model_validator(mode="after")
     def require_consistent_generated_identity(self) -> Self:
+        if self.id_timestamp_micros != (self.occurred_at // 1_000) * 1_000:
+            raise ValueError("Initial Page identifier timestamp is inconsistent.")
         occurrence = OccurrenceTime(
             utc_microseconds=self.occurred_at,
             canonical_utc=canonical_utc_wire(self.occurred_at),
@@ -214,7 +215,36 @@ class NewPage(_PageStorage):
 class PageRecord(_PageStorage):
     """Validate a stored Page without recomputing identity after title changes."""
 
-    pass
+    @model_validator(mode="after")
+    def require_stable_identifier_components(self) -> Self:
+        suffix = "" if self.collision_ordinal == 1 else f"-{self.collision_ordinal}"
+        expected = f"{page_id_timestamp_prefix(self.id_timestamp_micros)}-{self.base_slug}{suffix}"
+        if self.id_scheme != PAGE_ID_SCHEME or self.page_id != expected:
+            raise ValueError("Page identifier metadata is inconsistent.")
+        return self
+
+
+class PageOccurrenceCorrectionCommand(ContentSchema):
+    """Storage instruction; an authenticated service must authorize the actor."""
+
+    library_id: OpaqueId
+    page_uid: PageUid
+    old_occurred_at: OccurrenceMicros
+    new_occurred_at: OccurrenceMicros
+    actor_caller_id: OpaqueId
+    corrected_at: StoredTimestamp
+
+    @model_validator(mode="after")
+    def require_actual_change_and_valid_time(self) -> Self:
+        if self.old_occurred_at == self.new_occurred_at:
+            raise ValueError("Page occurrence correction must change the timestamp.")
+        canonical_utc_wire(self.corrected_at)
+        return self
+
+
+class PageOccurrenceCorrectionRecord(PageOccurrenceCorrectionCommand):
+    sequence: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+    at_revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
 
 
 class NewRevision(MarkdownContent):
@@ -555,6 +585,8 @@ __all__ = [
     "NewRevision",
     "PageIdCollisionCounterRecord",
     "PageIdentifierRecord",
+    "PageOccurrenceCorrectionCommand",
+    "PageOccurrenceCorrectionRecord",
     "PageRecord",
     "PageSourceRecord",
     "RevisionRecord",
