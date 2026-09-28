@@ -12,6 +12,7 @@ from sqlalchemy.sql import Select
 from patchouli_lib.auth.models import AuditEvent, Caller
 from patchouli_lib.content.models import Page, Revision, RevisionFile
 from patchouli_lib.library.models import Book, Library, Section
+from patchouli_lib.tags.models import PageTag, Tag
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,36 @@ class PageItem:
     page_type: str
     occurred_at: int
     revision_number: int
+
+
+@dataclass(frozen=True)
+class TagItem:
+    id: str
+    name: str
+    created_at: int
+    page_count: int
+
+
+@dataclass(frozen=True)
+class TaggedPageItem:
+    id: str
+    title: str
+    section_id: str
+    book_id: str
+    occurred_at: int
+
+
+@dataclass(frozen=True)
+class TagDirectoryView:
+    library: LibraryItem
+    tags: tuple[TagItem, ...]
+
+
+@dataclass(frozen=True)
+class TagView:
+    library: LibraryItem
+    tag: TagItem
+    pages: tuple[TaggedPageItem, ...]
 
 
 @dataclass(frozen=True)
@@ -305,6 +336,60 @@ class AdminReadModel:
             sections = tuple(_section_item(row) for row in rows)
             return LibraryView(library, sections)
 
+    def list_library_tags(self, library_id: str) -> TagDirectoryView | None:
+        with self._engine.connect() as connection:
+            library = _get_library(connection, library_id)
+            if library is None:
+                return None
+            rows = connection.execute(_tag_summary_query(library_id)).mappings()
+            return TagDirectoryView(library, tuple(_tag_item(row) for row in rows))
+
+    def get_library_tag(self, library_id: str, tag_id: str) -> TagView | None:
+        with self._engine.connect() as connection:
+            library = _get_library(connection, library_id)
+            if library is None:
+                return None
+            tag_row = (
+                connection.execute(_tag_summary_query(library_id).where(Tag.id == tag_id))
+                .mappings()
+                .one_or_none()
+            )
+            if tag_row is None:
+                return None
+            page_rows = connection.execute(
+                select(
+                    Page.page_id,
+                    Page.title,
+                    Page.section_id,
+                    Page.book_id,
+                    Page.occurred_at,
+                )
+                .join(
+                    PageTag,
+                    and_(
+                        PageTag.library_id == Page.library_id,
+                        PageTag.page_uid == Page.page_uid,
+                    ),
+                )
+                .where(
+                    Page.library_id == library_id,
+                    PageTag.tag_id == tag_id,
+                    Page.deleted_at.is_(None),
+                )
+                .order_by(Page.occurred_at.desc(), Page.page_id)
+            ).mappings()
+            pages = tuple(
+                TaggedPageItem(
+                    row["page_id"],
+                    row["title"],
+                    row["section_id"],
+                    row["book_id"],
+                    row["occurred_at"],
+                )
+                for row in page_rows
+            )
+            return TagView(library, _tag_item(tag_row), pages)
+
     def get_section(self, library_id: str, section_id: str) -> SectionView | None:
         with self._engine.connect() as connection:
             library = _get_library(connection, library_id)
@@ -464,6 +549,32 @@ def _library_summary_query() -> Select[Any]:
     )
 
 
+def _tag_summary_query(library_id: str) -> Select[Any]:
+    return (
+        select(
+            Tag.id,
+            Tag.display_name,
+            Tag.created_at,
+            func.count(Page.page_uid).label("page_count"),
+        )
+        .outerjoin(
+            PageTag,
+            and_(PageTag.library_id == Tag.library_id, PageTag.tag_id == Tag.id),
+        )
+        .outerjoin(
+            Page,
+            and_(
+                Page.library_id == PageTag.library_id,
+                Page.page_uid == PageTag.page_uid,
+                Page.deleted_at.is_(None),
+            ),
+        )
+        .where(Tag.library_id == library_id)
+        .group_by(Tag.id, Tag.display_name, Tag.created_at)
+        .order_by(Tag.match_key, Tag.id)
+    )
+
+
 def _get_library(connection: Connection, library_id: str) -> LibraryItem | None:
     row = (
         connection.execute(_library_summary_query().where(Library.id == library_id))
@@ -524,3 +635,7 @@ def _page_item(row: RowMapping) -> PageItem:
         row["occurred_at"],
         row["current_revision_number"],
     )
+
+
+def _tag_item(row: RowMapping) -> TagItem:
+    return TagItem(row["id"], row["display_name"], row["created_at"], row["page_count"])

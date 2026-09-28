@@ -13,6 +13,8 @@ from patchouli_lib.admin.read_model import (
     LibraryView,
     PageView,
     SectionView,
+    TagDirectoryView,
+    TagView,
 )
 from patchouli_lib.admin.service import DeliveredCredential
 from patchouli_lib.auth.schemas import SectionAction
@@ -182,6 +184,10 @@ _ZH_CN: dict[str, str] = {
     "Sections": "分区",
     "Books": "书籍",
     "Pages": "页面",
+    "Tags": "标签",
+    "Tagged pages": "标记的页面",
+    "No tags yet.": "暂无标签。",
+    "No tagged pages yet.": "暂无已标记的页面。",
     "Created": "创建时间",
     "Content activity": "内容近况",
     "Created a page": "创建了页面",
@@ -813,6 +819,7 @@ def library_page(
     body = (
         f'<p class="meta">{localize(locale, "Created")}: {_time(view.library.created_at)} · '
         f"{localize(locale, 'Page count')}: {view.library.page_count}</p>"
+        f'<p><a href="{base}/tags">{localize(locale, "Tags")}</a></p>'
         f"<h2>{localize(locale, 'Sections')}</h2>"
         + (
             f'<ul class="item-list">{cards}</ul>'
@@ -838,6 +845,78 @@ def library_page(
         base,
         body,
         crumbs=((localize(locale, "Libraries"), "/admin/libraries"),),
+    )
+
+
+def tag_directory_page(
+    csrf_token: str,
+    view: TagDirectoryView,
+    *,
+    locale: AdminLocale = "en",
+) -> str:
+    library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
+    base = f"{library_path}/tags"
+    cards = "".join(
+        f'<li><a href="{base}/{escape(item.id, quote=True)}">{escape(item.name)}</a>'
+        f'<p class="meta">{localize(locale, "Page count")}: {item.page_count} · '
+        f"{localize(locale, 'Created')}: {_time(item.created_at)}</p></li>"
+        for item in view.tags
+    )
+    body = (
+        f'<ul class="item-list">{cards}</ul>'
+        if view.tags
+        else f'<p class="card">{localize(locale, "No tags yet.")}</p>'
+    )
+    return _browser_document(
+        csrf_token,
+        locale,
+        localize(locale, "Tags"),
+        base,
+        body,
+        crumbs=(
+            (localize(locale, "Libraries"), "/admin/libraries"),
+            (view.library.name, library_path),
+        ),
+    )
+
+
+def tag_detail_page(
+    csrf_token: str,
+    view: TagView,
+    *,
+    locale: AdminLocale = "en",
+) -> str:
+    library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
+    tag_path = f"{library_path}/tags"
+    base = f"{tag_path}/{escape(view.tag.id, quote=True)}"
+    cards = "".join(
+        f'<li><a href="{library_path}/sections/{escape(item.section_id, quote=True)}'
+        f'/books/{escape(item.book_id, quote=True)}/pages/{escape(item.id, quote=True)}">'
+        f'{escape(item.title)}</a><p class="meta">'
+        f"{localize(locale, 'Occurred')}: {_time(item.occurred_at)}</p></li>"
+        for item in view.pages
+    )
+    body = (
+        f'<p class="meta">{localize(locale, "Page count")}: {view.tag.page_count} · '
+        f"{localize(locale, 'Created')}: {_time(view.tag.created_at)}</p>"
+        f"<h2>{localize(locale, 'Tagged pages')}</h2>"
+        + (
+            f'<ul class="item-list">{cards}</ul>'
+            if view.pages
+            else f'<p class="card">{localize(locale, "No tagged pages yet.")}</p>'
+        )
+    )
+    return _browser_document(
+        csrf_token,
+        locale,
+        view.tag.name,
+        base,
+        body,
+        crumbs=(
+            (localize(locale, "Libraries"), "/admin/libraries"),
+            (view.library.name, library_path),
+            (localize(locale, "Tags"), tag_path),
+        ),
     )
 
 

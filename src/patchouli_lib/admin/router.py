@@ -36,6 +36,8 @@ from patchouli_lib.admin.pages import (
     operations_page,
     page_preview_page,
     section_page,
+    tag_detail_page,
+    tag_directory_page,
 )
 from patchouli_lib.admin.passwords import password_matches
 from patchouli_lib.admin.read_model import AdminReadModel
@@ -414,6 +416,22 @@ def create_admin_router(
         def render(csrf: str, locale: AdminLocale) -> str | None:
             view = read_model.get_library(library_id)
             return None if view is None else library_page(csrf, view, locale=locale)
+
+        return protected_page(request, render)
+
+    @router.get("/libraries/{library_id}/tags")
+    def library_tags(request: Request, library_id: str) -> Response:
+        def render(csrf: str, locale: AdminLocale) -> str | None:
+            view = read_model.list_library_tags(library_id)
+            return None if view is None else tag_directory_page(csrf, view, locale=locale)
+
+        return protected_page(request, render)
+
+    @router.get("/libraries/{library_id}/tags/{tag_id}")
+    def library_tag_detail(request: Request, library_id: str, tag_id: str) -> Response:
+        def render(csrf: str, locale: AdminLocale) -> str | None:
+            view = read_model.get_library_tag(library_id, tag_id)
+            return None if view is None else tag_detail_page(csrf, view, locale=locale)
 
         return protected_page(request, render)
 
