@@ -25,6 +25,7 @@ from patchouli_lib.content.schemas import (
     ArchiveMutationReplay,
     ArchiveMutationSuccess,
     ArchiveSourceInput,
+    CorrectArchiveOccurrenceCommand,
     PageOccurrenceCorrectionCommand,
     PageRecord,
 )
@@ -35,6 +36,7 @@ from patchouli_lib.content.service import (
     page_current_etag,
 )
 from patchouli_lib.database import immediate_transaction
+from patchouli_lib.idempotency.schemas import OriginalResponse, ReplayResponse
 from patchouli_lib.identifiers import canonical_utc_wire
 
 from .conftest import OPERATION_TIME, ArchiveScope
@@ -200,6 +202,117 @@ def test_correction_keeps_id_and_history_and_old_replays_valid(
     ).schema_revision == ("20260929_0011")
 
 
+def test_authorized_correction_replay_and_backup_graph(
+    content_engine: Engine,
+    archive_scope: ArchiveScope,
+    tmp_path: Path,
+) -> None:
+    created = _initial_archive(content_engine, archive_scope)
+    command = CorrectArchiveOccurrenceCommand(
+        library_id=archive_scope.library_id,
+        section_id=archive_scope.section_id,
+        page_id=created.page.page_id,
+        expected_etag=created.response.response_etag,
+        occurred_at=created.page.occurred_at + 3_000_000,
+        request_id="req_" + "f" * 32,
+    )
+    with immediate_transaction(content_engine) as connection:
+        result = ArchiveService(
+            connection,
+            clock=lambda: OPERATION_TIME + 50,
+            id_factory=lambda: "6" * 32,
+        ).correct_occurrence(archive_scope.token.value, command, _key("correct-occurrence"))
+        assert isinstance(result, OriginalResponse)
+        assert result.response_status == 200
+        assert result.response_location == (
+            f"/api/v1/sections/{archive_scope.section_id}/pages/{created.page.page_id}"
+        )
+    with immediate_transaction(content_engine) as connection:
+        replay = ArchiveService(connection, clock=lambda: OPERATION_TIME + 100).correct_occurrence(
+            archive_scope.token.value, command, _key("correct-occurrence")
+        )
+        assert isinstance(replay, ReplayResponse)
+        assert replay.response_body == result.response_body
+        assert replay.response_etag == result.response_etag
+        appended = ArchiveService(
+            connection,
+            clock=lambda: OPERATION_TIME + 150,
+            id_factory=lambda: "7" * 32,
+            revision_id_factory=lambda: "rev_" + "8" * 32,
+        ).append_revision(
+            archive_scope.token.value,
+            AppendArchiveRevisionCommand(
+                library_id=archive_scope.library_id,
+                section_id=archive_scope.section_id,
+                page_id=created.page.page_id,
+                expected_etag=result.response_etag,
+                source=ArchiveSourceInput(kind="synthetic"),
+                content_md=b"# Later revision\n",
+                request_id="req_" + "e" * 32,
+            ),
+            _key("append-after-correct-api"),
+        )
+        assert isinstance(appended, ArchiveMutationSuccess)
+        assert appended.page.current_revision_number == 2
+    with immediate_transaction(content_engine) as connection:
+        later_replay = ArchiveService(
+            connection, clock=lambda: OPERATION_TIME + 200
+        ).correct_occurrence(archive_scope.token.value, command, _key("correct-occurrence"))
+        assert isinstance(later_replay, ReplayResponse)
+        assert later_replay.response_body == result.response_body
+        assert later_replay.response_etag == result.response_etag
+    with content_engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(Revision)) == 2
+        assert connection.scalar(select(func.count()).select_from(PageOccurrenceCorrection)) == 1
+    validated = _portable_copy(content_engine, tmp_path / "correction-replay.db")
+    assert validate_database(validated).schema_revision == "20260929_0011"
+
+
+def test_backup_rejects_patch_replay_that_is_not_its_correction(
+    content_engine: Engine,
+    archive_scope: ArchiveScope,
+    tmp_path: Path,
+) -> None:
+    created = _initial_archive(content_engine, archive_scope)
+    command = CorrectArchiveOccurrenceCommand(
+        library_id=archive_scope.library_id,
+        section_id=archive_scope.section_id,
+        page_id=created.page.page_id,
+        expected_etag=created.response.response_etag,
+        occurred_at=created.page.occurred_at + 3_000_000,
+        request_id="req_" + "f" * 32,
+    )
+    with immediate_transaction(content_engine) as connection:
+        result = ArchiveService(
+            connection,
+            clock=lambda: OPERATION_TIME + 50,
+            id_factory=lambda: "6" * 32,
+        ).correct_occurrence(archive_scope.token.value, command, _key("correct-occurrence"))
+        assert isinstance(result, OriginalResponse)
+
+    for field, replacement in (
+        ("response_etag", created.response.response_etag),
+        ("original_request_timestamp", canonical_utc_wire(OPERATION_TIME + 51)),
+        ("response_status", 201),
+    ):
+        database = _portable_copy(content_engine, tmp_path / f"patch-{field}.db")
+        with sqlite3.connect(database) as connection:
+            trigger = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' "
+                "AND name = 'trg_idempotency_records_immutable_update'"
+            ).fetchone()
+            assert trigger is not None and isinstance(trigger[0], str)
+            connection.execute("DROP TRIGGER trg_idempotency_records_immutable_update")
+            connection.execute(
+                f"UPDATE idempotency_records SET {field} = ? WHERE method = 'PATCH'",
+                (replacement,),
+            )
+            connection.execute(trigger[0])
+            connection.commit()
+        with pytest.raises(BackupDatabaseError):
+            validate_database(database)
+
+
 def test_historical_v1_replay_survives_later_occurrence_correction(
     content_engine: Engine,
     archive_scope: ArchiveScope,
@@ -349,6 +462,70 @@ def test_same_microsecond_correction_and_revision_keep_strict_clock_and_etag(
         connection.execute(trigger_sql)
     with pytest.raises(BackupDatabaseError):
         validate_database(portable)
+
+
+def test_backup_rejects_correction_timestamp_at_or_after_next_revision(
+    content_engine: Engine,
+    archive_scope: ArchiveScope,
+    tmp_path: Path,
+) -> None:
+    created = _initial_archive(content_engine, archive_scope)
+    _correct(
+        content_engine,
+        archive_scope,
+        created.page.page_id,
+        old=created.page.occurred_at,
+        new=created.page.occurred_at + 1,
+        at=OPERATION_TIME + 1,
+    )
+    with immediate_transaction(content_engine) as connection:
+        page = ContentRepository(connection).get_page(
+            archive_scope.library_id, created.page.page_id
+        )
+        assert page is not None
+        revised = ArchiveService(
+            connection,
+            clock=lambda: OPERATION_TIME + 2,
+            revision_id_factory=lambda: "rev_" + "7" * 32,
+            id_factory=lambda: "8" * 32,
+        ).append_revision(
+            archive_scope.token.value,
+            AppendArchiveRevisionCommand(
+                library_id=archive_scope.library_id,
+                section_id=archive_scope.section_id,
+                page_id=page.page_id,
+                expected_etag=page_current_etag(
+                    page.page_uid,
+                    page.current_revision_id,
+                    page.current_revision_number,
+                    page.occurred_at,
+                    page.updated_at,
+                ),
+                source=ArchiveSourceInput(kind="synthetic"),
+                content_md=b"# Later revision\n",
+                request_id="req_" + "d" * 32,
+            ),
+            _key("revision-after-correction"),
+        )
+        assert isinstance(revised, ArchiveMutationSuccess)
+
+    database = _portable_copy(content_engine, tmp_path / "correction-after-revision.db")
+    assert validate_database(database).schema_revision == "20260929_0011"
+    with sqlite3.connect(database) as connection:
+        trigger = connection.execute(
+            "SELECT sql FROM sqlite_schema WHERE type = 'trigger' "
+            "AND name = 'trg_page_occurrence_corrections_no_update'"
+        ).fetchone()
+        assert trigger is not None and isinstance(trigger[0], str)
+        connection.execute("DROP TRIGGER trg_page_occurrence_corrections_no_update")
+        connection.execute(
+            "UPDATE page_occurrence_corrections SET corrected_at = ?",
+            (revised.revision.created_at,),
+        )
+        connection.execute(trigger[0])
+        connection.commit()
+    with pytest.raises(BackupDatabaseError):
+        validate_database(database)
 
 
 def test_direct_update_and_incomplete_guard_cannot_commit(

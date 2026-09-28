@@ -29,6 +29,7 @@ from patchouli_lib.content.schemas import (
     ArchiveResponseBody,
     ArchiveRevisionView,
     ArchiveSourceInput,
+    CorrectArchiveOccurrenceCommand,
     CreateArchiveCommand,
     MarkdownContent,
     NewPage,
@@ -36,6 +37,8 @@ from patchouli_lib.content.schemas import (
     NewPageIdentifier,
     NewPageSource,
     NewRevision,
+    OccurrenceCorrectionResponseBody,
+    PageOccurrenceCorrectionCommand,
     PageRecord,
     PageSourceRecord,
     RevisionRecord,
@@ -73,6 +76,9 @@ RevisionIdFactory = Callable[[], str]
 
 CREATE_ROUTE_TEMPLATE: Final = "/api/v1/sections/{section_id}/books/{book_id}/pages"
 REVISE_ROUTE_TEMPLATE: Final = "/api/v1/sections/{section_id}/pages/{page_id}/revisions"
+CORRECT_OCCURRENCE_ROUTE_TEMPLATE: Final = (
+    "/api/v1/sections/{section_id}/pages/{page_id}/occurrence"
+)
 PAGE_ETAG_DOMAIN: Final = b"patchouli-lib/page-current-etag/v2\x00"
 _LEGACY_PAGE_ETAG_DOMAIN: Final = b"patchouli-lib/page-current-etag/v1\x00"
 
@@ -95,6 +101,11 @@ class ArchivePreconditionRequiredError(RuntimeError):
 class ArchivePreconditionFailedError(RuntimeError):
     def __init__(self) -> None:
         super().__init__("The current archive revision does not match the precondition.")
+
+
+class ArchiveOccurrenceUnchangedError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("The Page already has the requested declared time.")
 
 
 class ArchivePersistenceError(RuntimeError):
@@ -428,6 +439,131 @@ class ArchiveService:
             raise ArchivePersistenceError from None
         return ArchiveMutationSuccess(advanced, revision, source, citation, audit, response)
 
+    def correct_occurrence(
+        self,
+        token_value: str,
+        command: CorrectArchiveOccurrenceCommand,
+        idempotency: ArchiveIdempotencyKey,
+    ) -> OriginalResponse | ReplayResponse:
+        """Correct one live Archive Page's declared time without a new Revision."""
+
+        self._require_transaction()
+        page = self._content.get_page(command.library_id, command.page_id)
+        if page is None or page.page_type != "archive" or page.deleted_at is not None:
+            raise ArchiveNotFoundError
+        operation_at = self._operation_time()
+        authenticated = AuthenticationService(
+            self._auth_repository,
+            clock=lambda: operation_at,
+        ).authorize_content(
+            token_value,
+            library_id=command.library_id,
+            section_id=page.section_id,
+            action=SectionAction.ARCHIVE_WRITE,
+        )
+        caller = TransactionValidatedCaller(
+            library_id=command.library_id,
+            caller_id=authenticated.caller.id,
+        )
+        request = IdempotencyRequest(
+            method="PATCH",
+            route_template=CORRECT_OCCURRENCE_ROUTE_TEMPLATE,
+            key_digest=idempotency.key_digest,
+            request_fingerprint=self._occurrence_fingerprint(command),
+        )
+        replay = self._idempotency.lookup(caller, request)
+        self._require_route_section(page.section_id, command.section_id)
+        if replay is not None:
+            try:
+                OccurrenceCorrectionResponseBody.model_validate_json(replay.response_body)
+            except ValueError:
+                raise ArchiveReplayCorruptError from None
+            return replay
+
+        current_etag = page_current_etag(
+            page.page_uid,
+            page.current_revision_id,
+            page.current_revision_number,
+            page.occurred_at,
+            page.updated_at,
+        )
+        if not hmac.compare_digest(command.expected_etag, current_etag):
+            raise ArchivePreconditionFailedError
+        if command.occurred_at == page.occurred_at:
+            raise ArchiveOccurrenceUnchangedError
+        if page.updated_at >= (1 << 63) - 1:
+            raise ArchivePersistenceError
+
+        try:
+            updated, correction = self._content.correct_occurrence(
+                page,
+                PageOccurrenceCorrectionCommand(
+                    library_id=page.library_id,
+                    page_uid=page.page_uid,
+                    old_occurred_at=page.occurred_at,
+                    new_occurred_at=command.occurred_at,
+                    actor_caller_id=authenticated.caller.id,
+                    corrected_at=operation_at,
+                ),
+            )
+            href = build_api_v1_path(
+                "sections",
+                page.section_id,
+                "pages",
+                page.page_id,
+                "revisions",
+                str(page.current_revision_number),
+            )
+            body = OccurrenceCorrectionResponseBody(
+                section_id=page.section_id,
+                page_id=page.page_id,
+                previous_occurred_at=canonical_utc_wire(page.occurred_at),
+                occurred_at=canonical_utc_wire(updated.occurred_at),
+                current_revision_id=page.current_revision_id,
+                current_revision_number=page.current_revision_number,
+                citation=ArchiveCitation(
+                    section_id=page.section_id,
+                    page_id=page.page_id,
+                    revision_id=page.current_revision_id,
+                    revision_number=page.current_revision_number,
+                    href=href,
+                ),
+            )
+            response = OriginalResponse(
+                response_status=200,
+                response_body=body.model_dump_json().encode("utf-8"),
+                response_location=build_api_v1_path(
+                    "sections", page.section_id, "pages", page.page_id
+                ),
+                response_etag=page_current_etag(
+                    updated.page_uid,
+                    updated.current_revision_id,
+                    updated.current_revision_number,
+                    updated.occurred_at,
+                    updated.updated_at,
+                ),
+                original_request_id=command.request_id,
+                original_request_timestamp=canonical_utc_wire(correction.corrected_at),
+            )
+            self._auth_repository.add_audit_event(
+                NewAuditEvent(
+                    id=self._id_factory(),
+                    library_id=page.library_id,
+                    actor_caller_id=authenticated.caller.id,
+                    actor_credential_id=authenticated.credential.id,
+                    action="content.archive.correct_occurrence",
+                    resource_type="page",
+                    resource_id=page.page_id,
+                    outcome=AuditOutcome.SUCCEEDED,
+                    request_id=command.request_id,
+                    occurred_at=correction.corrected_at,
+                )
+            )
+            self._idempotency.record_success(caller, request, response)
+        except SQLAlchemyError:
+            raise ArchivePersistenceError from None
+        return response
+
     def _require_transaction(self) -> None:
         if not self._connection.in_transaction():
             raise ArchiveTransactionRequiredError
@@ -670,13 +806,33 @@ class ArchiveService:
             command.content_md,
         )
 
+    @staticmethod
+    def _occurrence_fingerprint(command: CorrectArchiveOccurrenceCommand) -> bytes:
+        return digest_request_fingerprint(
+            json.dumps(
+                {
+                    "expected_etag": command.expected_etag,
+                    "library_id": command.library_id,
+                    "operation": "archive-correct-occurrence-v1",
+                    "page_id": command.page_id,
+                    "section_id": command.section_id,
+                    "occurred_at": command.occurred_at,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        )
+
 
 __all__ = [
+    "CORRECT_OCCURRENCE_ROUTE_TEMPLATE",
     "CREATE_ROUTE_TEMPLATE",
     "PAGE_ETAG_DOMAIN",
     "REVISE_ROUTE_TEMPLATE",
     "ArchiveIdentifierExhaustedError",
     "ArchiveNotFoundError",
+    "ArchiveOccurrenceUnchangedError",
     "ArchivePersistenceError",
     "ArchivePreconditionFailedError",
     "ArchivePreconditionRequiredError",

@@ -4,15 +4,21 @@ import json
 from pathlib import Path
 from time import time_ns
 
+import pytest
+from alembic import command
+from alembic.config import Config
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine
+from sqlalchemy import Engine, func, select
 
 from patchouli_lib.app import create_app
+from patchouli_lib.auth.models import AuditEvent
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import CallerKind, NewCaller, NewSectionGrant, SectionAction
 from patchouli_lib.auth.service import CredentialIssuer
 from patchouli_lib.config import Settings
+from patchouli_lib.content.models import Page, PageOccurrenceCorrection, Revision
+from patchouli_lib.content.service import legacy_page_current_etag
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import LibraryStructureSeed
@@ -181,6 +187,10 @@ def test_application_registers_exact_agent_access_routes(tmp_path: Path) -> None
                 "/api/v1/sections/{section_id}/pages/{page_id}/revisions",
                 "POST",
             ),
+            (
+                "/api/v1/sections/{section_id}/pages/{page_id}/occurrence",
+                "PATCH",
+            ),
             ("/api/v1/sections/{section_id}/search", "POST"),
         }
     finally:
@@ -343,3 +353,160 @@ def test_integrated_archive_create_replay_and_revise(tmp_path: Path) -> None:
         assert revision_one.status_code == 200
         assert revision_one.json()["citation"] == created.json()["citation"]
         assert revision_one.json()["revision"]["content"] == ("# Synthetic integrated archive\n")
+
+
+def test_correct_occurrence_preserves_page_revision_and_replays_exact_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+    monkeypatch.setenv("PATCHOULI_DATABASE_URL", settings.database_url)
+    monkeypatch.setenv("PATCHOULI_ENVIRONMENT", "test")
+    command.upgrade(Config(str(Path(__file__).resolve().parents[1] / "alembic.ini")), "head")
+    application = create_app(settings)
+    engine: Engine = application.state.engine
+    section_id, book_id, token = _seed_agent(engine)
+    media, body = _multipart(
+        {
+            "title": "Synthetic Date Correction",
+            "occurred_at": "2026-08-13T05:00:00.123456Z",
+            "source": {"kind": "synthetic"},
+        },
+        b"# Content unchanged\n",
+        boundary="occurrence-create-boundary",
+    )
+    try:
+        with TestClient(application, raise_server_exceptions=False) as client:
+            created = client.post(
+                f"/api/v1/sections/{section_id}/books/{book_id}/pages",
+                headers=_agent_headers(token, "occurrence-create", media),
+                content=body,
+            )
+            assert created.status_code == 201
+            page_id = created.json()["page"]["page_id"]
+            path = f"/api/v1/sections/{section_id}/pages/{page_id}/occurrence"
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Idempotency-Key": "occurrence-update",
+                "If-Match": created.headers["etag"],
+            }
+            requested = {"occurred_at": "2026-08-14T01:00:00.123456+08:00"}
+            changed = client.patch(
+                path,
+                headers={**headers, "Content-Type": "application/json; charset=utf-8"},
+                content=json.dumps(requested).encode("utf-8"),
+            )
+            assert changed.status_code == 200
+            assert changed.headers["etag"].startswith('"page-v2-')
+            assert changed.headers["etag"] != created.headers["etag"]
+            assert changed.headers["location"] == created.headers["location"]
+            assert changed.headers["cache-control"] == "private, no-store"
+            assert changed.json()["previous_occurred_at"] == "2026-08-13T05:00:00.123456Z"
+            assert changed.json()["occurred_at"] == "2026-08-13T17:00:00.123456Z"
+            assert changed.json()["page_id"] == page_id
+            assert changed.json()["current_revision_number"] == 1
+            assert "content" not in changed.json()
+
+            current = client.get(
+                f"/api/v1/sections/{section_id}/pages/{page_id}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert current.status_code == 200
+            assert current.headers["etag"] == changed.headers["etag"]
+            assert current.json()["page"]["occurred_at"] == changed.json()["occurred_at"]
+            assert current.json()["revision"]["content"] == "# Content unchanged\n"
+
+            replay = client.patch(path, headers=headers, json=requested)
+            assert replay.status_code == 200
+            assert replay.headers["idempotency-replayed"] == "true"
+            assert replay.headers["etag"] == changed.headers["etag"]
+            assert replay.json() == changed.json()
+
+            assert (
+                client.patch(
+                    path,
+                    headers=headers,
+                    json={"occurred_at": "2026-08-15T01:00:00Z"},
+                ).json()["code"]
+                == "idempotency_mismatch"
+            )
+            stale = client.patch(
+                path,
+                headers={**headers, "Idempotency-Key": "occurrence-stale"},
+                json={"occurred_at": "2026-08-15T01:00:00Z"},
+            )
+            assert stale.status_code == 412
+            assert stale.json()["code"] == "page_conflict"
+            with engine.connect() as connection:
+                page = connection.execute(select(Page.__table__)).mappings().one()
+                old_etag = legacy_page_current_etag(
+                    page["page_uid"], page["current_revision_id"], 1
+                )
+            assert (
+                client.patch(
+                    path,
+                    headers={
+                        **headers,
+                        "Idempotency-Key": "occurrence-v1",
+                        "If-Match": old_etag,
+                    },
+                    json={"occurred_at": "2026-08-15T01:00:00Z"},
+                ).status_code
+                == 412
+            )
+            assert (
+                client.patch(
+                    path,
+                    headers={
+                        **headers,
+                        "Idempotency-Key": "occurrence-same",
+                        "If-Match": changed.headers["etag"],
+                    },
+                    json={"occurred_at": changed.json()["occurred_at"]},
+                ).status_code
+                == 409
+            )
+            for invalid in ("invalid", "2026-02-30T01:00:00Z", 123):
+                response = client.patch(
+                    path,
+                    headers={**headers, "Idempotency-Key": "occurrence-invalid"},
+                    json={"occurred_at": invalid},
+                )
+                assert response.status_code == 422
+            assert (
+                client.patch(
+                    path, headers={"Authorization": f"Bearer {token}"}, json=requested
+                ).status_code
+                == 422
+            )
+
+            with immediate_transaction(engine) as connection:
+                auth = AuthRepository(connection)
+                page = connection.execute(select(Page.__table__)).mappings().one()
+                assert auth.remove_grant(
+                    page["library_id"], "4" * 32, section_id, SectionAction.ARCHIVE_WRITE
+                )
+            denied_replay = client.patch(path, headers=headers, json=requested)
+            assert denied_replay.status_code == 403
+            with immediate_transaction(engine) as connection:
+                auth = AuthRepository(connection)
+                credential = auth.get_credential(page["library_id"], "4" * 32, "5" * 32)
+                assert credential is not None
+                auth.revoke_credential(credential, revoked_at=time_ns() // 1_000)
+            assert client.patch(path, headers=headers, json=requested).status_code == 401
+
+        with engine.connect() as connection:
+            assert connection.scalar(select(func.count()).select_from(Revision)) == 1
+            assert (
+                connection.scalar(select(func.count()).select_from(PageOccurrenceCorrection)) == 1
+            )
+            assert (
+                connection.scalar(
+                    select(func.count())
+                    .select_from(AuditEvent)
+                    .where(AuditEvent.action == "content.archive.correct_occurrence")
+                )
+                == 1
+            )
+    finally:
+        engine.dispose()

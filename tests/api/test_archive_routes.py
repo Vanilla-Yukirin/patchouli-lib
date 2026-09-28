@@ -392,6 +392,10 @@ def test_router_inventory_is_exact() -> None:
             "/api/v1/sections/{section_id}/pages/{page_id}/revisions",
             {"POST"},
         ),
+        (
+            "/api/v1/sections/{section_id}/pages/{page_id}/occurrence",
+            {"PATCH"},
+        ),
     ]
 
 

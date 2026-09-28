@@ -459,6 +459,22 @@ class AppendArchiveRevisionCommand(ContentSchema):
         return value
 
 
+class CorrectArchiveOccurrenceCommand(ContentSchema):
+    """Authorized metadata correction without creating a content Revision."""
+
+    library_id: OpaqueId
+    section_id: OpaqueId
+    page_id: PageId
+    expected_etag: StrongPageETag
+    occurred_at: OccurrenceMicros
+    request_id: RequestId
+
+    @field_validator("page_id")
+    @classmethod
+    def require_page_id(cls, value: str) -> str:
+        return validate_page_id(value)
+
+
 class ArchiveIdempotencyKey(ContentSchema):
     """Already-digested key material safe to cross the domain boundary."""
 
@@ -537,6 +553,39 @@ class ArchiveResponseBody(ContentSchema):
         return self
 
 
+class OccurrenceCorrectionResponseBody(ContentSchema):
+    """Current identity and citation only; a write grant does not imply Page read."""
+
+    section_id: OpaqueId
+    page_id: PageId
+    previous_occurred_at: str
+    occurred_at: str
+    current_revision_id: RevisionId
+    current_revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+    citation: ArchiveCitation
+
+    @field_validator("previous_occurred_at", "occurred_at")
+    @classmethod
+    def require_canonical_occurrence(cls, value: str) -> str:
+        from patchouli_lib.identifiers import parse_occurrence_time
+
+        if parse_occurrence_time(value).canonical_utc != value:
+            raise ValueError("Occurrence timestamp must be canonical UTC text.")
+        return value
+
+    @model_validator(mode="after")
+    def require_consistent_citation(self) -> Self:
+        if (
+            self.previous_occurred_at == self.occurred_at
+            or self.citation.section_id != self.section_id
+            or self.citation.page_id != self.page_id
+            or self.citation.revision_id != self.current_revision_id
+            or self.citation.revision_number != self.current_revision_number
+        ):
+            raise ValueError("Occurrence correction response identity is inconsistent.")
+        return self
+
+
 @dataclass(frozen=True, slots=True, repr=False, eq=False)
 class ArchiveMutationSuccess:
     page: PageRecord
@@ -576,6 +625,7 @@ __all__ = [
     "ArchiveResponseBody",
     "ArchiveRevisionView",
     "ArchiveSourceInput",
+    "CorrectArchiveOccurrenceCommand",
     "CreateArchiveCommand",
     "MarkdownContent",
     "NewPage",
@@ -583,6 +633,7 @@ __all__ = [
     "NewPageIdentifier",
     "NewPageSource",
     "NewRevision",
+    "OccurrenceCorrectionResponseBody",
     "PageIdCollisionCounterRecord",
     "PageIdentifierRecord",
     "PageOccurrenceCorrectionCommand",

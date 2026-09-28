@@ -43,10 +43,12 @@ from patchouli_lib.content import (
     ArchiveMutationReplay,
     ArchiveMutationResult,
     ArchiveNotFoundError,
+    ArchiveOccurrenceUnchangedError,
     ArchivePreconditionFailedError,
     ArchivePreconditionRequiredError,
     ArchiveService,
     ArchiveSourceInput,
+    CorrectArchiveOccurrenceCommand,
     CreateArchiveCommand,
 )
 from patchouli_lib.content.models import MAX_MARKDOWN_BYTES
@@ -54,6 +56,7 @@ from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import StrongPageETag
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.idempotency import IdempotencyConflictError, digest_idempotency_key
+from patchouli_lib.idempotency.schemas import OriginalResponse, ReplayResponse
 from patchouli_lib.identifiers import parse_occurrence_time
 from patchouli_lib.library.schemas import OpaqueId
 
@@ -62,6 +65,7 @@ if TYPE_CHECKING:
 
 MAX_ARCHIVE_METADATA_BYTES: Final = 64 * 1024
 MAX_ARCHIVE_MULTIPART_BYTES: Final = MAX_MARKDOWN_BYTES + 128 * 1024
+MAX_OCCURRENCE_JSON_BYTES: Final = 1_024
 
 _CONTENT_DISPOSITION = b"content-disposition"
 _CONTENT_LENGTH = b"content-length"
@@ -137,12 +141,30 @@ def _revision_conflict_problem() -> ApplicationProblem:
     )
 
 
+def _occurrence_conflict_problem() -> ApplicationProblem:
+    return ApplicationProblem(
+        status_code=412,
+        code="page_conflict",
+        title="Precondition failed",
+        detail="The Page changed since the supplied ETag.",
+    )
+
+
 def _idempotency_conflict_problem() -> ApplicationProblem:
     return ApplicationProblem(
         status_code=409,
         code="idempotency_mismatch",
         title="Idempotency conflict",
         detail="The idempotency key was already used for a different request.",
+    )
+
+
+def _occurrence_unchanged_problem() -> ApplicationProblem:
+    return ApplicationProblem(
+        status_code=409,
+        code="occurrence_unchanged",
+        title="Declared time unchanged",
+        detail="The Page already has the requested declared time.",
     )
 
 
@@ -527,6 +549,58 @@ def _revision_command(
         raise _validation_problem() from None
 
 
+async def _occurrence_value(request: Request) -> int:
+    values = _raw_header_values(request, _CONTENT_TYPE)
+    if len(values) != 1:
+        raise _unsupported_media_type_problem()
+    try:
+        _require_unique_mime_parameters(values[0])
+        media_type, parameters = parse_options_header(values[0])
+    except (AssertionError, UnicodeError, ValueError):
+        raise _unsupported_media_type_problem() from None
+    normalized = {key.lower(): value.lower() for key, value in parameters.items()}
+    if (
+        media_type != b"application/json"
+        or len(normalized) != len(parameters)
+        or normalized not in ({}, {b"charset": b"utf-8"})
+    ):
+        raise _unsupported_media_type_problem()
+    chunks = bytearray()
+    async for chunk in request.stream():
+        if len(chunks) + len(chunk) > MAX_OCCURRENCE_JSON_BYTES:
+            raise _payload_too_large_problem()
+        chunks.extend(chunk)
+    metadata = _metadata_object(bytes(chunks))
+    if set(metadata) != {"occurred_at"}:
+        raise _validation_problem()
+    try:
+        return parse_occurrence_time(metadata["occurred_at"]).utc_microseconds
+    except (ValueError, TypeError):
+        raise _validation_problem() from None
+
+
+def _occurrence_command(
+    *,
+    context: AuthenticatedRequestContext,
+    section_id: str,
+    page_id: str,
+    expected_etag: str,
+    occurred_at: int,
+    request_id: str,
+) -> CorrectArchiveOccurrenceCommand:
+    try:
+        return CorrectArchiveOccurrenceCommand(
+            library_id=context.authenticated.caller.library_id,
+            section_id=section_id,
+            page_id=page_id,
+            expected_etag=expected_etag,
+            occurred_at=occurred_at,
+            request_id=request_id,
+        )
+    except (ValidationError, ValueError, TypeError):
+        raise _validation_problem() from None
+
+
 def _require_archive_access(
     context: AuthenticatedRequestContext,
     section_id: str,
@@ -599,6 +673,45 @@ def _perform_mutation(
         raise _idempotency_conflict_problem() from None
 
 
+def _perform_occurrence_correction(
+    engine: Engine,
+    service_factory: ArchiveServiceFactory,
+    token: str,
+    command: CorrectArchiveOccurrenceCommand,
+    idempotency: ArchiveIdempotencyKey,
+    clock: Clock,
+) -> OriginalResponse | ReplayResponse:
+    try:
+        with immediate_transaction(engine) as connection:
+            AuthenticationService(AuthRepository(connection), clock=clock).authorize_content(
+                token,
+                library_id=command.library_id,
+                section_id=command.section_id,
+                action=SectionAction.ARCHIVE_WRITE,
+            )
+            page = ContentRepository(connection).get_page(command.library_id, command.page_id)
+            if (
+                page is None
+                or page.page_type != "archive"
+                or page.deleted_at is not None
+                or page.section_id != command.section_id
+            ):
+                raise ArchiveNotFoundError
+            return service_factory(connection).correct_occurrence(token, command, idempotency)
+    except AuthenticationError:
+        raise invalid_token() from None
+    except AuthorizationError:
+        raise insufficient_scope() from None
+    except ArchiveNotFoundError:
+        raise resource_not_found() from None
+    except ArchivePreconditionFailedError:
+        raise _occurrence_conflict_problem() from None
+    except ArchiveOccurrenceUnchangedError:
+        raise _occurrence_unchanged_problem() from None
+    except IdempotencyConflictError:
+        raise _idempotency_conflict_problem() from None
+
+
 async def _authenticate(
     authenticate: BearerAuthentication,
     request: Request,
@@ -658,13 +771,34 @@ def _success_response(request: Request, result: ArchiveMutationResult) -> Respon
     )
 
 
+def _occurrence_success_response(
+    request: Request, stored: OriginalResponse | ReplayResponse
+) -> Response:
+    if stored.response_status != 200 or stored.response_location is None:
+        raise RuntimeError("Occurrence correction returned an invalid success response.")
+    headers = {
+        "Location": stored.response_location,
+        "ETag": stored.response_etag,
+        REQUEST_ID_HEADER: get_request_id(request),
+        "Cache-Control": PROTECTED_CACHE_CONTROL,
+    }
+    if isinstance(stored, ReplayResponse):
+        headers["Idempotency-Replayed"] = "true"
+    return Response(
+        content=stored.response_body,
+        status_code=200,
+        media_type=stored.response_media_type,
+        headers=headers,
+    )
+
+
 def create_archive_router(
     engine: Engine,
     *,
     clock: Clock = utc_microseconds,
     service_factory: ArchiveServiceFactory | None = None,
 ) -> APIRouter:
-    """Create the two protected Archive mutation routes for an application Engine."""
+    """Create protected Archive mutation routes for an application Engine."""
 
     router = APIRouter(prefix=API_V1_PREFIX)
     authenticate = BearerAuthentication(engine, clock=clock)
@@ -735,6 +869,41 @@ def create_archive_router(
             clock=clock,
         )
         return _success_response(request, result)
+
+    @router.patch("/sections/{section_id}/pages/{page_id}/occurrence", status_code=200)
+    async def correct_occurrence(
+        section_id: str,
+        page_id: str,
+        request: Request,
+    ) -> Response:
+        validated_section_id = _validate_route_id(section_id)
+        idempotency = _idempotency_key(request)
+        expected_etag = _revision_precondition(request)
+        occurred_at = await _occurrence_value(request)
+        context = await _authenticate(authenticate, request)
+        _require_archive_access(context, validated_section_id)
+        command = _occurrence_command(
+            context=context,
+            section_id=validated_section_id,
+            page_id=page_id,
+            expected_etag=expected_etag,
+            occurred_at=occurred_at,
+            request_id=get_request_id(request),
+        )
+        token = extract_bearer_token(request)
+        stored = await anyio.to_thread.run_sync(
+            partial(
+                _perform_occurrence_correction,
+                engine,
+                resolved_service_factory,
+                token,
+                command,
+                idempotency,
+                clock,
+            ),
+            abandon_on_cancel=False,
+        )
+        return _occurrence_success_response(request, stored)
 
     return router
 

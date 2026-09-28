@@ -1,7 +1,7 @@
 # Page 版本、历史与恢复
 
 > 当前实现只支持单份 Markdown 正文的 Revision。维护者提出的多文件完整快照、
-> 相同内容不新增 Revision、声明时间校正的公开接口和回收站界面见
+> 相同内容不新增 Revision、声明时间缺省和回收站界面见
 > [下一阶段提案](proposals/next-phase-product-and-api.md)；其中仅软删除方向已在
 > 本文接受，不能把未来接口当作已上线。
 
@@ -55,8 +55,24 @@ API 应支持可选的预期当前值，例如 Revision 编号或实体标签。
 本开发分支的当前 Page 强 ETag 为 `page-v2`，同时绑定 Page 身份、当前 Revision、
 声明发生时间及严格递增的服务器更新时间。新修订必须使用最新 ETag；历史 `page-v1`
 格式的 `If-Match` 在新请求中返回 412，调用方应重新读取 Page 后重试。已经成功保存的
-旧幂等请求仍重放原响应，旧备份也仍按原算法校验。这个并发基础不等于已经提供声明
-时间校正的公开接口，更不表示分支已经合并或部署。
+旧幂等请求仍重放原响应，旧备份也仍按原算法校验。本开发分支另外实现了声明时间
+校正接口；这些改动尚未合并或部署。
+
+## 声明时间校正（本开发分支）
+
+`PATCH /api/v1/sections/{section_id}/pages/{page_id}/occurrence` 仅处理现存、未删除的
+Archive Page。请求须携带本 Section 的 `archive:write` bearer 凭据、`Idempotency-Key`、
+当前 `page-v2` `If-Match`，正文为 `application/json`：
+
+```json
+{"occurred_at":"2026-08-13T10:00:00.123456Z"}
+```
+
+时间按 RFC 3339 解析并以 UTC 规范形式保存。成功返回 200、新 ETag、Page 的稳定 ID、
+校正前后的时间及当前 Revision 引用；不会创建新的 Revision，也不会返回正文。相同
+幂等请求重放原响应；旧 ETag 或并发修改返回 412；时间与当前值完全相同则返回 409；
+错误格式返回 422。数据库同时记录不可变校正链和审计，备份校验会核对该校正与
+幂等响应。创建 Page 时缺省声明时间的代填尚未实现。
 
 ## 移动内容
 

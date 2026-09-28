@@ -25,8 +25,9 @@ from patchouli_lib.content.file_manifest import (
     MAX_PAGE_BYTES,
     build_file_manifest,
 )
-from patchouli_lib.content.schemas import ArchiveResponseBody
+from patchouli_lib.content.schemas import ArchiveResponseBody, OccurrenceCorrectionResponseBody
 from patchouli_lib.content.service import (
+    CORRECT_OCCURRENCE_ROUTE_TEMPLATE,
     CREATE_ROUTE_TEMPLATE,
     REVISE_ROUTE_TEMPLATE,
     legacy_page_current_etag,
@@ -36,6 +37,7 @@ from patchouli_lib.identifiers import (
     canonical_utc_wire,
     page_id_registry_digest,
     page_id_timestamp_prefix,
+    parse_occurrence_time,
     validate_page_id,
 )
 from patchouli_lib.tags.repository import normalize_tag_name
@@ -576,6 +578,11 @@ def _require_occurrence_graph(
         for expected_sequence, (sequence, old, new, at_revision, _actor, corrected_at) in enumerate(
             chain, start=1
         ):
+            next_revision_time = (
+                revision_created.get((*key, at_revision + 1))
+                if at_revision < current_revision
+                else None
+            )
             if (
                 sequence != expected_sequence
                 or old != value
@@ -585,6 +592,10 @@ def _require_occurrence_graph(
                 or corrected_at < created_at
                 or type(revision_created.get((*key, at_revision))) is not int
                 or corrected_at < revision_created[(*key, at_revision)]
+                or (
+                    at_revision < current_revision
+                    and (type(next_revision_time) is not int or corrected_at >= next_revision_time)
+                )
                 or corrected_at > updated_at
             ):
                 raise BackupDatabaseError
@@ -790,6 +801,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
 
     for (
         library_id,
+        caller_id,
         method,
         route,
         status,
@@ -797,20 +809,26 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
         body_bytes,
         location,
         etag,
+        original_request_id,
+        original_request_timestamp,
     ) in connection.execute(
-        "SELECT library_id, method, route_template, response_status, "
-        "response_media_type, response_body, response_location, response_etag "
+        "SELECT library_id, caller_id, method, route_template, response_status, "
+        "response_media_type, response_body, response_location, response_etag, "
+        "original_request_id, original_request_timestamp "
         "FROM idempotency_records"
     ):
         if (
             not isinstance(library_id, str)
-            or method != "POST"
+            or not isinstance(caller_id, str)
+            or method not in {"POST", "PATCH"}
             or not isinstance(route, str)
-            or status != 201
+            or status not in {200, 201}
             or media_type != "application/json"
             or type(body_bytes) is not bytes
             or (location is not None and not isinstance(location, str))
             or not isinstance(etag, str)
+            or not isinstance(original_request_id, str)
+            or not isinstance(original_request_timestamp, str)
         ):
             raise BackupDatabaseError
         try:
@@ -822,8 +840,102 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
             )
             if not isinstance(parsed, dict):
                 raise ValueError
-            body = ArchiveResponseBody.model_validate(parsed)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            raise BackupDatabaseError from None
+
+        if method == "PATCH":
+            if (
+                schema_revision != SUPPORTED_SCHEMA_REVISION
+                or route != CORRECT_OCCURRENCE_ROUTE_TEMPLATE
+                or status != 200
+            ):
+                raise BackupDatabaseError
+            try:
+                correction_body = OccurrenceCorrectionResponseBody.model_validate(parsed)
+                correction_time = parse_occurrence_time(original_request_timestamp)
+            except ValueError:
+                raise BackupDatabaseError from None
+            matching = connection.execute(
+                "SELECT p.page_uid, p.page_type, c.old_occurred_at, "
+                "c.new_occurred_at, c.at_revision_number, c.actor_caller_id, "
+                "c.corrected_at, r.revision_id FROM pages AS p "
+                "JOIN page_occurrence_corrections AS c ON c.library_id = p.library_id "
+                "AND c.page_uid = p.page_uid "
+                "JOIN revisions AS r ON r.library_id = p.library_id "
+                "AND r.page_uid = p.page_uid AND r.revision_number = c.at_revision_number "
+                "WHERE p.library_id = ? AND p.section_id = ? AND p.page_id = ? "
+                "AND c.corrected_at = ? LIMIT 2",
+                (
+                    library_id,
+                    correction_body.section_id,
+                    correction_body.page_id,
+                    correction_time.utc_microseconds,
+                ),
+            ).fetchall()
+            if len(matching) != 1:
+                raise BackupDatabaseError
+            (
+                page_uid,
+                page_type,
+                old_occurrence,
+                new_occurrence,
+                at_revision,
+                actor,
+                corrected_at,
+                revision_id,
+            ) = matching[0]
+            expected_citation = (
+                f"/api/v1/sections/{correction_body.section_id}/pages/"
+                f"{correction_body.page_id}/revisions/{at_revision}"
+            )
+            expected_location = (
+                f"/api/v1/sections/{correction_body.section_id}/pages/{correction_body.page_id}"
+            )
+            if (
+                type(page_uid) is not bytes
+                or page_type != "archive"
+                or type(old_occurrence) is not int
+                or type(new_occurrence) is not int
+                or type(at_revision) is not int
+                or actor != caller_id
+                or type(corrected_at) is not int
+                or not isinstance(revision_id, str)
+                or correction_body.previous_occurred_at != canonical_utc_wire(old_occurrence)
+                or correction_body.occurred_at != canonical_utc_wire(new_occurrence)
+                or correction_body.current_revision_id != revision_id
+                or correction_body.current_revision_number != at_revision
+                or correction_body.citation.href != expected_citation
+                or location != expected_location
+                or original_request_timestamp != canonical_utc_wire(corrected_at)
+                or etag
+                != page_current_etag(
+                    page_uid, revision_id, at_revision, new_occurrence, corrected_at
+                )
+            ):
+                raise BackupDatabaseError
+            audit = connection.execute(
+                "SELECT count(*) FROM auth_audit_events "
+                "WHERE library_id = ? AND actor_caller_id = ? "
+                "AND action = 'content.archive.correct_occurrence' "
+                "AND resource_type = 'page' AND resource_id = ? "
+                "AND outcome = 'succeeded' AND request_id = ? AND occurred_at = ?",
+                (
+                    library_id,
+                    caller_id,
+                    correction_body.page_id,
+                    original_request_id,
+                    corrected_at,
+                ),
+            ).fetchone()
+            if audit is None or audit[0] != 1:
+                raise BackupDatabaseError
+            continue
+
+        if status != 201 or route not in {CREATE_ROUTE_TEMPLATE, REVISE_ROUTE_TEMPLATE}:
+            raise BackupDatabaseError
+        try:
+            body = ArchiveResponseBody.model_validate(parsed)
+        except ValueError:
             raise BackupDatabaseError from None
 
         row = connection.execute(
