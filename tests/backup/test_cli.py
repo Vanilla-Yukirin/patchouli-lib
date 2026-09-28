@@ -19,6 +19,9 @@ from patchouli_lib.backup import (
     validate_database,
     verify_backup_bundle,
 )
+from patchouli_lib.backup.manifest import LEGACY_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION
+
+from .test_service import _legacy_bundle_with_binary_file
 
 APP_VERSION = "0.1.0a0"
 IDENTITY = BackupArtifactIdentity(
@@ -115,7 +118,7 @@ def test_create_reads_database_url_only_from_environment_and_emits_safe_json(
         "artifact_digest": IDENTITY.digest,
         "byte_size": metadata["byte_size"],
         "operation": "create",
-        "schema_revision": "20260929_0007",
+        "schema_revision": "20260929_0008",
         "sha256": metadata["sha256"],
         "state": "created",
     }
@@ -198,13 +201,124 @@ def test_restore_creates_only_a_new_inactive_destination(
     assert destination.read_bytes() == original
 
 
+def test_legacy_verify_and_restore_require_explicit_exact_revision(
+    complete_engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = tmp_path / "legacy-bundle"
+    _legacy_bundle_with_binary_file(complete_engine, bundle, monkeypatch)
+    before = {item.name: item.read_bytes() for item in bundle.iterdir()}
+    destination = tmp_path / "legacy-restored.sqlite"
+
+    for arguments in (
+        ["verify", "--bundle", str(bundle)],
+        ["restore", "--bundle", str(bundle), "--destination", str(destination)],
+    ):
+        code, output, error = _run(arguments)
+        assert code == backup_cli.ExitCode.VALIDATION_FAILED
+        assert output == ""
+        assert error == "Backup artifact validation failed.\n"
+    assert not destination.exists()
+
+    verify_code, verify_output, verify_error = _run(
+        [
+            "verify",
+            "--bundle",
+            str(bundle),
+            "--schema-revision",
+            LEGACY_SCHEMA_REVISION,
+            "--format",
+            "json",
+        ]
+    )
+    assert verify_code == backup_cli.ExitCode.SUCCESS
+    assert verify_error == ""
+    assert json.loads(verify_output)["schema_revision"] == LEGACY_SCHEMA_REVISION
+    assert {item.name: item.read_bytes() for item in bundle.iterdir()} == before
+
+    restore_code, restore_output, restore_error = _run(
+        [
+            "restore",
+            "--bundle",
+            str(bundle),
+            "--destination",
+            str(destination),
+            "--schema-revision",
+            LEGACY_SCHEMA_REVISION,
+            "--format",
+            "json",
+        ]
+    )
+    assert restore_code == backup_cli.ExitCode.SUCCESS
+    assert restore_error == ""
+    assert json.loads(restore_output)["schema_revision"] == LEGACY_SCHEMA_REVISION
+    assert validate_database(
+        destination, schema_revision=LEGACY_SCHEMA_REVISION
+    ).schema_revision == (LEGACY_SCHEMA_REVISION)
+    assert destination.read_bytes() == (bundle / "database.sqlite").read_bytes()
+
+
+@pytest.mark.parametrize("command", ["verify", "restore"])
+def test_wrong_explicit_revision_cannot_validate_current_bundle(
+    complete_engine: Engine,
+    tmp_path: Path,
+    command: str,
+) -> None:
+    bundle = tmp_path / f"wrong-schema-{command}"
+    _create_bundle(complete_engine, bundle)
+    destination = tmp_path / "wrong-schema-restored.sqlite"
+    arguments = [
+        command,
+        "--bundle",
+        str(bundle),
+        "--schema-revision",
+        LEGACY_SCHEMA_REVISION,
+    ]
+    if command == "restore":
+        arguments.extend(("--destination", str(destination)))
+
+    code, output, error = _run(arguments)
+
+    assert code == backup_cli.ExitCode.VALIDATION_FAILED
+    assert output == ""
+    assert error == "Backup artifact validation failed.\n"
+    assert not destination.exists()
+
+
+def test_explicit_current_revision_matches_default(
+    complete_engine: Engine,
+    tmp_path: Path,
+) -> None:
+    bundle = tmp_path / "current-schema"
+    _create_bundle(complete_engine, bundle)
+    code, output, error = _run(
+        ["verify", "--bundle", str(bundle), "--schema-revision", SUPPORTED_SCHEMA_REVISION]
+    )
+    assert code == backup_cli.ExitCode.SUCCESS
+    assert error == ""
+    assert f"schema_revision={SUPPORTED_SCHEMA_REVISION}\n" in output
+
+
 @pytest.mark.parametrize(
     "arguments",
     [
         [],
         ["create", "--database-url", "sqlite:///argv-secret.sqlite"],
+        ["create", "--schema-revision", "20260929_0007"],
         ["verify", "--bundle", "relative-bundle", "extra-private-value"],
+        ["verify", "--bundle", "relative-bundle", "--schema-revision", "forged"],
+        ["verify", "--bundle", "relative-bundle", "--schema-revision"],
         ["restore", "--bundle", "relative", "--destination"],
+        [
+            "restore",
+            "--bundle",
+            "relative-bundle",
+            "--destination",
+            "relative.sqlite",
+            "--schema-revision",
+            "20260813_0006",
+        ],
         [
             "create",
             "--bundle",
@@ -386,7 +500,7 @@ def test_restore_output_failure_preserves_inactive_verifiable_destination(
     assert stderr == "Backup command output failed.\n"
     assert destination.is_file()
     report = validate_database(destination)
-    assert report.schema_revision == "20260929_0007"
+    assert report.schema_revision == "20260929_0008"
     assert destination.read_bytes() == (bundle / "database.sqlite").read_bytes()
 
 
@@ -476,7 +590,13 @@ def test_help_does_not_read_runtime_configuration_and_handles_output_failure(
     assert exit_code == backup_cli.ExitCode.SUCCESS
     assert "restore" in stdout
     assert "--destination" in stdout
+    assert "--schema-revision" in stdout
     assert stderr == ""
+
+    create_code, create_stdout, create_stderr = _run(["create", "--help"])
+    assert create_code == backup_cli.ExitCode.SUCCESS
+    assert create_stderr == ""
+    assert "--schema-revision" not in create_stdout
 
     broken = _BrokenOutput("short")
     broken_code, broken_stdout, broken_stderr = _run(["--help"], stdout=broken)

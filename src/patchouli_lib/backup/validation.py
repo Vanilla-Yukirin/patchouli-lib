@@ -12,7 +12,7 @@ from typing import Final
 from urllib.parse import quote
 
 from patchouli_lib.backup.errors import BackupDatabaseError
-from patchouli_lib.backup.manifest import SUPPORTED_SCHEMA_REVISION
+from patchouli_lib.backup.manifest import LEGACY_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION
 from patchouli_lib.content.file_manifest import (
     MAX_FILE_BYTES,
     MAX_FILES_PER_PAGE,
@@ -32,10 +32,10 @@ from patchouli_lib.identifiers import (
     validate_page_id,
 )
 
-# Hashes cover every non-internal SQLite schema object at the accepted migration
-# head. SQLite-managed objects whose names start with ``sqlite_`` are the only
+# Hashes cover every non-internal SQLite schema object at each accepted migration
+# revision. SQLite-managed objects whose names start with ``sqlite_`` are the only
 # exemption. An Alembic row or object name alone is therefore insufficient.
-_EXPECTED_SQL_HASHES: Final = {
+_EXPECTED_SQL_HASHES_0007: Final = {
     ("index", "ix_auth_audit_events_library_request_id"): (
         "4d13d9f0a447ee626d5796d1834202e6a65130e065dc3d9256e553dff4fe017a"
     ),
@@ -150,6 +150,46 @@ _EXPECTED_SQL_HASHES: Final = {
     ),
 }
 
+# Generated from an actual empty SQLite database upgraded through 0008 with
+# Alembic, then canonicalized with _canonical_schema_sql. The 0007 objects
+# above remain byte-for-byte unchanged; only these ten objects are added.
+_EXPECTED_SQL_HASHES_0008: Final = _EXPECTED_SQL_HASHES_0007 | {
+    ("table", "revision_file_seals"): (
+        "25c4b6e2930561429daa1c2cdce686aeb987cc5710e5d875960bc0f1eb774e2d"
+    ),
+    ("table", "revision_file_seal_guards"): (
+        "923bdcf0a1c3d07966ee3a631d94ccc7db34fdde0958a322426230c4e4f34d9e"
+    ),
+    ("trigger", "trg_revision_file_seals_validate_insert"): (
+        "4749500316a3010c354da4c83ed9a0693685092481b23538380f52cca570464a"
+    ),
+    ("trigger", "trg_revision_file_seals_no_update"): (
+        "732cc0643229d14f61e3cb573403dc3208aea7fca935f1169168b676033a8f52"
+    ),
+    ("trigger", "trg_revision_file_seals_no_delete"): (
+        "5485845f55601107699db8b2ab00ae9c9c71c763008550b2604ccf669ad62538"
+    ),
+    ("trigger", "trg_revision_file_seal_guards_no_update"): (
+        "37b99dd027e112513f9806dbdf54c118c302b7693cb94de751e8bd94c8fd454a"
+    ),
+    ("trigger", "trg_revision_file_seal_guards_no_delete"): (
+        "7c72e48c1258277b71357b1a615ac558194facfced33167e0928c95944cb7de9"
+    ),
+    ("trigger", "trg_revision_files_legacy_sealed_insert"): (
+        "3ec94f52dabb94e8ec1ad31ea8f0a850daf1a2542b30258b4a7781aeba2a8f96"
+    ),
+    ("trigger", "trg_revision_files_auto_seal_legacy"): (
+        "d7eddfe3b7e20c59a8bf6411f434e9fbb2227de49b5c8367f2354168f827781b"
+    ),
+    ("trigger", "trg_revisions_require_file_seal"): (
+        "26b7f8a0e5db0b36352cc083979cb9b7eefa61a4eab1ba3de3e4aace92cadf9d"
+    ),
+}
+_EXPECTED_SQL_HASHES_BY_REVISION: Final = {
+    LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
+    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
+}
+
 
 @dataclass(frozen=True, slots=True)
 class DatabaseValidationReport:
@@ -218,7 +258,9 @@ def _canonical_schema_sql(object_type: str, sql: str) -> str:
     return f"{prefix} ({', '.join((*columns, *constraints))})"
 
 
-def _require_schema(connection: sqlite3.Connection) -> str:
+def _require_schema(connection: sqlite3.Connection, schema_revision: str) -> str:
+    if type(schema_revision) is not str or schema_revision not in _EXPECTED_SQL_HASHES_BY_REVISION:
+        raise BackupDatabaseError
     rows = connection.execute(
         "SELECT type, name, sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'"
     )
@@ -228,13 +270,13 @@ def _require_schema(connection: sqlite3.Connection) -> str:
             raise BackupDatabaseError
         normalized = _canonical_schema_sql(object_type, sql)
         observed[(object_type, name)] = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-    if observed != _EXPECTED_SQL_HASHES:
+    if observed != _EXPECTED_SQL_HASHES_BY_REVISION[schema_revision]:
         raise BackupDatabaseError
 
     revisions = connection.execute("SELECT version_num FROM alembic_version").fetchall()
-    if revisions != [(SUPPORTED_SCHEMA_REVISION,)]:
+    if revisions != [(schema_revision,)]:
         raise BackupDatabaseError
-    return SUPPORTED_SCHEMA_REVISION
+    return schema_revision
 
 
 def _require_sqlite_integrity(connection: sqlite3.Connection) -> None:
@@ -244,7 +286,7 @@ def _require_sqlite_integrity(connection: sqlite3.Connection) -> None:
         raise BackupDatabaseError
 
 
-def _require_page_graph(connection: sqlite3.Connection) -> None:
+def _require_page_graph(connection: sqlite3.Connection, schema_revision: str) -> None:
     if _one_integer(connection, "SELECT count(*) FROM page_revision_append_guards") != 0:
         raise BackupDatabaseError
 
@@ -298,7 +340,9 @@ def _require_page_graph(connection: sqlite3.Connection) -> None:
     if missing_sources:
         raise BackupDatabaseError
 
-    _require_revision_files(connection)
+    _require_revision_files(connection, schema_revision)
+    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+        _require_revision_seals(connection)
 
     identifiers_by_page: dict[tuple[str, bytes], list[tuple[str, str]]] = {}
     for library_id, digest, text, kind, page_uid in connection.execute(
@@ -386,8 +430,8 @@ def _require_page_graph(connection: sqlite3.Connection) -> None:
         raise BackupDatabaseError
 
 
-def _require_revision_files(connection: sqlite3.Connection) -> None:
-    """Check recorded file rows against their owning legacy Revision."""
+def _require_revision_files(connection: sqlite3.Connection, schema_revision: str) -> None:
+    """Check file bytes and the revision-specific legacy file-set policy."""
 
     revisions = connection.execute(
         "SELECT library_id, page_uid, revision_id, revision_number, "
@@ -448,10 +492,40 @@ def _require_revision_files(connection: sqlite3.Connection) -> None:
             files.append((name, content))
         if not found_markdown:
             raise BackupDatabaseError
+        if schema_revision == SUPPORTED_SCHEMA_REVISION and (
+            len(files) != 1 or files[0][0] != "content.md"
+        ):
+            raise BackupDatabaseError
         try:
             build_file_manifest(files)
         except (TypeError, ValueError, OverflowError, UnicodeError):
             raise BackupDatabaseError from None
+
+
+def _require_revision_seals(connection: sqlite3.Connection) -> None:
+    """Every 0008 Revision must have precisely its exact seal and guard."""
+
+    missing = _one_integer(
+        connection,
+        "SELECT count(*) FROM revisions AS r WHERE NOT EXISTS ("
+        "SELECT 1 FROM revision_file_seals AS s WHERE s.library_id = r.library_id "
+        "AND s.page_uid = r.page_uid AND s.revision_id = r.revision_id "
+        "AND s.revision_number = r.revision_number) OR NOT EXISTS ("
+        "SELECT 1 FROM revision_file_seal_guards AS g WHERE g.library_id = r.library_id "
+        "AND g.page_uid = r.page_uid AND g.revision_id = r.revision_id "
+        "AND g.revision_number = r.revision_number)",
+    )
+    if missing:
+        raise BackupDatabaseError
+    # The exact composite foreign keys catch orphan markers; these counts also
+    # fail closed if SQLite FK enforcement was bypassed before backup creation.
+    revision_count = _one_integer(connection, "SELECT count(*) FROM revisions")
+    if (
+        _one_integer(connection, "SELECT count(*) FROM revision_file_seals") != revision_count
+        or _one_integer(connection, "SELECT count(*) FROM revision_file_seal_guards")
+        != revision_count
+    ):
+        raise BackupDatabaseError
 
 
 def _require_auth_graph(connection: sqlite3.Connection) -> None:
@@ -642,10 +716,12 @@ def _require_idempotency_graph(connection: sqlite3.Connection) -> None:
             raise BackupDatabaseError
 
 
-def _validate_connection(connection: sqlite3.Connection) -> DatabaseValidationReport:
+def _validate_connection(
+    connection: sqlite3.Connection, schema_revision: str
+) -> DatabaseValidationReport:
     connection.execute("PRAGMA query_only = ON")
     _require_sqlite_integrity(connection)
-    schema_revision = _require_schema(connection)
+    schema_revision = _require_schema(connection, schema_revision)
     sqlite_version_row = connection.execute("SELECT sqlite_version()").fetchone()
     journal_row = connection.execute("PRAGMA journal_mode").fetchone()
     if (
@@ -655,7 +731,7 @@ def _validate_connection(connection: sqlite3.Connection) -> DatabaseValidationRe
         or not isinstance(journal_row[0], str)
     ):
         raise BackupDatabaseError
-    _require_page_graph(connection)
+    _require_page_graph(connection, schema_revision)
     _require_auth_graph(connection)
     _require_idempotency_graph(connection)
     return DatabaseValidationReport(
@@ -665,7 +741,9 @@ def _validate_connection(connection: sqlite3.Connection) -> DatabaseValidationRe
     )
 
 
-def validate_database(path: Path) -> DatabaseValidationReport:
+def validate_database(
+    path: Path, *, schema_revision: str = SUPPORTED_SCHEMA_REVISION
+) -> DatabaseValidationReport:
     """Validate one closed, self-contained SQLite file without modifying it."""
 
     if not isinstance(path, Path) or not path.is_absolute():
@@ -674,7 +752,7 @@ def validate_database(path: Path) -> DatabaseValidationReport:
         if path.is_symlink() or not path.is_file():
             raise BackupDatabaseError
         with closing(sqlite3.connect(_read_only_uri(path), uri=True, timeout=5.0)) as connection:
-            report = _validate_connection(connection)
+            report = _validate_connection(connection, schema_revision)
     except BackupDatabaseError:
         raise
     except (OSError, RecursionError, sqlite3.Error, ValueError):

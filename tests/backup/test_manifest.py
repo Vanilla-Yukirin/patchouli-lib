@@ -6,6 +6,7 @@ import pytest
 from patchouli_lib.backup import BackupArtifactIdentity, BackupManifestError
 from patchouli_lib.backup.manifest import (
     BACKUP_FILENAME,
+    LEGACY_SCHEMA_REVISION,
     MANIFEST_SCHEMA_VERSION,
     SUPPORTED_SCHEMA_REVISION,
     BackupManifestV1,
@@ -99,3 +100,17 @@ def test_artifact_identity_and_app_compatibility_are_exact() -> None:
     require_compatible_manifest(manifest(), app_version="0.1.0a0")
     with pytest.raises(BackupManifestError):
         require_compatible_manifest(manifest(), app_version="0.1.0a1")
+
+
+def test_legacy_manifest_parses_but_requires_explicit_revision() -> None:
+    legacy = BackupManifestV1(**(asdict(manifest()) | {"schema_revision": LEGACY_SCHEMA_REVISION}))
+    assert parse_manifest(legacy.canonical_bytes()) == legacy
+    with pytest.raises(BackupManifestError):
+        require_compatible_manifest(legacy, app_version="0.1.0a0")
+    require_compatible_manifest(
+        legacy, app_version="0.1.0a0", schema_revision=LEGACY_SCHEMA_REVISION
+    )
+    with pytest.raises(BackupManifestError):
+        require_compatible_manifest(
+            manifest(), app_version="0.1.0a0", schema_revision=LEGACY_SCHEMA_REVISION
+        )

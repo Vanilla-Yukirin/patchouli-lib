@@ -236,7 +236,7 @@ class Revision(Base):
 
 
 class RevisionFile(Base):
-    """One immutable row for a Revision file; the file set is not yet sealed."""
+    """One immutable row for a Revision file; migration triggers seal legacy sets."""
 
     __tablename__ = "revision_files"
     __table_args__ = (
@@ -281,6 +281,67 @@ class RevisionFile(Base):
     content_bytes: Mapped[bytes] = mapped_column(LargeBinary(MAX_FILE_BYTES), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     content_sha256: Mapped[bytes] = mapped_column(LargeBinary(CONTENT_SHA256_BYTES), nullable=False)
+
+
+class RevisionFileSeal(Base):
+    """An immutable marker for a complete legacy Revision file set."""
+
+    __tablename__ = "revision_file_seals"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id", "page_uid", "revision_id", "revision_number"],
+            [
+                "revisions.library_id",
+                "revisions.page_uid",
+                "revisions.revision_id",
+                "revisions.revision_number",
+            ],
+            name="fk_revision_file_seals_exact_revision",
+            ondelete="RESTRICT",
+        ),
+    )
+
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
+    revision_id: Mapped[str] = mapped_column(String(REVISION_ID_LENGTH), primary_key=True)
+    revision_number: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+
+class RevisionFileSealGuard(Base):
+    """Require a matching seal by commit time for every Revision."""
+
+    __tablename__ = "revision_file_seal_guards"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id", "page_uid", "revision_id", "revision_number"],
+            [
+                "revisions.library_id",
+                "revisions.page_uid",
+                "revisions.revision_id",
+                "revisions.revision_number",
+            ],
+            name="fk_revision_file_seal_guards_exact_revision",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["library_id", "page_uid", "revision_id", "revision_number"],
+            [
+                "revision_file_seals.library_id",
+                "revision_file_seals.page_uid",
+                "revision_file_seals.revision_id",
+                "revision_file_seals.revision_number",
+            ],
+            name="fk_revision_file_seal_guards_exact_seal",
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+    )
+
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
+    revision_id: Mapped[str] = mapped_column(String(REVISION_ID_LENGTH), primary_key=True)
+    revision_number: Mapped[int] = mapped_column(BigInteger, primary_key=True)
 
 
 class PageRevisionAppendGuard(Base):

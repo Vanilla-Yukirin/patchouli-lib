@@ -18,7 +18,9 @@ from patchouli_lib.backup.errors import BackupManifestError
 MANIFEST_SCHEMA_VERSION: Final = 1
 BACKUP_FILENAME: Final = "database.sqlite"
 MANIFEST_FILENAME: Final = "manifest.json"
-SUPPORTED_SCHEMA_REVISION: Final = "20260929_0007"
+SUPPORTED_SCHEMA_REVISION: Final = "20260929_0008"
+LEGACY_SCHEMA_REVISION: Final = "20260929_0007"
+_ACCEPTED_SCHEMA_REVISIONS: Final = frozenset({SUPPORTED_SCHEMA_REVISION, LEGACY_SCHEMA_REVISION})
 MAX_MANIFEST_BYTES: Final = 16 * 1024
 MAX_IDENTITY_BYTES: Final = 256
 MAX_APP_VERSION_BYTES: Final = 100
@@ -127,7 +129,10 @@ class BackupManifestV1:
             raise BackupManifestError
         validate_utc_timestamp(self.created_at)
         _require_bounded_ascii(self.app_version, MAX_APP_VERSION_BYTES, _APP_VERSION_PATTERN)
-        if self.schema_revision != SUPPORTED_SCHEMA_REVISION:
+        if (
+            type(self.schema_revision) is not str
+            or self.schema_revision not in _ACCEPTED_SCHEMA_REVISIONS
+        ):
             raise BackupManifestError
         _require_bounded_ascii(
             self.sqlite_version,
@@ -202,7 +207,7 @@ def require_compatible_manifest(
     """Fail closed unless application and schema compatibility are exact."""
 
     _require_bounded_ascii(app_version, MAX_APP_VERSION_BYTES, _APP_VERSION_PATTERN)
-    if schema_revision != SUPPORTED_SCHEMA_REVISION:
+    if type(schema_revision) is not str or schema_revision not in _ACCEPTED_SCHEMA_REVISIONS:
         raise BackupManifestError
     if manifest.app_version != app_version or manifest.schema_revision != schema_revision:
         raise BackupManifestError
@@ -212,6 +217,7 @@ __all__ = [
     "BACKUP_FILENAME",
     "MANIFEST_FILENAME",
     "MANIFEST_SCHEMA_VERSION",
+    "LEGACY_SCHEMA_REVISION",
     "MAX_MANIFEST_BYTES",
     "SUPPORTED_SCHEMA_REVISION",
     "BackupArtifactIdentity",

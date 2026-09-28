@@ -112,8 +112,8 @@ def test_backfills_all_revisions_preserves_sources_and_legacy_writes(
     finally:
         engine.dispose()
 
-    command.upgrade(config, "head")
-    command.upgrade(config, "head")  # Alembic version tracking makes this a no-op.
+    command.upgrade(config, "20260929_0007")
+    command.upgrade(config, "20260929_0007")  # Reapplying this revision is a no-op.
     engine = build_engine(database_url)
     try:
         inspector = inspect(engine)

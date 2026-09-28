@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from alembic import command
 from sqlalchemy import Engine, create_engine, text
 
 from patchouli_lib.backup import (
@@ -30,10 +31,14 @@ from patchouli_lib.backup import (
     verify_backup_bundle,
 )
 from patchouli_lib.backup import service as backup_service
-from patchouli_lib.backup.manifest import MAX_MANIFEST_BYTES
+from patchouli_lib.backup.manifest import (
+    LEGACY_SCHEMA_REVISION,
+    MAX_MANIFEST_BYTES,
+    BackupManifestV1,
+)
 from patchouli_lib.database import immediate_transaction
 
-from .conftest import APP_VERSION
+from .conftest import APP_VERSION, _config
 
 
 def identity() -> BackupArtifactIdentity:
@@ -106,6 +111,50 @@ def _add_second_revision_with_binary_file(engine: Engine) -> tuple[bytes, bytes]
     return markdown, binary
 
 
+def _legacy_bundle_with_binary_file(
+    engine: Engine,
+    bundle: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[bytes, bytes]:
+    """Build a genuine 0007 backup fixture, preserving its extra file bytes."""
+
+    source_database = engine.url.database
+    assert source_database is not None
+    source_path = Path(source_database)
+    command.downgrade(_config(source_path, monkeypatch), LEGACY_SCHEMA_REVISION)
+    revised_markdown, binary = _add_second_revision_with_binary_file(engine)
+
+    # Current create_backup intentionally refuses 0007. An old-format bundle
+    # is assembled from SQLite's online backup API and canonical v1 metadata
+    # so verify/restore compatibility can still be tested without weakening
+    # today's default creation contract.
+    bundle.mkdir()
+    database = bundle / BACKUP_FILENAME
+    with closing(sqlite3.connect(source_path)) as source:
+        source_journal_mode = source.execute("PRAGMA journal_mode").fetchone()[0]
+        with closing(sqlite3.connect(database)) as destination:
+            source.backup(destination)
+            destination.execute("PRAGMA journal_mode = DELETE")
+            destination.commit()
+    data = database.read_bytes()
+    artifact = identity()
+    manifest = BackupManifestV1(
+        schema_version=1,
+        backup_filename=BACKUP_FILENAME,
+        byte_size=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        created_at="2026-08-13T12:34:56.123456Z",
+        app_version=APP_VERSION,
+        schema_revision=LEGACY_SCHEMA_REVISION,
+        sqlite_version=sqlite3.sqlite_version,
+        source_journal_mode=source_journal_mode,
+        artifact_identity=artifact.identity,
+        artifact_digest=artifact.digest,
+    )
+    (bundle / MANIFEST_FILENAME).write_bytes(manifest.canonical_bytes())
+    return revised_markdown, binary
+
+
 @pytest.mark.parametrize("journal_mode", ["delete", "wal"])
 def test_live_backup_and_restore_preserve_complete_domain_state(
     complete_engine: Engine,
@@ -130,6 +179,8 @@ def test_live_backup_and_restore_preserve_complete_domain_state(
     restore_result = restore_backup(bundle, restored, app_version=APP_VERSION)
     assert restore_result.destination_path == restored
     validate_database(restored)
+    with pytest.raises(BackupDatabaseError):
+        validate_database(restored, schema_revision=LEGACY_SCHEMA_REVISION)
 
     with closing(sqlite3.connect(restored)) as sqlite_connection:
         assert sqlite_connection.execute("SELECT count(*) FROM auth_callers").fetchone() == (2,)
@@ -142,12 +193,18 @@ def test_live_backup_and_restore_preserve_complete_domain_state(
         )
         assert sqlite_connection.execute("SELECT count(*) FROM pages").fetchone() == (1,)
         assert sqlite_connection.execute("SELECT count(*) FROM revisions").fetchone() == (1,)
+        assert sqlite_connection.execute("SELECT count(*) FROM revision_file_seals").fetchone() == (
+            1,
+        )
+        assert sqlite_connection.execute(
+            "SELECT count(*) FROM revision_file_seal_guards"
+        ).fetchone() == (1,)
         assert sqlite_connection.execute("SELECT count(*) FROM page_sources").fetchone() == (1,)
         assert sqlite_connection.execute("SELECT count(*) FROM idempotency_records").fetchone() == (
             1,
         )
         assert sqlite_connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "20260929_0007",
+            "20260929_0008",
         )
         assert sqlite_connection.execute(
             "SELECT revision_id, revision_number, locator FROM page_sources"
@@ -214,13 +271,29 @@ def test_online_backup_observes_one_consistent_concurrent_snapshot(
 def test_backup_restore_preserves_every_revision_file_byte(
     complete_engine: Engine,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    revised_markdown, binary = _add_second_revision_with_binary_file(complete_engine)
     bundle = tmp_path / "multifile-bundle"
-    _create(complete_engine, bundle)
+    revised_markdown, binary = _legacy_bundle_with_binary_file(complete_engine, bundle, monkeypatch)
+    refused_bundle = tmp_path / "new-backup-refuses-0007"
+    with pytest.raises(BackupDatabaseError):
+        _create(complete_engine, refused_bundle)
+    assert not refused_bundle.exists()
+    with pytest.raises(BackupManifestError):
+        verify_backup_bundle(bundle, app_version=APP_VERSION)
+    assert (
+        verify_backup_bundle(
+            bundle, app_version=APP_VERSION, schema_revision=LEGACY_SCHEMA_REVISION
+        ).schema_revision
+        == LEGACY_SCHEMA_REVISION
+    )
     restored = tmp_path / "multifile-restored.sqlite"
-    restore_backup(bundle, restored, app_version=APP_VERSION)
-    validate_database(restored)
+    with pytest.raises(BackupManifestError):
+        restore_backup(bundle, restored, app_version=APP_VERSION)
+    restore_backup(
+        bundle, restored, app_version=APP_VERSION, schema_revision=LEGACY_SCHEMA_REVISION
+    )
+    validate_database(restored, schema_revision=LEGACY_SCHEMA_REVISION)
 
     with closing(sqlite3.connect(restored)) as connection:
         revisions = connection.execute(

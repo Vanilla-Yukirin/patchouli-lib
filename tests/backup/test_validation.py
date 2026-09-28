@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 from sqlalchemy import Engine
 
-from patchouli_lib.backup import BackupDatabaseError, validate_database
+from patchouli_lib.backup import BACKUP_FILENAME, BackupDatabaseError, validate_database
 
-from .test_service import _add_second_revision_with_binary_file, _create
+from .test_service import _create, _legacy_bundle_with_binary_file
 
 
 def _replace_trigger(
@@ -39,6 +39,17 @@ def _replace_trigger(
 def _database_copy(complete_engine: Engine, tmp_path: Path, name: str) -> Path:
     bundle = tmp_path / f"bundle-{name}"
     return _create(complete_engine, bundle).database_path
+
+
+def _legacy_database_copy(
+    complete_engine: Engine,
+    tmp_path: Path,
+    name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    bundle = tmp_path / f"legacy-bundle-{name}"
+    _legacy_bundle_with_binary_file(complete_engine, bundle, monkeypatch)
+    return bundle / BACKUP_FILENAME
 
 
 @pytest.mark.parametrize(
@@ -318,16 +329,16 @@ def test_validation_rejects_corrupt_and_truncated_sqlite_files(tmp_path: Path) -
 def test_validation_rejects_missing_content_md_or_corrupt_recorded_files(
     complete_engine: Engine,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     name: str,
     trigger: str,
     statement: str,
 ) -> None:
-    _add_second_revision_with_binary_file(complete_engine)
-    database = _database_copy(complete_engine, tmp_path, name)
+    database = _legacy_database_copy(complete_engine, tmp_path, name, monkeypatch)
     with closing(sqlite3.connect(database)) as connection:
         _replace_trigger(connection, trigger, statement, ignore_checks=True)
     with pytest.raises(BackupDatabaseError):
-        validate_database(database)
+        validate_database(database, schema_revision="20260929_0007")
 
 
 def test_validation_rejects_legacy_markdown_and_file_snapshot_divergence(
@@ -353,9 +364,10 @@ def test_validation_rejects_legacy_markdown_and_file_snapshot_divergence(
 def test_validation_rejects_ambiguous_or_unsafe_file_names(
     complete_engine: Engine,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     name: str,
 ) -> None:
-    database = _database_copy(complete_engine, tmp_path, "bad-file-name")
+    database = _legacy_database_copy(complete_engine, tmp_path, "bad-file-name", monkeypatch)
     content = b"synthetic"
     with closing(sqlite3.connect(database)) as connection:
         connection.execute(
@@ -365,6 +377,59 @@ def test_validation_rejects_ambiguous_or_unsafe_file_names(
             "FROM revisions WHERE revision_number = 1",
             (name, content, len(content), hashlib.sha256(content).digest()),
         )
+        connection.commit()
+    with pytest.raises(BackupDatabaseError):
+        validate_database(database, schema_revision="20260929_0007")
+
+
+@pytest.mark.parametrize(
+    ("trigger", "table"),
+    [
+        ("trg_revision_file_seals_no_delete", "revision_file_seals"),
+        ("trg_revision_file_seal_guards_no_delete", "revision_file_seal_guards"),
+    ],
+)
+def test_0008_validation_rejects_missing_seal_or_guard(
+    complete_engine: Engine,
+    tmp_path: Path,
+    trigger: str,
+    table: str,
+) -> None:
+    database = _database_copy(complete_engine, tmp_path, f"missing-{table}")
+    with closing(sqlite3.connect(database)) as connection:
+        _replace_trigger(connection, trigger, f"DELETE FROM {table}")
+    with pytest.raises(BackupDatabaseError):
+        validate_database(database)
+
+
+def test_0008_validation_rejects_extra_file_even_if_write_triggers_were_bypassed(
+    complete_engine: Engine,
+    tmp_path: Path,
+) -> None:
+    database = _database_copy(complete_engine, tmp_path, "extra-sealed-file")
+    content = b"synthetic binary"
+    names = (
+        "trg_revision_files_legacy_sealed_insert",
+        "trg_revision_files_auto_seal_legacy",
+    )
+    with closing(sqlite3.connect(database)) as connection:
+        trigger_sql = [
+            connection.execute(
+                "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?", (name,)
+            ).fetchone()[0]
+            for name in names
+        ]
+        for name in names:
+            connection.execute(f"DROP TRIGGER {name}")
+        connection.execute(
+            "INSERT INTO revision_files (library_id, page_uid, revision_id, "
+            "revision_number, filename, content_bytes, size_bytes, content_sha256) "
+            "SELECT library_id, page_uid, revision_id, revision_number, "
+            "'image.bin', ?, ?, ? FROM revisions WHERE revision_number = 1",
+            (content, len(content), hashlib.sha256(content).digest()),
+        )
+        for statement in trigger_sql:
+            connection.execute(statement)
         connection.commit()
     with pytest.raises(BackupDatabaseError):
         validate_database(database)

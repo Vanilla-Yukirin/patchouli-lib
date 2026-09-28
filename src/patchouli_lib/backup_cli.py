@@ -36,6 +36,7 @@ from patchouli_lib.backup import (
     restore_backup,
     verify_backup_bundle,
 )
+from patchouli_lib.backup.manifest import LEGACY_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION
 from patchouli_lib.database import build_engine
 
 _SAFE_INPUT_MESSAGE = "Invalid backup command input."
@@ -105,6 +106,7 @@ class _CreateCommand:
 @dataclass(frozen=True, slots=True)
 class _VerifyCommand:
     bundle: Path
+    schema_revision: str
     output_format: _OutputFormat
 
 
@@ -112,6 +114,7 @@ class _VerifyCommand:
 class _RestoreCommand:
     bundle: Path
     destination: Path
+    schema_revision: str
     output_format: _OutputFormat
 
 
@@ -135,6 +138,15 @@ def _add_output_format(parser: argparse.ArgumentParser) -> None:
         choices=tuple(item.value for item in _OutputFormat),
         default=_OutputFormat.TEXT.value,
         help="emit bounded text or canonical JSON metadata",
+    )
+
+
+def _add_schema_revision(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--schema-revision",
+        choices=(SUPPORTED_SCHEMA_REVISION, LEGACY_SCHEMA_REVISION),
+        default=SUPPORTED_SCHEMA_REVISION,
+        help="require this exact database revision (0007 requires explicit selection)",
     )
 
 
@@ -165,6 +177,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_help(verify)
     verify.add_argument("--bundle", required=True)
+    _add_schema_revision(verify)
     _add_output_format(verify)
 
     restore = subparsers.add_parser(
@@ -175,6 +188,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_help(restore)
     restore.add_argument("--bundle", required=True)
     restore.add_argument("--destination", required=True)
+    _add_schema_revision(restore)
     _add_output_format(restore)
     return parser
 
@@ -190,11 +204,12 @@ def _parse_command(arguments: Sequence[str]) -> _Command:
             )
             return _CreateCommand(Path(namespace.bundle), identity, output_format)
         if namespace.command == "verify":
-            return _VerifyCommand(Path(namespace.bundle), output_format)
+            return _VerifyCommand(Path(namespace.bundle), namespace.schema_revision, output_format)
         if namespace.command == "restore":
             return _RestoreCommand(
                 Path(namespace.bundle),
                 Path(namespace.destination),
+                namespace.schema_revision,
                 output_format,
             )
     except (BackupManifestError, OSError, TypeError, ValueError):
@@ -269,12 +284,17 @@ def _execute(command: _Command) -> Mapping[str, _MetadataValue]:
                 engine.dispose()
         return _manifest_metadata("create", "created", backup_result.manifest)
     if isinstance(command, _VerifyCommand):
-        manifest = verify_backup_bundle(command.bundle, app_version=app_version)
+        manifest = verify_backup_bundle(
+            command.bundle,
+            app_version=app_version,
+            schema_revision=command.schema_revision,
+        )
         return _manifest_metadata("verify", "verified", manifest)
     restore_result = restore_backup(
         command.bundle,
         command.destination,
         app_version=app_version,
+        schema_revision=command.schema_revision,
     )
     return _manifest_metadata(
         "restore",
