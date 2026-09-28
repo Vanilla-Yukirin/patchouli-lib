@@ -1,7 +1,7 @@
 # Page 版本、历史与恢复
 
 > 当前实现只支持单份 Markdown 正文的 Revision。维护者提出的多文件完整快照、
-> 相同内容不新增 Revision、声明时间校正和回收站界面见
+> 相同内容不新增 Revision、声明时间校正的公开接口和回收站界面见
 > [下一阶段提案](proposals/next-phase-product-and-api.md)；其中仅软删除方向已在
 > 本文接受，不能把未来接口当作已上线。
 
@@ -51,6 +51,12 @@ Revision 6 (new current revision)
 API 应支持可选的预期当前值，例如 Revision 编号或实体标签。值不匹配时可返回冲突，
 而不是悄然接受基于过期输入的写入。具体默认行为记录在
 [08-open-questions.md](08-open-questions.md) 中。
+
+本开发分支的当前 Page 强 ETag 为 `page-v2`，同时绑定 Page 身份、当前 Revision、
+声明发生时间及严格递增的服务器更新时间。新修订必须使用最新 ETag；历史 `page-v1`
+格式的 `If-Match` 在新请求中返回 412，调用方应重新读取 Page 后重试。已经成功保存的
+旧幂等请求仍重放原响应，旧备份也仍按原算法校验。这个并发基础不等于已经提供声明
+时间校正的公开接口，更不表示分支已经合并或部署。
 
 ## 移动内容
 

@@ -39,6 +39,7 @@ from patchouli_lib.content import (
     CreateArchiveCommand,
 )
 from patchouli_lib.content.models import MAX_MARKDOWN_BYTES, Page, PageSource, Revision
+from patchouli_lib.content.service import legacy_page_current_etag
 from patchouli_lib.database import build_engine, immediate_transaction
 from patchouli_lib.idempotency.models import IdempotencyRecord
 from patchouli_lib.idempotency.schemas import digest_idempotency_key
@@ -429,7 +430,7 @@ def test_typed_client_multipart_create_and_response_parity(
     assert response.headers["Location"].startswith(
         f"/api/v1/sections/{archive_api.section_id}/pages/"
     )
-    assert response.headers["ETag"].startswith('"page-v1-')
+    assert response.headers["ETag"].startswith('"page-v2-')
     parsed = models.PageDocument.from_dict(response.json())
     parsed.require_current_revision()
     assert parsed.page.book_id == archive_api.book_id
@@ -1176,6 +1177,22 @@ def test_revision_requires_strong_if_match_and_replays_old_etag_after_advance(
             ("Idempotency-Key", "revision-key"),
             ("Content-Type", media_type),
         ]
+        with archive_api.engine.connect() as connection:
+            page_uid = connection.execute(
+                select(Page.page_uid).where(
+                    Page.library_id == archive_api.library_id, Page.page_id == page_id
+                )
+            ).scalar_one()
+        old_format = legacy_page_current_etag(
+            page_uid,
+            created.json()["revision"]["revision_id"],
+            1,
+        )
+        old_version = client.post(
+            path,
+            headers=[*base_headers, ("If-Match", old_format)],
+            content=body,
+        )
         missing = client.post(path, headers=base_headers, content=body)
         malformed = [
             client.post(
@@ -1236,6 +1253,7 @@ def test_revision_requires_strong_if_match_and_replays_old_etag_after_advance(
             content=body,
         )
 
+    _problem(old_version, 412, "revision_conflict")
     _problem(missing, 428, "precondition_required")
     for response in malformed:
         _problem(response, 422, "request_validation_failed")

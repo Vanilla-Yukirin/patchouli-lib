@@ -68,7 +68,7 @@ _CONTENT_LENGTH = b"content-length"
 _CONTENT_TYPE = b"content-type"
 _IDEMPOTENCY_KEY = b"idempotency-key"
 _IF_MATCH = b"if-match"
-_PAGE_ETAG_PATTERN = re.compile(rb'^"page-v1-[0-9a-f]{64}"$', re.ASCII)
+_PAGE_ETAG_PATTERN = re.compile(rb'^"page-v[12]-[0-9a-f]{64}"$', re.ASCII)
 _MIME_TOKEN_BYTES = frozenset(
     b"!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 )

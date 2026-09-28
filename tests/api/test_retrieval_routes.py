@@ -23,7 +23,7 @@ from retrieval_read.conftest import (
 from retrieval_read.conftest import (
     retrieval_scope as retrieval_scope_fixture,
 )
-from sqlalchemy import Engine
+from sqlalchemy import Engine, select
 from starlette.requests import Request
 from starlette.routing import Route
 
@@ -43,6 +43,7 @@ from patchouli_lib.auth.schemas import (
 )
 from patchouli_lib.auth.tokens import generate_token
 from patchouli_lib.content import page_current_etag
+from patchouli_lib.content.models import Page
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.retrieval.cursor import CursorCodec
 from patchouli_lib.retrieval.repository import RetrievalRepository
@@ -244,10 +245,16 @@ def test_current_and_history_reads_require_page_read_and_return_exact_body(
     assert current.status_code == 200
     assert current.json()["revision"]["content"] == scope.current_content
     assert current.json()["citation"]["revision_number"] == 2
+    with retrieval_api.engine.connect() as connection:
+        stored = connection.execute(
+            select(Page.occurred_at, Page.updated_at).where(Page.page_uid == scope.first_page_uid)
+        ).one()
     assert current.headers["ETag"] == page_current_etag(
         scope.first_page_uid,
         scope.second_revision_id,
         2,
+        stored[0],
+        stored[1],
     )
 
     historical = _get(retrieval_api, f"{current_path}/revisions/1")

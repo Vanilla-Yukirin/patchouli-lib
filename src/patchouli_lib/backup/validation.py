@@ -29,6 +29,7 @@ from patchouli_lib.content.schemas import ArchiveResponseBody
 from patchouli_lib.content.service import (
     CREATE_ROUTE_TEMPLATE,
     REVISE_ROUTE_TEMPLATE,
+    legacy_page_current_etag,
     page_current_etag,
 )
 from patchouli_lib.identifiers import (
@@ -880,10 +881,22 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
             raise BackupDatabaseError from None
         if stored_content != body.revision.content or row[7].hex() != body.revision.content_sha256:
             raise BackupDatabaseError
-        if (
-            page_current_etag(row[0], body.revision.revision_id, body.revision.revision_number)
-            != etag
-        ):
+        if etag.startswith('"page-v1-'):
+            expected_etag = legacy_page_current_etag(
+                row[0], body.revision.revision_id, body.revision.revision_number
+            )
+        else:
+            # Archive writes stamp the new Revision and Page with the same
+            # monotonic logical time. Its immutable Revision row therefore
+            # reconstructs the original v2 header after later corrections.
+            expected_etag = page_current_etag(
+                row[0],
+                body.revision.revision_id,
+                body.revision.revision_number,
+                response_occurrence,
+                row[5],
+            )
+        if expected_etag != etag:
             raise BackupDatabaseError
         page_location = f"/api/v1/sections/{body.page.section_id}/pages/{body.page.page_id}"
         revision_location = f"{page_location}/revisions/{body.revision.revision_number}"

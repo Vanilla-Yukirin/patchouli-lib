@@ -27,7 +27,7 @@ from patchouli_lib.content.schemas import (
     PageSourceRecord,
     RevisionRecord,
 )
-from patchouli_lib.identifiers import page_id_registry_digest
+from patchouli_lib.identifiers import canonical_utc_wire, page_id_registry_digest
 from patchouli_lib.library.models import Book
 from patchouli_lib.library.schemas import BookRecord
 
@@ -170,6 +170,12 @@ class ContentRepository:
             or page.occurred_at != command.old_occurred_at
         ):
             raise ValueError("Page occurrence correction target is inconsistent.")
+        # The supplied wall clock can be the same microsecond as the previous
+        # write (or lag behind it). Persist one strictly advancing logical
+        # instant so current ETags cannot repeat after metadata mutations.
+        corrected_at = max(command.corrected_at, page.updated_at + 1)
+        canonical_utc_wire(corrected_at)
+        normalized = command.model_copy(update={"corrected_at": corrected_at})
         sequence = self._connection.scalar(
             select(func.coalesce(func.max(PageOccurrenceCorrection.sequence), 0) + 1).where(
                 PageOccurrenceCorrection.library_id == page.library_id,
@@ -180,7 +186,7 @@ class ContentRepository:
             raise ValueError("Page occurrence correction sequence is exhausted.")
         self._connection.execute(
             insert(PageOccurrenceCorrectionGuard),
-            command.model_dump() | {"sequence": sequence},
+            normalized.model_dump() | {"sequence": sequence},
         )
         result = self._connection.execute(
             update(Page)
@@ -192,7 +198,7 @@ class ContentRepository:
                 Page.current_revision_id == page.current_revision_id,
                 Page.current_revision_number == page.current_revision_number,
             )
-            .values(occurred_at=command.new_occurred_at, updated_at=command.corrected_at)
+            .values(occurred_at=command.new_occurred_at, updated_at=corrected_at)
         )
         if result.rowcount != 1:
             raise RuntimeError("Page occurrence correction encountered stale content.")
@@ -211,7 +217,7 @@ class ContentRepository:
             page.model_copy(
                 update={
                     "occurred_at": command.new_occurred_at,
-                    "updated_at": command.corrected_at,
+                    "updated_at": corrected_at,
                 }
             ),
             PageOccurrenceCorrectionRecord.model_validate(dict(row)),
@@ -239,6 +245,8 @@ class ContentRepository:
         *,
         updated_at: int,
     ) -> PageRecord | None:
+        if updated_at <= page.updated_at or updated_at != revision.created_at:
+            raise ValueError("Revision timestamp must advance the Page clock exactly.")
         statement = (
             update(Page)
             .where(
@@ -246,6 +254,9 @@ class ContentRepository:
                 Page.page_uid == page.page_uid,
                 Page.current_revision_id == page.current_revision_id,
                 Page.current_revision_number == page.current_revision_number,
+                Page.occurred_at == page.occurred_at,
+                Page.updated_at == page.updated_at,
+                Page.deleted_at.is_(None),
             )
             .values(
                 current_revision_id=revision.revision_id,

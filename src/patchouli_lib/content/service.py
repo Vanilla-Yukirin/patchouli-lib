@@ -16,6 +16,7 @@ from patchouli_lib.api.contracts import build_api_v1_path
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import AuditOutcome, NewAuditEvent, SectionAction
 from patchouli_lib.auth.service import AuthenticationService, utc_microseconds
+from patchouli_lib.content.models import MAX_OCCURRENCE_MICROSECONDS, MIN_OCCURRENCE_MICROSECONDS
 from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import (
     AppendArchiveRevisionCommand,
@@ -72,7 +73,8 @@ RevisionIdFactory = Callable[[], str]
 
 CREATE_ROUTE_TEMPLATE: Final = "/api/v1/sections/{section_id}/books/{book_id}/pages"
 REVISE_ROUTE_TEMPLATE: Final = "/api/v1/sections/{section_id}/pages/{page_id}/revisions"
-PAGE_ETAG_DOMAIN: Final = b"patchouli-lib/page-current-etag/v1\x00"
+PAGE_ETAG_DOMAIN: Final = b"patchouli-lib/page-current-etag/v2\x00"
+_LEGACY_PAGE_ETAG_DOMAIN: Final = b"patchouli-lib/page-current-etag/v1\x00"
 
 
 class ArchiveTransactionRequiredError(RuntimeError):
@@ -114,18 +116,57 @@ def _new_opaque_id() -> str:
     return uuid4().hex
 
 
-def page_current_etag(page_uid: bytes, revision_id: str, revision_number: int) -> str:
-    """Return a strong Page-scoped validator for one exact current Revision."""
+def _validated_etag_identity(
+    page_uid: bytes, revision_id: str, revision_number: int
+) -> tuple[bytes, str]:
+    """Validate the shared Page and Revision identity without changing v1 history."""
 
     validated_uid = validate_page_uid(page_uid)
     validated_revision = validate_revision_id(revision_id)
     if type(revision_number) is not int or not 1 <= revision_number <= MAX_REVISION_NUMBER:
         raise ValueError("Invalid current Revision number.")
-    digest = hashlib.sha256(PAGE_ETAG_DOMAIN)
+    return validated_uid, validated_revision
+
+
+def legacy_page_current_etag(page_uid: bytes, revision_id: str, revision_number: int) -> str:
+    """Reconstruct immutable v1 response headers when validating historical backups."""
+
+    validated_uid, validated_revision = _validated_etag_identity(
+        page_uid, revision_id, revision_number
+    )
+    digest = hashlib.sha256(_LEGACY_PAGE_ETAG_DOMAIN)
     digest.update(validated_uid)
     digest.update(validated_revision.encode("ascii"))
     digest.update(revision_number.to_bytes(8, "big"))
     return f'"page-v1-{digest.hexdigest()}"'
+
+
+def page_current_etag(
+    page_uid: bytes,
+    revision_id: str,
+    revision_number: int,
+    occurred_at: int,
+    updated_at: int,
+) -> str:
+    """Validate current content plus metadata and the strictly advancing Page clock."""
+
+    validated_uid, validated_revision = _validated_etag_identity(
+        page_uid, revision_id, revision_number
+    )
+    if (
+        type(occurred_at) is not int
+        or not MIN_OCCURRENCE_MICROSECONDS <= occurred_at <= MAX_OCCURRENCE_MICROSECONDS
+        or type(updated_at) is not int
+        or not 0 <= updated_at <= (1 << 63) - 1
+    ):
+        raise ValueError("Invalid Page time for the current ETag.")
+    digest = hashlib.sha256(PAGE_ETAG_DOMAIN)
+    digest.update(validated_uid)
+    digest.update(validated_revision.encode("ascii"))
+    digest.update(revision_number.to_bytes(8, "big"))
+    digest.update(occurred_at.to_bytes(8, "big", signed=True))
+    digest.update(updated_at.to_bytes(8, "big"))
+    return f'"page-v2-{digest.hexdigest()}"'
 
 
 class ArchiveService:
@@ -320,11 +361,20 @@ class ArchiveService:
             page.page_uid,
             page.current_revision_id,
             page.current_revision_number,
+            page.occurred_at,
+            page.updated_at,
         )
         if not hmac.compare_digest(command.expected_etag, current_etag):
             raise ArchivePreconditionFailedError
         if page.current_revision_number >= MAX_REVISION_NUMBER:
             raise ArchivePersistenceError
+        if page.updated_at >= (1 << 63) - 1:
+            raise ArchivePersistenceError
+        revision_at = max(operation_at, page.updated_at + 1)
+        try:
+            canonical_utc_wire(revision_at)
+        except ValueError:
+            raise ArchivePersistenceError from None
 
         try:
             revision_id = self._allocate_revision_id(command.library_id)
@@ -335,14 +385,14 @@ class ArchiveService:
                     revision_id=revision_id,
                     page_uid=page.page_uid,
                     revision_number=page.current_revision_number + 1,
-                    created_at=operation_at,
+                    created_at=revision_at,
                     **markdown.model_dump(),
                 )
             )
             advanced = self._content.advance_current_revision(
                 page,
                 revision,
-                updated_at=operation_at,
+                updated_at=revision_at,
             )
             if advanced is None:
                 raise ArchivePreconditionFailedError
@@ -554,6 +604,8 @@ class ArchiveService:
                 page.page_uid,
                 revision.revision_id,
                 revision.revision_number,
+                page.occurred_at,
+                page.updated_at,
             ),
             original_request_id=request_id,
             original_request_timestamp=canonical_utc_wire(revision.created_at),
@@ -631,5 +683,6 @@ __all__ = [
     "ArchiveReplayCorruptError",
     "ArchiveService",
     "ArchiveTransactionRequiredError",
+    "legacy_page_current_etag",
     "page_current_etag",
 ]

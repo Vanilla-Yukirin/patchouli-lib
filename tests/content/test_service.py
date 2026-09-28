@@ -35,6 +35,8 @@ from patchouli_lib.content.service import (
     ArchivePreconditionRequiredError,
     ArchiveService,
     ArchiveTransactionRequiredError,
+    legacy_page_current_etag,
+    page_current_etag,
 )
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.idempotency.models import IdempotencyRecord
@@ -56,6 +58,27 @@ from .conftest import OPERATION_TIME, ArchiveScope
 from .helpers import seed_library_structure
 
 OCCURRED_AT = OPERATION_TIME - 876_544
+
+
+def test_page_etag_v2_binds_revision_occurrence_and_logical_update_time() -> None:
+    uid = b"x" * 16
+    revision = "rev_" + "a" * 32
+    baseline = page_current_etag(uid, revision, 1, OCCURRED_AT, OPERATION_TIME)
+    assert baseline.startswith('"page-v2-')
+    assert (
+        len(
+            {
+                baseline,
+                page_current_etag(b"y" * 16, revision, 1, OCCURRED_AT, OPERATION_TIME),
+                page_current_etag(uid, "rev_" + "b" * 32, 1, OCCURRED_AT, OPERATION_TIME),
+                page_current_etag(uid, revision, 2, OCCURRED_AT, OPERATION_TIME),
+                page_current_etag(uid, revision, 1, OCCURRED_AT + 1, OPERATION_TIME),
+                page_current_etag(uid, revision, 1, OCCURRED_AT, OPERATION_TIME + 1),
+                legacy_page_current_etag(uid, revision, 1),
+            }
+        )
+        == 7
+    )
 
 
 def _create_command(
@@ -177,7 +200,7 @@ def test_create_archive_persists_exact_atomic_graph_and_safe_replay(
         assert result.source.revision_number == 1
         assert result.citation.revision_id == result.revision.revision_id
         assert result.response.response_status == 201
-        assert result.response.response_etag.startswith('"page-v1-')
+        assert result.response.response_etag.startswith('"page-v2-')
         assert result.response.response_location == (
             f"/api/v1/sections/{archive_scope.section_id}/pages/{result.page.page_id}"
         )
@@ -394,6 +417,8 @@ def test_revision_preconditions_append_once_keep_old_and_replay_after_advance(
         assert isinstance(revised, ArchiveMutationSuccess)
         assert revised.page.current_revision_number == 2
         assert revised.revision.revision_number == 2
+        assert revised.page.updated_at > created.page.updated_at
+        assert revised.revision.created_at == revised.page.updated_at
         assert revised.source.revision_id == revised.revision.revision_id
         assert revised.source.revision_number == 2
         assert revised.source.kind == revise.source.kind

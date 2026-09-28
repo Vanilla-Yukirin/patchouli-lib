@@ -60,7 +60,7 @@ IdempotencyDigest = Annotated[StrictBytes, Field(min_length=32, max_length=32)]
 RequestId = Annotated[str, Field(pattern=r"^req_[0-9a-f]{32}$")]
 StrongPageETag = Annotated[
     str,
-    Field(min_length=74, max_length=74, pattern=r'^"page-v1-[0-9a-f]{64}"$'),
+    Field(min_length=74, max_length=74, pattern=r'^"page-v[12]-[0-9a-f]{64}"$'),
 ]
 
 _SOURCE_KIND_PATTERN = re.compile(r"\A\S(?:.*\S)?\Z", re.DOTALL)

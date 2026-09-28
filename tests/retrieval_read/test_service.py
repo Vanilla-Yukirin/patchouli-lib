@@ -4,7 +4,7 @@ import dataclasses
 import hashlib
 
 import pytest
-from sqlalchemy import Connection, Engine
+from sqlalchemy import Connection, Engine, select
 
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
@@ -15,6 +15,7 @@ from patchouli_lib.auth.schemas import (
     SectionAction,
 )
 from patchouli_lib.content import page_current_etag
+from patchouli_lib.content.models import Page
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.identifiers import InvalidPageIdError, InvalidRevisionNumberError
 from patchouli_lib.retrieval.repository import RetrievalRepository
@@ -112,10 +113,17 @@ def test_current_and_explicit_revision_reads_are_exact_and_unrendered(
         assert current.document.revision.content == retrieval_scope.current_content
         assert current.document.revision.revision_id == retrieval_scope.second_revision_id
         assert current.document.citation.href.endswith("/revisions/2")
+        stored_page = connection.execute(
+            select(Page.occurred_at, Page.updated_at).where(
+                Page.page_uid == retrieval_scope.first_page_uid
+            )
+        ).one()
         assert current.etag == page_current_etag(
             retrieval_scope.first_page_uid,
             retrieval_scope.second_revision_id,
             2,
+            stored_page[0],
+            stored_page[1],
         )
 
         historical = service.get_revision(

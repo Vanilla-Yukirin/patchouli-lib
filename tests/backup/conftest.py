@@ -28,7 +28,7 @@ from patchouli_lib.content.schemas import (
     NewPageSource,
     NewRevision,
 )
-from patchouli_lib.content.service import CREATE_ROUTE_TEMPLATE, page_current_etag
+from patchouli_lib.content.service import CREATE_ROUTE_TEMPLATE, legacy_page_current_etag
 from patchouli_lib.database import build_engine, immediate_transaction
 from patchouli_lib.identifiers import PAGE_ID_SCHEME, generate_page_id, page_id_registry_digest
 from patchouli_lib.identifiers.page_ids import parse_occurrence_time
@@ -291,7 +291,7 @@ def seed_complete_database(path: Path, monkeypatch: pytest.MonkeyPatch) -> Engin
                 "fingerprint": hashlib.sha256(b"synthetic request").digest(),
                 "body": body.model_dump_json().encode("utf-8"),
                 "location": f"/api/v1/sections/{section_id}/pages/{page.page_id}",
-                "etag": page_current_etag(
+                "etag": legacy_page_current_etag(
                     page.page_uid,
                     revision.revision_id,
                     revision.revision_number,

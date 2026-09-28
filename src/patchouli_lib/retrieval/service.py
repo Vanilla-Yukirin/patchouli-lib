@@ -151,6 +151,8 @@ class RetrievalService:
                 stored.page.page_uid,
                 stored.revision.revision_id,
                 stored.revision.revision_number,
+                stored.page.occurred_at,
+                stored.page.updated_at,
             ),
         )
 
