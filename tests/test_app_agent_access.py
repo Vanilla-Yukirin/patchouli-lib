@@ -140,6 +140,17 @@ def test_application_registers_exact_agent_access_routes(tmp_path: Path) -> None
         assert routes == {
             ("/api/v1/capabilities", "GET"),
             ("/api/v1/auth/whoami", "GET"),
+            ("/api/v1/agent/skill/manifest", "GET"),
+            ("/api/v1/agent/skill/files/{resource_path}", "GET"),
+            (
+                "/api/v1/sections/{section_id}/pages/{page_id}/revisions/{revision_number}/files",
+                "GET",
+            ),
+            (
+                "/api/v1/sections/{section_id}/pages/{page_id}/revisions/"
+                "{revision_number}/files/{filename}",
+                "GET",
+            ),
             ("/api/v1/sections", "GET"),
             ("/api/v1/sections/{section_id}/books", "GET"),
             ("/api/v1/sections/{section_id}/pages", "GET"),

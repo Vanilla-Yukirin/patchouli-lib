@@ -622,14 +622,13 @@ def guide_page(csrf_token: str, page: str, *, locale: AdminLocale = "en") -> str
             "agent": (
                 "Agent instructions",
                 """
-<p>安装独立发布的 Python 客户端，然后先检查服务端协议和当前有效身份：</p>
-<pre>patchouli capabilities
-patchouli whoami
-patchouli sections list</pre>
-<p>凭据不能通过命令行选项传入。请通过令牌标准输入、当前进程的
-<code>PATCHOULI_TOKEN</code> 环境变量，或可选的操作系统秘密存储提供凭据。
-绝不能把令牌放进提示词、配置档案、URL、已跟踪文件或 Shell 参数。</p>
-<p>内置的 <code>patchouli-agent</code> Skill 包含完整的安全归档和精确引用流程。</p>
+<p><a href="/connect">打开 AI 原生接入页并复制无密钥指令</a>。
+这段公开指令可交给本地 Agent；设备 Token 不会出现在指令中。</p>
+<p>请在本机终端交互式输入设备 Token，不要在模型聊天中发送。Agent 会先核对
+<code>/api/v1/auth/whoami</code> 与 <code>/api/v1/capabilities</code>，再用 Token 下载
+Skill 文件及摘要清单。标准 HTTP 是首选，不要求安装 CLI 或 MCP。</p>
+<p>目前可用的是单份 Markdown 归档和非搜索读取；真实搜索、多文件上传等仍未提供。
+已安装的 <code>patchouli</code> CLI 或 <code>patchouli-mcp</code> 可以继续选用。</p>
 """,
             ),
             "mcp": (
@@ -661,17 +660,15 @@ deployment controls. Those remain separate local operator procedures.</p>
             "agent": (
                 "Agent instructions",
                 """
-<p>Install the independently packaged Python client and start by checking the
-server contract and effective identity:</p>
-<pre>patchouli capabilities
-patchouli whoami
-patchouli sections list</pre>
-<p>Credentials have no command-line option. Supply them through token stdin,
-the process-local <code>PATCHOULI_TOKEN</code> environment variable, or the
-optional operating-system secret store. Never place a token in a prompt,
-profile, URL, tracked file, or shell argument.</p>
-<p>The bundled <code>patchouli-agent</code> Skill contains the complete safe
-archive and exact-citation workflow.</p>
+<p><a href="/connect">Open the AI-native connection page and copy the credential-free
+instruction</a>. It is public; it never includes a device Token.</p>
+<p>Enter the device Token interactively on your own machine, not in model chat.
+The Agent first checks <code>/api/v1/auth/whoami</code> and
+<code>/api/v1/capabilities</code>, then downloads the protected Skill files and
+digest manifest. Standard HTTP is preferred; no CLI or MCP installation is required.</p>
+<p>Only single-Markdown Archive writes and non-search reads are available now.
+Real search and multi-file uploads are not yet provided. The existing
+<code>patchouli</code> CLI and <code>patchouli-mcp</code> remain optional.</p>
 """,
             ),
             "mcp": (

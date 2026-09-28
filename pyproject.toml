@@ -36,6 +36,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/patchouli_lib"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"skills/patchouli-agent" = "patchouli_lib/agent_resources"
+
 [tool.ruff]
 line-length = 100
 target-version = "py313"

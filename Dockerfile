@@ -15,6 +15,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
 
 COPY src ./src
+COPY skills/patchouli-agent ./skills/patchouli-agent
 COPY migrations ./migrations
 COPY alembic.ini ./
 RUN --mount=type=cache,target=/root/.cache/uv \

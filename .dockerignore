@@ -7,3 +7,6 @@
 !src/**
 !migrations/**
 !docker/**
+!skills
+!skills/patchouli-agent
+!skills/patchouli-agent/**

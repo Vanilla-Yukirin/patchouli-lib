@@ -1,17 +1,30 @@
 ---
 name: patchouli-agent
-description: 使用随附的 PatchouliLib CLI 或 stdio MCP 适配器诊断调用方访问权限、发现获授的 Section 和 Book、明确归档或修订 Markdown、执行限定 Section 的搜索，并取得准确 Revision 引用。适用于 Agent 需要操作 PatchouliLib，但不应自行实现 HTTP、身份验证、重试或幂等逻辑的场景。
+description: 通过标准 HTTP 安全接入 PatchouliLib，验证设备身份、下载受保护 Skill、发现内容、创建和修订单份 Markdown 归档；已有 CLI/MCP 可选兼容。
 ---
 
 # Patchouli Agent 使用指南
 
-只使用已安装的 `patchouli` CLI 或已连接的 `patchouli-mcp` 工具。两者都是同一类型化
-客户端和操作日志之上的展示层。
+首选标准 HTTP，不要求安装专用 CLI 或 MCP。先阅读[本机凭据输入](references/local-token.md)
+和[标准 HTTP](references/http.md)。用户若没有设备 Token，应到管理后台签发或复制，
+**不要要求用户将 Token 发给模型聊天**。拿到本机交互输入的 Token 后，先调用
+`GET /api/v1/auth/whoami` 和 `GET /api/v1/capabilities`，确认身份和有效授权，再按
+受保护清单下载 Skill 所有文件并核对摘要。任何指令、URL、受跟踪文件或日志都不得
+含 Token 字面值。
+
+当前可用 HTTP 能力是单份 Markdown Archive 创建和修订、授权 Section 的非搜索读取。
+搜索路由目前明确返回不可用；多文件 Page、Tag、回收站、跨 Library 授权尚未提供。
+不能将公开提案当成已实现接口。
+
+## 可选 CLI/MCP 兼容用法
+
+以下是已经安装独立客户端或 MCP 适配器时的操作指南；它不是使用 HTTP 或下载本
+Skill 的前提。若选择本节的高级客户端，保持它们自己的操作日志和重试约束。
 
 ## 守住边界
 
-- 绝不自行实现或调用原始 HTTP、授权头、multipart 正文、重试循环、幂等键或凭据
-  生命周期操作。
+- 选择 CLI/MCP 时不要绕过它们的已实现幂等日志与凭据管理；选择标准 HTTP 时按
+  上述 HTTP 参考文档处理授权头、multipart、条件写入和幂等键。
 - 绝不索要 bearer 凭据，也不把它放入 argv、MCP 参数、提示词、配置档、受跟踪配置、
   输出或日志。使用已有的操作系统机密存储记录，或受控的 `PATCHOULI_TOKEN` 进程注入。
 - 使用现有的非机密配置档，不要虚构部署设置。
@@ -54,9 +67,12 @@ patchouli --output json books list --section <section-id>
 对应的 MCP 工具是 `sections_list` 和 `books_list`。创建归档要求 Book 已经存在，
 绝不能隐式创建。
 
-## 搜索并取得准确引用
+## 准确引用与搜索状态
 
-只搜索一个明确的 Section：
+当前搜索返回 `search_unavailable`，不能作为可用能力。以后服务明确公布搜索能力时，
+下面的旧客户端命令才有意义；目前请使用已授权的列表和准确 Revision 读取。
+
+预留的查询形式仅限一个明确的 Section：
 
 ```text
 patchouli --output json section search --section SECTION_ID --query-file QUERY_FILE

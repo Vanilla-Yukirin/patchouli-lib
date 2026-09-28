@@ -8,6 +8,7 @@ from sqlalchemy import Engine
 
 from patchouli_lib import __version__
 from patchouli_lib.admin.router import create_admin_router
+from patchouli_lib.api.agent_skill_routes import create_agent_skill_router
 from patchouli_lib.api.archive_routes import create_archive_router
 from patchouli_lib.api.auth_contracts import CapabilityConfiguration
 from patchouli_lib.api.auth_routes import create_auth_router
@@ -64,6 +65,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     application.include_router(create_archive_router(engine))
     application.include_router(create_search_router(engine))
+    application.include_router(create_agent_skill_router(engine))
     if cursor_secret is not None:
         application.include_router(
             create_retrieval_router(

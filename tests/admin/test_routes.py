@@ -575,7 +575,8 @@ def test_login_session_protected_guides_and_logout(admin_web: AdminWeb) -> None:
     mcp = admin_web.client.get("/admin/mcp")
     stylesheet = admin_web.client.get("/admin/style.css")
     assert "no image update" in guide.text
-    assert "patchouli capabilities" in agent.text
+    assert 'href="/connect"' in agent.text
+    assert "Standard HTTP" in agent.text
     assert "patchouli-mcp" in mcp.text
     assert stylesheet.headers["content-type"].startswith("text/css")
     for response in (dashboard, guide, agent, mcp, stylesheet):

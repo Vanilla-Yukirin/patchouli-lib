@@ -5,7 +5,8 @@ PatchouliLib 是一个面向人类与软件 Agent 的可自托管知识库。它
 
 > [!IMPORTANT]
 > PatchouliLib 已具备可运行的工程骨架、类型化 Agent 客户端、CLI、stdio MCP
-> 适配器、限定范围的归档写入接口、非搜索读取接口，以及实验性的本地备份、校验和
+> 适配器、无密钥 AI 接入页与需设备 Token 的 Skill 下载、限定范围的归档写入接口、
+> 非搜索读取接口，以及实验性的本地备份、校验和
 > “恢复到全新目标”工具。全文检索与受支持的备份恢复策略仍未实现。各项能力究竟
 > 属于“已实现”“实验中”还是“尚未实现”，以[当前路线图状态](ROADMAP.md)为准。
 
@@ -83,6 +84,9 @@ python scripts/validate.py --container
 项目还提供一个可选、受密码保护的[网页管理面板](docs/admin-web-console.md)，用于
 初始化、凭据生命周期操作和 Agent/MCP 指引。面板默认关闭，不具备部署、Docker、
 Shell 或备份恢复控制能力。
+
+公开的 `/connect` 页面提供不含凭据的本地 Agent 接入指令；Skill 文件和版本摘要清单
+必须使用有效设备 Token 下载。标准 HTTP 可直接使用，CLI/MCP 是可选适配器。
 
 ## 参与贡献
 
