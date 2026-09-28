@@ -5,12 +5,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from functools import partial
 from typing import Any, Final, TypeVar
+from urllib.parse import quote
 
 import anyio
 from fastapi import APIRouter, Request
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import Engine
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 from patchouli_lib.api.authentication import (
     AuthenticatedRequestContext,
@@ -30,6 +31,7 @@ from patchouli_lib.api.errors import (
 )
 from patchouli_lib.api.request_ids import REQUEST_ID_HEADER, get_request_id
 from patchouli_lib.auth.service import Clock, utc_microseconds
+from patchouli_lib.content.file_manifest import normalize_file_name
 from patchouli_lib.identifiers import InvalidPageIdError, InvalidRevisionNumberError
 from patchouli_lib.library.schemas import OpaqueId
 from patchouli_lib.retrieval.cursor import CursorBinding, CursorCodec, InvalidCursorError
@@ -39,6 +41,8 @@ from patchouli_lib.retrieval.schemas import (
     KeysetPage,
     PageDocument,
     ReadWindow,
+    RevisionFileManifestView,
+    RevisionFileRead,
 )
 from patchouli_lib.retrieval.service import (
     RetrievalAuthenticationError,
@@ -127,6 +131,15 @@ def _validate_revision_number(revision_number: str) -> int:
     if not 1 <= parsed <= _MAX_REVISION_NUMBER or str(parsed) != revision_number:
         raise _validation_problem()
     return parsed
+
+
+def _validate_filename(filename: str) -> str:
+    try:
+        if normalize_file_name(filename) != filename:
+            raise ValueError("File name is not normalized.")
+    except (TypeError, ValueError, UnicodeError):
+        raise _validation_problem() from None
+    return filename
 
 
 def _binding(
@@ -248,13 +261,29 @@ def _json_response(
     )
 
 
+def _file_response(request: Request, file: RevisionFileRead) -> Response:
+    encoded_filename = quote(file.filename, safe="")
+    return Response(
+        content=file.content,
+        media_type="application/octet-stream",
+        headers={
+            REQUEST_ID_HEADER: get_request_id(request),
+            "Cache-Control": PROTECTED_CACHE_CONTROL,
+            "Content-Disposition": (
+                f"attachment; filename=\"download\"; filename*=UTF-8''{encoded_filename}"
+            ),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 def create_retrieval_router(
     engine: Engine,
     *,
     cursor_codec: CursorCodec,
     clock: Clock = utc_microseconds,
 ) -> APIRouter:
-    """Create five protected, non-search read routes.
+    """Create protected, non-search read routes.
 
     The caller supplies the cursor codec so key management remains outside this
     target-neutral router.
@@ -370,6 +399,52 @@ def create_retrieval_router(
             clock=clock,
         )
         return _json_response(request, document)
+
+    @router.get(
+        "/sections/{section_id}/pages/{page_id}/revisions/{revision_number}/files",
+    )
+    async def list_revision_files(
+        section_id: str,
+        page_id: str,
+        revision_number: str,
+        request: Request,
+    ) -> JSONResponse:
+        context = await _authenticate(authenticate, request)
+        validated_section_id = _validate_section_id(section_id)
+        validated_revision_number = _validate_revision_number(revision_number)
+        manifest: RevisionFileManifestView = await _read(
+            engine,
+            context,
+            lambda service: service.list_revision_files(
+                validated_section_id, page_id, validated_revision_number
+            ),
+            clock=clock,
+        )
+        return _json_response(request, manifest)
+
+    @router.get(
+        "/sections/{section_id}/pages/{page_id}/revisions/{revision_number}/files/{filename:path}",
+    )
+    async def download_revision_file(
+        section_id: str,
+        page_id: str,
+        revision_number: str,
+        filename: str,
+        request: Request,
+    ) -> Response:
+        context = await _authenticate(authenticate, request)
+        validated_section_id = _validate_section_id(section_id)
+        validated_revision_number = _validate_revision_number(revision_number)
+        validated_filename = _validate_filename(filename)
+        file: RevisionFileRead = await _read(
+            engine,
+            context,
+            lambda service: service.get_revision_file(
+                validated_section_id, page_id, validated_revision_number, validated_filename
+            ),
+            clock=clock,
+        )
+        return _file_response(request, file)
 
     return router
 

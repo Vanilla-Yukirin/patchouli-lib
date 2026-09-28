@@ -14,6 +14,11 @@ from patchouli_lib.auth.schemas import (
 )
 from patchouli_lib.auth.service import Clock, utc_microseconds
 from patchouli_lib.content import page_current_etag
+from patchouli_lib.content.file_manifest import (
+    FileManifest,
+    build_file_manifest,
+    normalize_file_name,
+)
 from patchouli_lib.content.schemas import PageRecord, RevisionRecord
 from patchouli_lib.identifiers import (
     canonical_utc_wire,
@@ -29,6 +34,9 @@ from patchouli_lib.retrieval.schemas import (
     PageMetadata,
     PageView,
     ReadWindow,
+    RevisionFileManifestView,
+    RevisionFileRead,
+    RevisionFileView,
     RevisionView,
     SectionView,
 )
@@ -166,6 +174,89 @@ class RetrievalService:
         if revision is None:
             raise RetrievalNotFoundError
         return self._document(StoredDocument(page=page, revision=revision))
+
+    def list_revision_files(
+        self,
+        section_id: str,
+        page_id: str,
+        revision_number: int,
+    ) -> RevisionFileManifestView:
+        page, revision, manifest = self._revision_files(section_id, page_id, revision_number)
+        return RevisionFileManifestView(
+            page_id=page.page_id,
+            revision_id=revision.revision_id,
+            revision_number=revision.revision_number,
+            files=[
+                RevisionFileView(
+                    filename=entry.name,
+                    size_bytes=entry.content_size_bytes,
+                    content_sha256=entry.content_sha256.hex(),
+                )
+                for entry in manifest.files
+            ],
+        )
+
+    def get_revision_file(
+        self,
+        section_id: str,
+        page_id: str,
+        revision_number: int,
+        filename: str,
+    ) -> RevisionFileRead:
+        _, _, manifest = self._revision_files(section_id, page_id, revision_number)
+        for entry in manifest.files:
+            if entry.name == filename:
+                return RevisionFileRead(filename=entry.name, content=entry.content)
+        raise RetrievalNotFoundError
+
+    def _revision_files(
+        self,
+        section_id: str,
+        page_id: str,
+        revision_number: int,
+    ) -> tuple[PageRecord, RevisionRecord, FileManifest]:
+        caller = self._require_action(section_id, SectionAction.PAGE_READ)
+        validate_page_id(page_id)
+        validate_revision_number(revision_number)
+        page = self._repository.get_page(caller.library_id, section_id, page_id)
+        if page is None:
+            raise RetrievalNotFoundError
+        revision = self._repository.get_revision(caller.library_id, page.page_uid, revision_number)
+        if revision is None:
+            raise RetrievalNotFoundError
+        if not self._repository.has_revision_file_seal(
+            caller.library_id, page.page_uid, revision.revision_id, revision.revision_number
+        ):
+            raise RetrievalPersistenceError
+        try:
+            stored = self._repository.list_revision_files(
+                caller.library_id, page.page_uid, revision.revision_id, revision.revision_number
+            )
+            if any(entry.name != normalize_file_name(entry.name) for entry in stored):
+                raise ValueError("Stored file name is invalid.")
+            manifest = build_file_manifest((entry.name, entry.content) for entry in stored)
+            if len(stored) != len(manifest.files):
+                raise ValueError("Stored file set is ambiguous.")
+            by_name = {entry.name: entry for entry in stored}
+            for entry in manifest.files:
+                original = by_name[entry.name]
+                if (
+                    original.size_bytes != entry.content_size_bytes
+                    or original.content_sha256 != entry.content_sha256
+                ):
+                    raise ValueError("Stored file metadata is inconsistent.")
+            # This release's sealed format contains only the legacy Markdown mirror.
+            if (
+                len(manifest.files) != 1
+                or manifest.files[0].name != "content.md"
+                or manifest.files[0].content != revision.content_md
+                or manifest.files[0].content_size_bytes != revision.content_size_bytes
+                or manifest.files[0].content_sha256 != revision.content_sha256
+            ):
+                raise ValueError("Stored legacy Revision file set is inconsistent.")
+        except (TypeError, ValueError, OverflowError, UnicodeError):
+            raise RetrievalPersistenceError from None
+        return page, revision, manifest
 
     def _require_current_agent(self) -> CallerRecord:
         authenticated = self._authenticated

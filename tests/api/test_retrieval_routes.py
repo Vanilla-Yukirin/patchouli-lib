@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass
@@ -159,7 +160,7 @@ def _assert_problem(response: Any, status: int, code: str) -> None:
     _assert_protected(response)
 
 
-def test_router_exposes_exactly_the_five_non_search_get_routes(
+def test_router_exposes_exactly_the_seven_non_search_get_routes(
     retrieval_api: RetrievalApi,
 ) -> None:
     router = create_retrieval_router(
@@ -180,6 +181,15 @@ def test_router_exposes_exactly_the_five_non_search_get_routes(
         ("/api/v1/sections/{section_id}/pages/{page_id}", ("GET",)),
         (
             "/api/v1/sections/{section_id}/pages/{page_id}/revisions/{revision_number}",
+            ("GET",),
+        ),
+        (
+            "/api/v1/sections/{section_id}/pages/{page_id}/revisions/{revision_number}/files",
+            ("GET",),
+        ),
+        (
+            "/api/v1/sections/{section_id}/pages/{page_id}/revisions/"
+            "{revision_number}/files/{filename:path}",
             ("GET",),
         ),
     }
@@ -246,6 +256,91 @@ def test_current_and_history_reads_require_page_read_and_return_exact_body(
     assert historical.json()["citation"]["revision_id"] == scope.first_revision_id
     assert historical.json()["page"]["current_revision_number"] == 2
     assert "ETag" not in historical.headers
+
+
+def test_revision_file_manifest_and_download_are_exact_and_not_cacheable(
+    retrieval_api: RetrievalApi,
+) -> None:
+    scope = retrieval_api.scope
+    base = (
+        f"/api/v1/sections/{scope.query_section_id}/pages/{scope.first_page_id}/revisions/1/files"
+    )
+    listing = _get(retrieval_api, base)
+    assert listing.status_code == 200
+    assert listing.json()["page_id"] == scope.first_page_id
+    assert listing.json()["revision_id"] == scope.first_revision_id
+    assert listing.json()["revision_number"] == 1
+    assert listing.json()["files"] == [
+        {
+            "filename": "content.md",
+            "size_bytes": len(scope.historical_content.encode()),
+            "content_sha256": hashlib.sha256(scope.historical_content.encode()).hexdigest(),
+        }
+    ]
+    assert scope.historical_content not in listing.text
+    _assert_protected(listing)
+
+    download = _get(retrieval_api, f"{base}/content.md")
+    assert download.status_code == 200
+    assert download.content == scope.historical_content.encode()
+    assert download.headers["Content-Type"] == "application/octet-stream"
+    assert download.headers["Content-Disposition"] == (
+        "attachment; filename=\"download\"; filename*=UTF-8''content.md"
+    )
+    assert download.headers["X-Content-Type-Options"] == "nosniff"
+    _assert_protected(download)
+
+
+@pytest.mark.parametrize("suffix", ["missing.md", "Content.md", "..%2Fsecret", "%0D%0Aevil", "CON"])
+def test_revision_file_download_rejects_unknown_or_unsafe_name(
+    retrieval_api: RetrievalApi,
+    suffix: str,
+) -> None:
+    scope = retrieval_api.scope
+    base = (
+        f"/api/v1/sections/{scope.query_section_id}/pages/{scope.first_page_id}"
+        f"/revisions/1/files/{suffix}"
+    )
+    response = _get(retrieval_api, base)
+    if suffix in {"missing.md", "Content.md", "%0D%0Aevil"}:
+        _assert_problem(response, 404, "resource_not_found")
+    else:
+        _assert_problem(response, 422, "request_validation_failed")
+    assert scope.historical_content not in response.text
+
+
+def test_revision_file_routes_preserve_auth_scope_and_tombstone_boundaries(
+    retrieval_api: RetrievalApi,
+) -> None:
+    scope = retrieval_api.scope
+    page_base = f"/api/v1/sections/{scope.query_section_id}/pages/{scope.first_page_id}"
+    file_base = f"{page_base}/revisions/1/files"
+    with TestClient(_app(retrieval_api), raise_server_exceptions=False) as client:
+        unauthenticated = client.get(file_base)
+        malformed = client.get(f"{file_base}/..%2Fsecret")
+    _assert_problem(unauthenticated, 401, "authentication_required")
+    _assert_problem(malformed, 401, "authentication_required")
+
+    deleted = _get(
+        retrieval_api,
+        f"/api/v1/sections/{scope.query_section_id}/pages/"
+        f"{scope.deleted_page_id}/revisions/1/files",
+    )
+    hidden = _get(
+        retrieval_api,
+        f"/api/v1/sections/{scope.hidden_section_id}/pages/"
+        f"{scope.hidden_page_id}/revisions/1/files/content.md",
+    )
+    _assert_problem(deleted, 404, "resource_not_found")
+    _assert_problem(hidden, 404, "resource_not_found")
+
+    readable_without_query = _get(
+        retrieval_api,
+        f"/api/v1/sections/{scope.read_section_id}/pages/"
+        f"{scope.read_page_id}/revisions/1/files/content.md",
+    )
+    assert readable_without_query.status_code == 200
+    assert readable_without_query.content == b"# Read only\n"
 
 
 @pytest.mark.parametrize(
@@ -517,5 +612,32 @@ def test_grant_removal_between_authentication_and_read_is_rechecked(
     response = _get(
         retrieval_api,
         f"/api/v1/sections/{retrieval_api.scope.query_section_id}/pages",
+    )
+    _assert_problem(response, 403, "insufficient_scope")
+
+
+def test_revision_file_download_rechecks_page_read_grant_after_authentication(
+    retrieval_api: RetrievalApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_authenticate = retrieval_routes_module._authenticate
+
+    async def authenticate_then_remove(*args: Any, **kwargs: Any) -> Any:
+        context = await original_authenticate(*args, **kwargs)
+        with immediate_transaction(retrieval_api.engine) as connection:
+            assert AuthRepository(connection).remove_grant(
+                retrieval_api.scope.library_id,
+                CALLER_ID,
+                retrieval_api.scope.query_section_id,
+                SectionAction.PAGE_READ,
+            )
+        return context
+
+    monkeypatch.setattr(retrieval_routes_module, "_authenticate", authenticate_then_remove)
+    scope = retrieval_api.scope
+    response = _get(
+        retrieval_api,
+        f"/api/v1/sections/{scope.query_section_id}/pages/{scope.first_page_id}"
+        "/revisions/1/files/content.md",
     )
     _assert_problem(response, 403, "insufficient_scope")

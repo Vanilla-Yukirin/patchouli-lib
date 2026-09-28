@@ -15,7 +15,19 @@ from patchouli_lib.auth.schemas import (
     StoredCredential,
     credential_metadata,
 )
-from patchouli_lib.content.models import Page, PageIdentifier, Revision
+from patchouli_lib.content.file_manifest import (
+    MAX_FILE_BYTES,
+    MAX_FILES_PER_PAGE,
+    MAX_PAGE_BYTES,
+)
+from patchouli_lib.content.models import (
+    Page,
+    PageIdentifier,
+    Revision,
+    RevisionFile,
+    RevisionFileSeal,
+    RevisionFileSealGuard,
+)
 from patchouli_lib.content.schemas import PageRecord, RevisionRecord
 from patchouli_lib.identifiers import page_id_registry_digest
 from patchouli_lib.library.models import Book, Section
@@ -27,6 +39,14 @@ from patchouli_lib.retrieval.schemas import KeysetPage, ReadWindow
 class StoredDocument:
     page: PageRecord
     revision: RevisionRecord
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class StoredRevisionFile:
+    name: str
+    content: bytes
+    size_bytes: int
+    content_sha256: bytes
 
 
 class RetrievalRepository:
@@ -196,6 +216,67 @@ class RetrievalRepository:
         row = self._connection.execute(statement).mappings().one_or_none()
         return None if row is None else RevisionRecord.model_validate(dict(row))
 
+    def list_revision_files(
+        self,
+        library_id: str,
+        page_uid: bytes,
+        revision_id: str,
+        revision_number: int,
+    ) -> tuple[StoredRevisionFile, ...]:
+        statement = (
+            select(
+                RevisionFile.filename,
+                RevisionFile.content_bytes,
+                RevisionFile.size_bytes,
+                RevisionFile.content_sha256,
+            )
+            .where(
+                RevisionFile.library_id == library_id,
+                RevisionFile.page_uid == page_uid,
+                RevisionFile.revision_id == revision_id,
+                RevisionFile.revision_number == revision_number,
+            )
+            .order_by(RevisionFile.filename)
+        )
+        files: list[StoredRevisionFile] = []
+        total_size = 0
+        for row in self._connection.execute(statement):
+            content = row[1]
+            if (
+                type(content) is not bytes
+                or len(content) > MAX_FILE_BYTES
+                or len(files) >= MAX_FILES_PER_PAGE
+                or total_size + len(content) > MAX_PAGE_BYTES
+            ):
+                raise ValueError("Stored Revision file set exceeds its supported bounds.")
+            files.append(StoredRevisionFile(*row))
+            total_size += len(content)
+        return tuple(files)
+
+    def has_revision_file_seal(
+        self,
+        library_id: str,
+        page_uid: bytes,
+        revision_id: str,
+        revision_number: int,
+    ) -> bool:
+        identity = (
+            library_id,
+            page_uid,
+            revision_id,
+            revision_number,
+        )
+        for model in (RevisionFileSeal, RevisionFileSealGuard):
+            statement = select(model.revision_id).where(
+                model.library_id == identity[0],
+                model.page_uid == identity[1],
+                model.revision_id == identity[2],
+                model.revision_number == identity[3],
+            )
+            if self._connection.execute(statement).scalar_one_or_none() is None:
+                return False
+        return True
+
     def get_current_document(
         self,
         library_id: str,
@@ -227,4 +308,4 @@ class RetrievalRepository:
         return KeysetPage(items=visible, next_key=key(visible[-1]))
 
 
-__all__ = ["RetrievalRepository", "StoredDocument"]
+__all__ = ["RetrievalRepository", "StoredDocument", "StoredRevisionFile"]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 
 import pytest
 from sqlalchemy import Connection, Engine
@@ -22,6 +23,7 @@ from patchouli_lib.retrieval.service import (
     RetrievalAuthenticationError,
     RetrievalAuthorizationError,
     RetrievalNotFoundError,
+    RetrievalPersistenceError,
     RetrievalService,
 )
 
@@ -133,6 +135,126 @@ def test_current_and_explicit_revision_reads_are_exact_and_unrendered(
         )
         assert alias.document.page.page_id == retrieval_scope.first_page_id
         assert alias.document.citation.page_id == retrieval_scope.first_page_id
+    finally:
+        connection.close()
+
+
+def test_revision_file_reads_bind_exact_history_and_current_revision(
+    retrieval_engine: Engine,
+    retrieval_scope: RetrievalScope,
+) -> None:
+    connection, service = _service(retrieval_engine, retrieval_scope)
+    try:
+        historical = service.list_revision_files(
+            retrieval_scope.query_section_id,
+            retrieval_scope.first_page_id,
+            1,
+        )
+        assert historical.page_id == retrieval_scope.first_page_id
+        assert historical.revision_id == retrieval_scope.first_revision_id
+        assert historical.revision_number == 1
+        assert [
+            (item.filename, item.size_bytes, item.content_sha256) for item in historical.files
+        ] == [
+            (
+                "content.md",
+                len(retrieval_scope.historical_content.encode()),
+                hashlib.sha256(retrieval_scope.historical_content.encode()).hexdigest(),
+            )
+        ]
+        assert (
+            service.get_revision_file(
+                retrieval_scope.query_section_id,
+                retrieval_scope.first_page_id,
+                1,
+                "content.md",
+            ).content
+            == retrieval_scope.historical_content.encode()
+        )
+        current = service.get_revision_file(
+            retrieval_scope.query_section_id,
+            retrieval_scope.first_page_alias,
+            2,
+            "content.md",
+        )
+        assert current.content == retrieval_scope.current_content.encode()
+        assert "Historical" not in current.content.decode()
+    finally:
+        connection.close()
+
+
+def test_revision_file_reads_hide_absent_tombstoned_and_unauthorized_pages(
+    retrieval_engine: Engine,
+    retrieval_scope: RetrievalScope,
+) -> None:
+    connection, service = _service(retrieval_engine, retrieval_scope)
+    try:
+        for section_id, page_id in (
+            (retrieval_scope.query_section_id, retrieval_scope.deleted_page_id),
+            (retrieval_scope.hidden_section_id, retrieval_scope.hidden_page_id),
+            (retrieval_scope.query_section_id, retrieval_scope.read_page_id),
+        ):
+            with pytest.raises(RetrievalNotFoundError):
+                service.list_revision_files(section_id, page_id, 1)
+        with pytest.raises(RetrievalNotFoundError):
+            service.get_revision_file(
+                retrieval_scope.query_section_id,
+                retrieval_scope.first_page_id,
+                1,
+                "missing.md",
+            )
+        with pytest.raises(RetrievalNotFoundError):
+            service.list_revision_files(
+                retrieval_scope.query_section_id,
+                retrieval_scope.first_page_id,
+                3,
+            )
+        with pytest.raises(RetrievalAuthorizationError):
+            service.list_revision_files(
+                retrieval_scope.second_query_section_id,
+                retrieval_scope.first_page_id,
+                1,
+            )
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("damage", ["digest", "bytes", "seal"])
+def test_revision_file_reads_refuse_inconsistent_stored_snapshot(
+    retrieval_engine: Engine,
+    retrieval_scope: RetrievalScope,
+    damage: str,
+) -> None:
+    with immediate_transaction(retrieval_engine) as connection:
+        if damage == "digest":
+            connection.exec_driver_sql(
+                "UPDATE revision_files SET content_sha256 = zeroblob(32) WHERE revision_id = ?",
+                (retrieval_scope.first_revision_id,),
+            )
+        elif damage == "bytes":
+            connection.exec_driver_sql(
+                "UPDATE revision_files SET content_bytes = x'42', size_bytes = 1, "
+                "content_sha256 = ? WHERE revision_id = ?",
+                (hashlib.sha256(b"B").digest(), retrieval_scope.first_revision_id),
+            )
+        else:
+            connection.exec_driver_sql(
+                "DELETE FROM revision_file_seal_guards WHERE revision_id = ?",
+                (retrieval_scope.first_revision_id,),
+            )
+            connection.exec_driver_sql(
+                "DELETE FROM revision_file_seals WHERE revision_id = ?",
+                (retrieval_scope.first_revision_id,),
+            )
+
+    connection, service = _service(retrieval_engine, retrieval_scope)
+    try:
+        with pytest.raises(RetrievalPersistenceError):
+            service.list_revision_files(
+                retrieval_scope.query_section_id,
+                retrieval_scope.first_page_id,
+                1,
+            )
     finally:
         connection.close()
 

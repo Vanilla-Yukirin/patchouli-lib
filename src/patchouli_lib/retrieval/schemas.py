@@ -8,6 +8,7 @@ from typing import Annotated, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from patchouli_lib.api.contracts import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Citation
+from patchouli_lib.content.file_manifest import MAX_FILES_PER_PAGE, normalize_file_name
 from patchouli_lib.content.schemas import PageId, RevisionId, StrongPageETag
 from patchouli_lib.identifiers import parse_occurrence_time
 from patchouli_lib.library.schemas import OpaqueId, ResourceName
@@ -90,6 +91,32 @@ class RevisionView(RetrievalSchema):
         return value
 
 
+class RevisionFileView(RetrievalSchema):
+    filename: Annotated[str, Field(min_length=1, max_length=255)]
+    size_bytes: Annotated[int, Field(ge=0)]
+    content_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+    @field_validator("filename")
+    @classmethod
+    def require_normalized_filename(cls, value: str) -> str:
+        if normalize_file_name(value) != value:
+            raise ValueError("File name must be normalized.")
+        return value
+
+
+class RevisionFileManifestView(RetrievalSchema):
+    page_id: PageId
+    revision_id: RevisionId
+    revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+    files: Annotated[list[RevisionFileView], Field(min_length=1, max_length=MAX_FILES_PER_PAGE)]
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class RevisionFileRead:
+    filename: str
+    content: bytes = field(repr=False)
+
+
 class PageMetadata(RetrievalSchema):
     """Current Page metadata and its exact current-Revision citation."""
 
@@ -150,6 +177,9 @@ __all__ = [
     "PageMetadata",
     "PageView",
     "ReadWindow",
+    "RevisionFileManifestView",
+    "RevisionFileRead",
+    "RevisionFileView",
     "RevisionView",
     "SectionView",
 ]
