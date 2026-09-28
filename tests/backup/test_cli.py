@@ -118,7 +118,7 @@ def test_create_reads_database_url_only_from_environment_and_emits_safe_json(
         "artifact_digest": IDENTITY.digest,
         "byte_size": metadata["byte_size"],
         "operation": "create",
-        "schema_revision": "20260929_0008",
+        "schema_revision": SUPPORTED_SCHEMA_REVISION,
         "sha256": metadata["sha256"],
         "state": "created",
     }
@@ -500,7 +500,7 @@ def test_restore_output_failure_preserves_inactive_verifiable_destination(
     assert stderr == "Backup command output failed.\n"
     assert destination.is_file()
     report = validate_database(destination)
-    assert report.schema_revision == "20260929_0008"
+    assert report.schema_revision == SUPPORTED_SCHEMA_REVISION
     assert destination.read_bytes() == (bundle / "database.sqlite").read_bytes()
 
 

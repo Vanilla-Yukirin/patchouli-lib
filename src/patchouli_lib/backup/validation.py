@@ -12,7 +12,11 @@ from typing import Final
 from urllib.parse import quote
 
 from patchouli_lib.backup.errors import BackupDatabaseError
-from patchouli_lib.backup.manifest import LEGACY_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION
+from patchouli_lib.backup.manifest import (
+    LEGACY_SCHEMA_REVISION,
+    PREVIOUS_SCHEMA_REVISION,
+    SUPPORTED_SCHEMA_REVISION,
+)
 from patchouli_lib.content.file_manifest import (
     MAX_FILE_BYTES,
     MAX_FILES_PER_PAGE,
@@ -185,9 +189,21 @@ _EXPECTED_SQL_HASHES_0008: Final = _EXPECTED_SQL_HASHES_0007 | {
         "26b7f8a0e5db0b36352cc083979cb9b7eefa61a4eab1ba3de3e4aace92cadf9d"
     ),
 }
+_EXPECTED_SQL_HASHES_0009: Final = _EXPECTED_SQL_HASHES_0008 | {
+    ("table", "admin_structure_audit_events"): (
+        "eac48c9788b0a7105c1c398df1ffacab53506ef72f1a6cd760bfbc8181a149e8"
+    ),
+    ("trigger", "trg_admin_structure_audit_no_update"): (
+        "64d89b8ae1eb65d79ea98a6745fc802daa99a228784ec71b808b2bd0c18094bf"
+    ),
+    ("trigger", "trg_admin_structure_audit_no_delete"): (
+        "cc60f9851bd52e0dc775b034b64f0090e6e7eca2710c536b25ffe4583eaa2a16"
+    ),
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
-    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
+    PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
+    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0009,
 }
 
 
@@ -341,7 +357,7 @@ def _require_page_graph(connection: sqlite3.Connection, schema_revision: str) ->
         raise BackupDatabaseError
 
     _require_revision_files(connection, schema_revision)
-    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+    if schema_revision != LEGACY_SCHEMA_REVISION:
         _require_revision_seals(connection)
 
     identifiers_by_page: dict[tuple[str, bytes], list[tuple[str, str]]] = {}
@@ -492,7 +508,7 @@ def _require_revision_files(connection: sqlite3.Connection, schema_revision: str
             files.append((name, content))
         if not found_markdown:
             raise BackupDatabaseError
-        if schema_revision == SUPPORTED_SCHEMA_REVISION and (
+        if schema_revision in {PREVIOUS_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION} and (
             len(files) != 1 or files[0][0] != "content.md"
         ):
             raise BackupDatabaseError

@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from uuid import uuid4
 
-from sqlalchemy import Engine
+from sqlalchemy import Connection, Engine, insert
 
 from patchouli_lib.admin.contracts import (
     BootstrapInput,
@@ -12,6 +12,7 @@ from patchouli_lib.admin.contracts import (
     RecoverOperatorInput,
     RevokeAgentCredentialInput,
 )
+from patchouli_lib.auth.models import AdminStructureAuditEvent
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
     MAX_RFC3339_TIMESTAMP_MICROSECONDS,
@@ -22,8 +23,16 @@ from patchouli_lib.auth.schemas import (
 from patchouli_lib.auth.service import utc_microseconds
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.library.repository import LibraryRepository
-from patchouli_lib.library.schemas import LibraryStructureSeed
-from patchouli_lib.library.service import LibrarySeedService
+from patchouli_lib.library.schemas import (
+    BookRecord,
+    CreateBookInput,
+    CreateLibraryInput,
+    CreateSectionInput,
+    LibraryRecord,
+    LibraryStructureSeed,
+    SectionRecord,
+)
+from patchouli_lib.library.service import LibrarySeedService, LibraryStructureService
 from patchouli_lib.operator.service import (
     LocalOperatorRecoveryService,
     OperatorBootstrapService,
@@ -63,6 +72,88 @@ class AdminActionService:
         self._engine = engine
         self._clock = clock
         self._request_id_factory = request_id_factory or _request_id
+
+    def create_library(
+        self, request: CreateLibraryInput, *, session_fingerprint: bytes
+    ) -> LibraryRecord:
+        now = self._clock()
+        with immediate_transaction(self._engine) as connection:
+            result = LibraryStructureService(
+                LibraryRepository(connection), clock=lambda: now
+            ).create_library(request)
+            self._record_structure_event(
+                connection, session_fingerprint, "library.create", result.id, now
+            )
+        return result
+
+    def create_section(
+        self, library_id: str, request: CreateSectionInput, *, session_fingerprint: bytes
+    ) -> SectionRecord:
+        now = self._clock()
+        with immediate_transaction(self._engine) as connection:
+            result = LibraryStructureService(
+                LibraryRepository(connection), clock=lambda: now
+            ).create_section(library_id, request)
+            self._record_structure_event(
+                connection,
+                session_fingerprint,
+                "section.create",
+                library_id,
+                now,
+                section_id=result.id,
+            )
+        return result
+
+    def create_book(
+        self,
+        library_id: str,
+        section_id: str,
+        request: CreateBookInput,
+        *,
+        session_fingerprint: bytes,
+    ) -> BookRecord:
+        now = self._clock()
+        with immediate_transaction(self._engine) as connection:
+            result = LibraryStructureService(
+                LibraryRepository(connection), clock=lambda: now
+            ).create_book(library_id, section_id, request)
+            self._record_structure_event(
+                connection,
+                session_fingerprint,
+                "book.create",
+                library_id,
+                now,
+                section_id=section_id,
+                book_id=result.id,
+            )
+        return result
+
+    def _record_structure_event(
+        self,
+        connection: Connection,
+        fingerprint: bytes,
+        action: str,
+        library_id: str,
+        occurred_at: int,
+        *,
+        section_id: str | None = None,
+        book_id: str | None = None,
+    ) -> None:
+        if type(fingerprint) is not bytes or len(fingerprint) != 32:
+            raise ValueError("Invalid administration session fingerprint.")
+        connection.execute(
+            insert(AdminStructureAuditEvent),
+            {
+                "id": uuid4().hex,
+                "session_fingerprint": fingerprint,
+                "action": action,
+                "library_id": library_id,
+                "section_id": section_id,
+                "book_id": book_id,
+                "request_id": self._request_id_factory(),
+                "occurred_at": occurred_at,
+            },
+        )
 
     def bootstrap(self, request: BootstrapInput) -> DeliveredCredential:
         now = self._clock()

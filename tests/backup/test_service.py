@@ -14,6 +14,7 @@ import pytest
 from alembic import command
 from sqlalchemy import Engine, create_engine, text
 
+from patchouli_lib.admin.service import AdminActionService
 from patchouli_lib.backup import (
     BACKUP_FILENAME,
     MANIFEST_FILENAME,
@@ -34,9 +35,12 @@ from patchouli_lib.backup import service as backup_service
 from patchouli_lib.backup.manifest import (
     LEGACY_SCHEMA_REVISION,
     MAX_MANIFEST_BYTES,
+    PREVIOUS_SCHEMA_REVISION,
+    SUPPORTED_SCHEMA_REVISION,
     BackupManifestV1,
 )
 from patchouli_lib.database import immediate_transaction
+from patchouli_lib.library.schemas import CreateLibraryInput
 
 from .conftest import APP_VERSION, _config
 
@@ -155,6 +159,78 @@ def _legacy_bundle_with_binary_file(
     return revised_markdown, binary
 
 
+def test_0008_bundle_remains_explicitly_verifiable_and_restorable(
+    complete_engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_database = complete_engine.url.database
+    assert source_database is not None
+    source_path = Path(source_database)
+    command.downgrade(_config(source_path, monkeypatch), PREVIOUS_SCHEMA_REVISION)
+
+    bundle = tmp_path / "previous-bundle"
+    bundle.mkdir()
+    database = bundle / BACKUP_FILENAME
+    with closing(sqlite3.connect(source_path)) as source:
+        journal_mode = source.execute("PRAGMA journal_mode").fetchone()[0]
+        with closing(sqlite3.connect(database)) as destination:
+            source.backup(destination)
+            destination.execute("PRAGMA journal_mode = DELETE")
+            destination.commit()
+    data = database.read_bytes()
+    artifact = identity()
+    manifest = BackupManifestV1(
+        schema_version=1,
+        backup_filename=BACKUP_FILENAME,
+        byte_size=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        created_at="2026-08-13T12:34:56.123456Z",
+        app_version=APP_VERSION,
+        schema_revision=PREVIOUS_SCHEMA_REVISION,
+        sqlite_version=sqlite3.sqlite_version,
+        source_journal_mode=journal_mode,
+        artifact_identity=artifact.identity,
+        artifact_digest=artifact.digest,
+    )
+    (bundle / MANIFEST_FILENAME).write_bytes(manifest.canonical_bytes())
+
+    with pytest.raises(BackupManifestError):
+        verify_backup_bundle(bundle, app_version=APP_VERSION)
+    assert (
+        verify_backup_bundle(
+            bundle, app_version=APP_VERSION, schema_revision=PREVIOUS_SCHEMA_REVISION
+        )
+        == manifest
+    )
+    restored = tmp_path / "previous-restored.sqlite"
+    with pytest.raises(BackupManifestError):
+        restore_backup(bundle, restored, app_version=APP_VERSION)
+    restore_backup(
+        bundle, restored, app_version=APP_VERSION, schema_revision=PREVIOUS_SCHEMA_REVISION
+    )
+    validate_database(restored, schema_revision=PREVIOUS_SCHEMA_REVISION)
+    with closing(sqlite3.connect(restored)) as connection:
+        assert connection.execute("SELECT content_md FROM revisions").fetchone() == (
+            b"# Synthetic archive\n\nExact bytes.\n",
+        )
+        assert connection.execute("SELECT count(*) FROM revision_file_seals").fetchone() == (1,)
+
+
+def test_new_backup_restores_admin_structure_audit(complete_engine: Engine, tmp_path: Path) -> None:
+    created = AdminActionService(complete_engine).create_library(
+        CreateLibraryInput(name="Synthetic extra Library"), session_fingerprint=b"s" * 32
+    )
+    bundle = tmp_path / "admin-audit-bundle"
+    _create(complete_engine, bundle)
+    restored = tmp_path / "admin-audit-restored.sqlite"
+    restore_backup(bundle, restored, app_version=APP_VERSION)
+    with closing(sqlite3.connect(restored)) as connection:
+        assert connection.execute(
+            "SELECT action, library_id, session_fingerprint FROM admin_structure_audit_events"
+        ).fetchone() == ("library.create", created.id, b"s" * 32)
+
+
 @pytest.mark.parametrize("journal_mode", ["delete", "wal"])
 def test_live_backup_and_restore_preserve_complete_domain_state(
     complete_engine: Engine,
@@ -204,7 +280,7 @@ def test_live_backup_and_restore_preserve_complete_domain_state(
             1,
         )
         assert sqlite_connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "20260929_0008",
+            SUPPORTED_SCHEMA_REVISION,
         )
         assert sqlite_connection.execute(
             "SELECT revision_id, revision_number, locator FROM page_sources"

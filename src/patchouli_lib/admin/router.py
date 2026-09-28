@@ -41,7 +41,11 @@ from patchouli_lib.admin.service import AdminActionService, DeliveredCredential
 from patchouli_lib.admin.session import AdminSession, AdminSessionCodec
 from patchouli_lib.auth.service import AuthenticationError, AuthorizationError
 from patchouli_lib.config import Settings
-from patchouli_lib.library.service import LibrarySeedConflictError
+from patchouli_lib.library.schemas import CreateBookInput, CreateLibraryInput, CreateSectionInput
+from patchouli_lib.library.service import (
+    LibrarySeedConflictError,
+    LibraryStructureNotFoundError,
+)
 from patchouli_lib.operator.service import (
     BootstrapAlreadyCompletedError,
     CredentialLifecycleError,
@@ -305,6 +309,46 @@ def create_admin_router(
     def revoke_agent(values: FormValues) -> None:
         service.revoke_agent_credential(RevokeAgentCredentialInput.model_validate(values))
 
+    async def structure_action(
+        request: Request,
+        *,
+        allowed_fields: frozenset[str],
+        action: Callable[[FormValues, bytes], str],
+        render: Callable[[str, AdminLocale, str], str | None],
+    ) -> Response:
+        locale = locale_for(request)
+        if not _same_origin_submission(request):
+            return forbidden(request)
+        session = current_session(request)
+        if session is None:
+            return html(
+                login_page(locale=locale, message="Sign in again."),
+                locale=locale,
+                status_code=401,
+            )
+        try:
+            values = await _read_form(request, allowed_fields=allowed_fields | {"csrf_token"})
+            _require_csrf(values, session)
+            location = await run_in_threadpool(action, values, session.audit_fingerprint())
+        except _FormError as exc:
+            status, message = exc.status_code, exc.safe_message
+        except (ValidationError, ValueError):
+            status, message = 422, "Check the submitted fields and try again."
+        except LibraryStructureNotFoundError:
+            status, message = 404, "The requested local resource was not found."
+        except (LibrarySeedConflictError, IntegrityError):
+            status, message = 409, "The action conflicts with current local state."
+        except Exception:
+            status, message = 500, "The action could not be completed."
+        else:
+            return redirect(location)
+        page = render(session.csrf_token, locale, message)
+        return html(
+            page if page is not None else browser_not_found_page(session.csrf_token, locale=locale),
+            locale=locale,
+            status_code=status if page is not None else 404,
+        )
+
     @router.get("")
     def dashboard(request: Request) -> Response:
         return protected_page(
@@ -332,6 +376,23 @@ def create_admin_router(
             lambda csrf, locale: libraries_page(csrf, read_model.list_libraries(), locale=locale),
         )
 
+    @router.post("/libraries")
+    async def create_library(request: Request) -> Response:
+        def action(values: FormValues, fingerprint: bytes) -> str:
+            created = service.create_library(
+                CreateLibraryInput.model_validate(values), session_fingerprint=fingerprint
+            )
+            return f"/admin/libraries/{created.id}"
+
+        return await structure_action(
+            request,
+            allowed_fields=frozenset(CreateLibraryInput.model_fields),
+            action=action,
+            render=lambda csrf, locale, message: libraries_page(
+                csrf, read_model.list_libraries(), locale=locale, message=message
+            ),
+        )
+
     @router.get("/libraries/{library_id}")
     def library_detail(request: Request, library_id: str) -> Response:
         def render(csrf: str, locale: AdminLocale) -> str | None:
@@ -339,6 +400,29 @@ def create_admin_router(
             return None if view is None else library_page(csrf, view, locale=locale)
 
         return protected_page(request, render)
+
+    @router.post("/libraries/{library_id}/sections")
+    async def create_section(request: Request, library_id: str) -> Response:
+        def action(values: FormValues, fingerprint: bytes) -> str:
+            created = service.create_section(
+                library_id,
+                CreateSectionInput.model_validate(values),
+                session_fingerprint=fingerprint,
+            )
+            return f"/admin/libraries/{library_id}/sections/{created.id}"
+
+        def render(csrf: str, locale: AdminLocale, message: str) -> str | None:
+            view = read_model.get_library(library_id)
+            return (
+                None if view is None else library_page(csrf, view, locale=locale, message=message)
+            )
+
+        return await structure_action(
+            request,
+            allowed_fields=frozenset(CreateSectionInput.model_fields),
+            action=action,
+            render=render,
+        )
 
     @router.get("/libraries/{library_id}/callers/{caller_id}")
     def caller_detail(request: Request, library_id: str, caller_id: str) -> Response:
@@ -355,6 +439,30 @@ def create_admin_router(
             return None if view is None else section_page(csrf, view, locale=locale)
 
         return protected_page(request, render)
+
+    @router.post("/libraries/{library_id}/sections/{section_id}/books")
+    async def create_book(request: Request, library_id: str, section_id: str) -> Response:
+        def action(values: FormValues, fingerprint: bytes) -> str:
+            created = service.create_book(
+                library_id,
+                section_id,
+                CreateBookInput.model_validate(values),
+                session_fingerprint=fingerprint,
+            )
+            return f"/admin/libraries/{library_id}/sections/{section_id}/books/{created.id}"
+
+        def render(csrf: str, locale: AdminLocale, message: str) -> str | None:
+            view = read_model.get_section(library_id, section_id)
+            return (
+                None if view is None else section_page(csrf, view, locale=locale, message=message)
+            )
+
+        return await structure_action(
+            request,
+            allowed_fields=frozenset(CreateBookInput.model_fields),
+            action=action,
+            render=render,
+        )
 
     @router.get("/libraries/{library_id}/sections/{section_id}/books/{book_id}")
     def book_detail(request: Request, library_id: str, section_id: str, book_id: str) -> Response:

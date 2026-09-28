@@ -405,6 +405,7 @@ def test_empty_upgrade_downgrade_and_reupgrade(
 ) -> None:
     database_url, config = _database(tmp_path, monkeypatch)
     command.upgrade(config, "20260929_0008")
+    command.upgrade(config, "head")
     command.check(config)
     assert _row_count(database_url, "revision_file_seals") == 0
     assert _row_count(database_url, "revision_file_seal_guards") == 0

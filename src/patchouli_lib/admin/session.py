@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import hmac
 import json
 import secrets
@@ -21,6 +22,11 @@ _MAX_ENCODED_SESSION_BYTES: Final[int] = 512
 class AdminSession:
     expires_at: int
     csrf_token: str
+
+    def audit_fingerprint(self) -> bytes:
+        """Correlate local structure writes without storing a bearer or CSRF value."""
+
+        return hashlib.sha256(self.csrf_token.encode("ascii")).digest()
 
 
 class AdminSessionCodec:

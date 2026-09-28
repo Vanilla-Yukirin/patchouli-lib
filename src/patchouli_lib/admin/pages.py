@@ -202,6 +202,9 @@ _ZH_CN: dict[str, str] = {
     "No sections yet.": "暂无分区。",
     "No books yet.": "暂无书籍。",
     "No pages yet.": "暂无页面。",
+    "Create Library": "新建知识库",
+    "Create Section": "新建分区",
+    "Create Book": "新建书籍",
     "Page count": "页面数",
     "The requested item was not found.": "找不到请求的内容。",
     "MCP setup": "MCP 配置",
@@ -707,6 +710,7 @@ def libraries_page(
     libraries: tuple[LibraryItem, ...],
     *,
     locale: AdminLocale = "en",
+    message: str | None = None,
 ) -> str:
     cards = "".join(
         '<li><a href="/admin/libraries/'
@@ -720,6 +724,14 @@ def libraries_page(
         if libraries
         else f'<p class="card">{localize(locale, "No libraries yet.")}</p>'
     )
+    body += (
+        '<section class="card"><h2>' + localize(locale, "Create Library") + "</h2>"
+        f'<form method="post" action="/admin/libraries">{_csrf(escape(csrf_token, quote=True))}'
+        f"{_text('name', 'Library name', locale)}"
+        f'<button type="submit">{localize(locale, "Create Library")}</button></form></section>'
+    )
+    if message is not None:
+        body = _notice(localize(locale, message), error=True) + body
     return _browser_document(
         csrf_token, locale, localize(locale, "Libraries"), "/admin/libraries", body
     )
@@ -730,6 +742,7 @@ def library_page(
     view: LibraryView,
     *,
     locale: AdminLocale = "en",
+    message: str | None = None,
 ) -> str:
     base = f"/admin/libraries/{escape(view.library.id, quote=True)}"
     cards = "".join(
@@ -747,6 +760,17 @@ def library_page(
             else f'<p class="card">{localize(locale, "No sections yet.")}</p>'
         )
     )
+    body += (
+        '<section class="card"><h2>' + localize(locale, "Create Section") + "</h2>"
+        f'<form method="post" action="{base}/sections">'
+        f"{_csrf(escape(csrf_token, quote=True))}"
+        f"{_text('name', 'Section name', locale)}"
+        f"{_textarea('description', 'Section description', locale)}"
+        f'<button type="submit">{localize(locale, "Create Section")}</button>'
+        "</form></section>"
+    )
+    if message is not None:
+        body = _notice(localize(locale, message), error=True) + body
     return _browser_document(
         csrf_token,
         locale,
@@ -762,6 +786,7 @@ def section_page(
     view: SectionView,
     *,
     locale: AdminLocale = "en",
+    message: str | None = None,
 ) -> str:
     library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
     base = f"{library_path}/sections/{escape(view.section.id, quote=True)}"
@@ -775,6 +800,17 @@ def section_page(
         if view.books
         else f'<p class="card">{localize(locale, "No books yet.")}</p>'
     )
+    body += (
+        '<section class="card"><h2>' + localize(locale, "Create Book") + "</h2>"
+        f'<form method="post" action="{base}/books">'
+        f"{_csrf(escape(csrf_token, quote=True))}"
+        f"{_text('name', 'Book name', locale)}"
+        f"{_textarea('summary', 'Book summary', locale)}"
+        f'<button type="submit">{localize(locale, "Create Book")}</button>'
+        "</form></section>"
+    )
+    if message is not None:
+        body = _notice(localize(locale, message), error=True) + body
     return _browser_document(
         csrf_token,
         locale,

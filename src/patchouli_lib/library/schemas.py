@@ -58,6 +58,20 @@ class LibraryStructureSeed(LibrarySchema):
     book_summary: BoundedText = ""
 
 
+class CreateLibraryInput(LibrarySchema):
+    name: ResourceName
+
+
+class CreateSectionInput(LibrarySchema):
+    name: ResourceName
+    description: BoundedText = ""
+
+
+class CreateBookInput(LibrarySchema):
+    name: ResourceName
+    summary: BoundedText = ""
+
+
 class CreatedResources(LibrarySchema):
     library: bool
     section: bool

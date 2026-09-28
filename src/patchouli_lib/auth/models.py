@@ -279,6 +279,64 @@ class AuditEvent(Base):
     occurred_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
+class AdminStructureAuditEvent(Base):
+    """A completed structure write by a password-authenticated web session.
+
+    This actor is deliberately separate from a bearer credential. Only a
+    one-way fingerprint of the random session identifier is persisted.
+    """
+
+    __tablename__ = "admin_structure_audit_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id"],
+            ["libraries.id"],
+            name="fk_admin_structure_audit_library",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["section_id", "library_id"],
+            ["sections.id", "sections.library_id"],
+            name="fk_admin_structure_audit_section",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["book_id", "section_id", "library_id"],
+            ["books.id", "books.section_id", "books.library_id"],
+            name="fk_admin_structure_audit_book",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'",
+            name="ck_admin_structure_audit_id",
+        ),
+        CheckConstraint(
+            "typeof(session_fingerprint) = 'blob' AND length(session_fingerprint) = 32",
+            name="ck_admin_structure_audit_session_fingerprint",
+        ),
+        CheckConstraint(
+            "(action = 'library.create' AND section_id IS NULL AND book_id IS NULL) "
+            "OR (action = 'section.create' AND section_id IS NOT NULL AND book_id IS NULL) "
+            "OR (action = 'book.create' AND section_id IS NOT NULL AND book_id IS NOT NULL)",
+            name="ck_admin_structure_audit_action_resource",
+        ),
+        CheckConstraint(
+            "length(request_id) BETWEEN 5 AND 100 AND request_id = trim(request_id) "
+            "AND occurred_at >= 0",
+            name="ck_admin_structure_audit_metadata",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    session_fingerprint: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    action: Mapped[str] = mapped_column(String(ACTION_MAX_LENGTH), nullable=False)
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+    section_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
+    book_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
+    request_id: Mapped[str] = mapped_column(String(REQUEST_ID_MAX_LENGTH), nullable=False)
+    occurred_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
 class BootstrapMarker(Base):
     __tablename__ = "operator_bootstrap_markers"
     __table_args__ = (
@@ -323,4 +381,11 @@ class BootstrapMarker(Base):
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
-__all__ = ["AuditEvent", "BootstrapMarker", "Caller", "Credential", "SectionGrant"]
+__all__ = [
+    "AdminStructureAuditEvent",
+    "AuditEvent",
+    "BootstrapMarker",
+    "Caller",
+    "Credential",
+    "SectionGrant",
+]

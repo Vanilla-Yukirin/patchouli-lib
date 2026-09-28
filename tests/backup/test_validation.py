@@ -6,9 +6,12 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import Engine
 
 from patchouli_lib.backup import BACKUP_FILENAME, BackupDatabaseError, validate_database
+from patchouli_lib.backup.manifest import PREVIOUS_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION
 
 from .test_service import _create, _legacy_bundle_with_binary_file
 
@@ -402,11 +405,22 @@ def test_0008_validation_rejects_missing_seal_or_guard(
         validate_database(database)
 
 
-def test_0008_validation_rejects_extra_file_even_if_write_triggers_were_bypassed(
+@pytest.mark.parametrize("schema_revision", [PREVIOUS_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION])
+def test_sealed_validation_rejects_extra_file_even_if_write_triggers_were_bypassed(
     complete_engine: Engine,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    schema_revision: str,
 ) -> None:
     database = _database_copy(complete_engine, tmp_path, "extra-sealed-file")
+    monkeypatch.setenv("PATCHOULI_DATABASE_URL", f"sqlite:///{database.as_posix()}")
+    monkeypatch.setenv("PATCHOULI_ENVIRONMENT", "test")
+    if schema_revision == PREVIOUS_SCHEMA_REVISION:
+        command.downgrade(
+            Config(str(Path(__file__).resolve().parents[2] / "alembic.ini")),
+            PREVIOUS_SCHEMA_REVISION,
+        )
+    validate_database(database, schema_revision=schema_revision)
     content = b"synthetic binary"
     names = (
         "trg_revision_files_legacy_sealed_insert",
@@ -432,4 +446,4 @@ def test_0008_validation_rejects_extra_file_even_if_write_triggers_were_bypassed
             connection.execute(statement)
         connection.commit()
     with pytest.raises(BackupDatabaseError):
-        validate_database(database)
+        validate_database(database, schema_revision=schema_revision)
