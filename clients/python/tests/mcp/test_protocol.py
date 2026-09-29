@@ -223,7 +223,12 @@ def test_read_tools_use_exact_typed_client_requests_and_redact_credential_id(
         if path == "/api/v1/capabilities":
             body: object = capabilities_body()
         elif path == "/api/v1/auth/whoami":
-            body = whoami_body(credential_id="credential_must_not_escape")
+            body = {
+                **whoami_body(credential_id="credential_must_not_escape"),
+                "policy_mode": "library_grants",
+                "library_grants": [{"library_id": "lib_synthetic", "actions": ["read", "write"]}],
+                "grants": [],
+            }
         elif path == "/api/v1/sections":
             body = {
                 "items": [{"section_id": "sec_synthetic", "name": "Synthetic"}],
@@ -286,6 +291,14 @@ def test_read_tools_use_exact_typed_client_requests_and_redact_credential_id(
     assert "occurrence_notice" not in cast(dict[str, object], _payload(results[5])["data"])
     assert "occurrence_notice" not in cast(dict[str, object], _payload(results[6])["data"])
     assert "credential_must_not_escape" not in json.dumps(_payload(results[1]))
+    whoami_data = cast(dict[str, object], _payload(results[1])["data"])
+    assert whoami_data["name"] == "Synthetic Agent"
+    assert whoami_data["description"] == "Synthetic client fixture"
+    assert whoami_data["policy_mode"] == "library_grants"
+    assert whoami_data["library_grants"] == [
+        {"library_id": "lib_synthetic", "actions": ["read", "write"]}
+    ]
+    assert whoami_data["grants"] == []
     assert [(request.method, request.url.path) for request in requests] == [
         ("GET", "/api/v1/capabilities"),
         ("GET", "/api/v1/auth/whoami"),
@@ -297,6 +310,30 @@ def test_read_tools_use_exact_typed_client_requests_and_redact_credential_id(
     ]
     assert json.loads(requests[4].content) == {"query": "synthetic", "limit": 5}
     assert harness.clients[0].close_calls == 1
+
+
+def test_whoami_from_old_server_does_not_infer_library_permissions(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/auth/whoami"
+        return httpx.Response(
+            200,
+            headers=protected_headers(),
+            json=whoami_body(credential_id="credential_must_not_escape"),
+        )
+
+    harness = RuntimeHarness(tmp_path, httpx.MockTransport(handler))
+
+    async def action(session: ClientSession) -> mcp_types.CallToolResult:
+        return await session.call_tool("whoami", {})
+
+    result = _run_session(harness, action)
+    identity = cast(dict[str, object], _payload(result)["data"])
+    assert identity["name"] == "Synthetic Agent"
+    assert identity["description"] == "Synthetic client fixture"
+    assert identity["policy_mode"] is None
+    assert identity["library_grants"] is None
+    assert identity["grants"] == [{"section_id": "sec_synthetic", "actions": ["archive:write"]}]
+    assert "credential_must_not_escape" not in json.dumps(_payload(result))
 
 
 def test_create_and_revise_are_explicit_and_keep_operation_key_internal(tmp_path: Path) -> None:

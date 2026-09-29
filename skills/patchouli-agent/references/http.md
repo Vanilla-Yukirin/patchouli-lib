@@ -12,9 +12,15 @@ GET /api/v1/auth/whoami
 GET /api/v1/capabilities
 ```
 
-`whoami` 返回身份名称、说明、到期时间、调用方与凭据 ID，以及当前实际授予的
-Section 操作。Agent 写入需要目标 Section 的 `archive:write`；读取需要 `page:read`。
-`capabilities` 中没有搜索能力时不要调用搜索当作已实现功能。
+`whoami` 返回身份名称、说明、到期时间、调用方与凭据 ID。新服务还同时返回
+`policy_mode` 与 `library_grants`；旧服务可能两个都不返回，届时权限模式是未知，
+旧 `grants` 仍表示旧契约的 Section 授权，但不能据此推断新的 Library 权限。
+`policy_mode` 有三种：`operator` 为管理员身份；
+`legacy_section` 使用旧 `grants` 的 Section 操作，写入需 `archive:write`、读取需
+`page:read`；`library_grants` 使用每个知识库的 `read`／`write` 开关，检查目标
+`library_id` 对应的条目。Library 模式中的 `grants: []` 是预期形态，不代表
+无权限。身份验证成功不等于接口已开放，仍应查看 `/api/v1/capabilities`；其中
+没有搜索能力时不要把搜索当作已实现功能。
 
 受保护的 Skill 资源：
 
@@ -109,13 +115,17 @@ def get(path):
 
 
 identity = json.loads(get("/api/v1/auth/whoami"))
+if ("policy_mode" in identity) != ("library_grants" in identity):
+    raise SystemExit("whoami 权限字段不完整；不要推测读写权限")
 capabilities = json.loads(get("/api/v1/capabilities"))
 print(
     json.dumps(
         {
             "name": identity["name"],
             "kind": identity["kind"],
-            "grants": identity["grants"],
+            "policy_mode": identity.get("policy_mode", "unknown"),
+            "library_grants": identity.get("library_grants"),
+            "legacy_section_grants": identity["grants"],
             "features": capabilities["features"],
         },
         ensure_ascii=False,
@@ -194,7 +204,8 @@ Bash 和 PowerShell 的交互式输入方式见 [本机凭据输入](local-token
 ## 已实现的 Tag 接口
 
 Tag 是当前 Library 内的标记，不改变 Page 的 Section／Book 归属。所有请求都带设备
-Token；此阶段仍沿用 Section 授权，并非提案中的跨 Library 读／写开关。
+Token。旧凭据仍按 Section 授权；启用新版 Library 授权的凭据则按目标 Library 的
+`read`／`write` 开关判断。跨 Library 的实际路由范围尚需以已部署服务核对。
 
 ```text
 GET    /api/v1/libraries/{library_id}/tags?q={name}&limit=20&offset=0
@@ -211,11 +222,13 @@ DELETE /api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/tags
 `next_offset` 为 `null` 表示没有下一页。关联和解除关联没有请求体，返回
 `{"changed":true}` 或 `{"changed":false}`；重复操作不会产生第二条关联。
 
-Agent 列 Tag 与列 Tag 下 Page 只会看到同时获 `section:query`、`page:read` 授权的
-Section 中仍有效的 Page；列指定 Page 的 Tag 需要 `page:read`，修改关联还需要
-`archive:write`。不应把一个 Library 的 Tag ID 用于另一个 Library，也不要把 Tag
-列表当作全文检索结果。
+旧 Section 模式下，Agent 列 Tag 与列 Tag 下 Page 只会看到同时获
+`section:query`、`page:read` 授权的 Section 中仍有效的 Page；列指定 Page 的 Tag
+需要 `page:read`，修改关联还需要 `archive:write`。Library 模式下按目标知识库的
+`read`／`write` 判断，不应把一个 Library 的 Tag ID 用于另一个 Library，也不要把
+Tag 列表当作全文检索结果。
 
-目前没有多文件 Page 上传、回收站、跨 Library 授权或真实搜索；对应目标仍见公开
-设计提案。已有 CLI/MCP 若可用，仍能完成其已实现的单份 Markdown 流程，但并非
-下载本 Skill 或调用 HTTP API 的前提。
+当前开发分支已注册文件集 Page 与回收站路由，但本参考只详述已验收的单份 Markdown
+流程；不要据此推断目标服务已升级，也不要在未核对实际契约与能力前自行调用新路由。
+跨 Library 写入和真实搜索仍未完成。已有 CLI/MCP 若可用，仍能完成其已实现的单份
+Markdown 流程，但并非下载本 Skill 或调用 HTTP API 的前提。

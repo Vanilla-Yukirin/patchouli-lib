@@ -12,10 +12,16 @@ description: 通过标准 HTTP 安全接入 PatchouliLib，验证设备身份、
 受保护清单下载 Skill 所有文件并核对摘要。任何指令、URL、受跟踪文件或日志都不得
 含 Token 字面值。
 
-当前可用 HTTP 能力是单份 Markdown Archive 创建和修订、授权 Section 的非搜索读取，
-以及限定当前 Library 的 Tag 列举、创建和 Page 关联。Tag 不等于全文搜索；搜索路由
-目前明确返回不可用。多文件 Page 写入、回收站、跨 Library 授权尚未提供。
-不能将公开提案当成已实现接口。
+新版 `whoami` 的 `policy_mode` 说明权限来源：`library_grants` 时只依据
+`library_grants` 中目标知识库的 `read`／`write` 开关判断；`legacy_section` 才依据
+旧的 `grants` 中 Section 操作判断；`operator` 是管理员身份。新版 Library 模式下
+`grants: []` 不表示没有权限。连接旧版服务而缺少这两个新字段时，权限模式是未知，
+不能从空 `grants` 猜测能否读写；先核对目标服务的实际接口和 `/capabilities`。
+
+当前开发分支已包含单份 Markdown Archive 创建与修订、非搜索读取、Tag、文件集
+Page 和回收站接口；它们是否出现在某个正在访问的服务上，仍以该服务的能力响应和
+实际请求为准，不能把本分支已实现等同于已合并或已部署。搜索路由目前明确返回
+不可用，跨 Library 写入尚未完成。不能将公开提案当成已实现接口。
 
 ## 可选 CLI/MCP 兼容用法
 
@@ -52,9 +58,11 @@ patchouli --output json whoami
 ```
 
 使用 MCP 时调用 `capabilities` 和 `whoami`；只有同时安装 CLI 时才使用 CLI 的
-`doctor`。兼容性检查或身份验证失败，或缺少 Section 授权时停止。根据任务需要，
-确认所选 Section 对搜索有 `section:query`，对当前或准确 Revision 读取有
-`page:read`，对创建或修订有 `archive:write`。不要扩大作用域或换用管理身份。
+`doctor`。兼容性检查或身份验证失败、缺少有效授权时停止。若模式为
+`library_grants`，确认目标知识库具备所需 `read` 或 `write`；若模式为
+`legacy_section`，确认所选 Section 对搜索有 `section:query`，对当前或准确
+Revision 读取有 `page:read`，对创建或修订有 `archive:write`。不要扩大作用域或
+换用管理身份。
 
 ## 发现不透明作用域
 

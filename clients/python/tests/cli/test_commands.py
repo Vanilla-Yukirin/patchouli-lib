@@ -13,6 +13,7 @@ from cli.conftest import (
     invoke_cli,
     protected_headers,
     sample_page,
+    whoami_body,
 )
 from patchouli_cli.errors import ExitCode
 
@@ -46,7 +47,9 @@ _PAGE_ID = "20260811t091500123z-synthetic-session"
                 "kind": "agent",
                 "expires_at": "2027-01-01T00:00:00.000000Z",
                 "policy_version": 3,
-                "grants": [{"section_id": "sec_synthetic", "actions": ["section:query"]}],
+                "policy_mode": "library_grants",
+                "library_grants": [{"library_id": "lib_synthetic", "actions": ["read", "write"]}],
+                "grants": [],
             },
             "whoami",
         ),
@@ -150,10 +153,30 @@ def test_read_command_surface_uses_shared_client_and_stable_json(
     if operation == "doctor":
         assert payload["data"]["credential_source"] == "environment"
         assert payload["data"]["profile"] == "default"
+    if operation == "whoami":
+        assert payload["data"]["policy_mode"] == "library_grants"
+        assert payload["data"]["library_grants"] == [
+            {"library_id": "lib_synthetic", "actions": ["read", "write"]}
+        ]
+        assert payload["data"]["grants"] == []
     if operation in {"page.current", "page.revision"}:
         assert payload["data"]["page"]["type"] == "archive"
         assert "page_type" not in payload["data"]["page"]
         assert "occurrence_notice" not in payload["data"]
+
+
+def test_whoami_from_old_server_marks_library_policy_unknown(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/auth/whoami"
+        return httpx.Response(200, headers=protected_headers(), json=whoami_body())
+
+    result = invoke_cli(["--output", "json", "whoami"], handler=handler, tmp_path=tmp_path)
+
+    assert result.status == ExitCode.SUCCESS
+    identity = json.loads(result.stdout)["data"]
+    assert identity["policy_mode"] is None
+    assert identity["library_grants"] is None
+    assert identity["grants"][0]["actions"] == ["archive:write"]
 
 
 def test_search_reads_private_query_from_file_and_uses_post_json(tmp_path: Path) -> None:

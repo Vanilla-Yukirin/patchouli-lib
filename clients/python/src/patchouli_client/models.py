@@ -227,6 +227,24 @@ class Grant:
 
 
 @dataclass(frozen=True, slots=True)
+class LibraryGrant:
+    library_id: str
+    actions: tuple[Literal["read", "write"], ...]
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> LibraryGrant:
+        if set(data) != {"library_id", "actions"}:
+            raise ProtocolError("library grant must contain exactly library_id and actions")
+        library_id = _string(data, "library_id")
+        actions = _string_tuple(data, "actions")
+        if not library_id or any(action not in {"read", "write"} for action in actions):
+            raise ProtocolError("library grant contained an invalid permission")
+        return cls(
+            library_id=library_id, actions=cast(tuple[Literal["read", "write"], ...], actions)
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class WhoAmI:
     caller_id: str
     credential_id: str
@@ -234,11 +252,32 @@ class WhoAmI:
     expires_at: datetime
     policy_version: int
     grants: tuple[Grant, ...]
+    policy_mode: Literal["operator", "legacy_section", "library_grants"] | None = None
+    library_grants: tuple[LibraryGrant, ...] | None = None
     name: str | None = field(default=None, repr=False)
     description: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> WhoAmI:
+        has_mode = "policy_mode" in data
+        has_library_grants = "library_grants" in data
+        if has_mode != has_library_grants:
+            raise ProtocolError("policy_mode and library_grants must be supplied together")
+        policy_mode: Literal["operator", "legacy_section", "library_grants"] | None = None
+        library_grants: tuple[LibraryGrant, ...] | None = None
+        if has_mode:
+            value = data["policy_mode"]
+            if not isinstance(value, str) or value not in {
+                "operator",
+                "legacy_section",
+                "library_grants",
+            }:
+                raise ProtocolError("response field 'policy_mode' contained an unknown mode")
+            policy_mode = cast(Literal["operator", "legacy_section", "library_grants"], value)
+            library_grants = tuple(
+                LibraryGrant.from_dict(_object(item, context="library grant"))
+                for item in _object_list(data, "library_grants")
+            )
         return cls(
             caller_id=_string(data, "caller_id"),
             credential_id=_string(data, "credential_id"),
@@ -249,6 +288,8 @@ class WhoAmI:
                 Grant.from_dict(_object(item, context="grant"))
                 for item in _object_list(data, "grants")
             ),
+            policy_mode=policy_mode,
+            library_grants=library_grants,
             name=_optional_string(data, "name"),
             description=_optional_string(data, "description"),
         )

@@ -379,8 +379,12 @@ def _jsonable(value: object) -> object:
         return {
             "caller_id": value.caller_id,
             "kind": value.kind,
+            "name": value.name,
+            "description": value.description,
             "expires_at": _jsonable(value.expires_at),
             "policy_version": value.policy_version,
+            "policy_mode": value.policy_mode,
+            "library_grants": _jsonable(value.library_grants),
             "grants": _jsonable(value.grants),
         }
     if isinstance(value, Page):
@@ -476,7 +480,7 @@ def _tool_inventory() -> list[types.Tool]:
     write = types.ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True)
     return [
         _tool("capabilities", "Read Agent v1 capabilities.", {}, [], read),
-        _tool("whoami", "Read the current caller identity and Section grants.", {}, [], read),
+        _tool("whoami", "Read the caller identity and effective authorization mode.", {}, [], read),
         _tool("sections_list", "List granted Sections.", _pagination_properties(), [], read),
         _tool(
             "books_list",

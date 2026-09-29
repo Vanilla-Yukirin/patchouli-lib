@@ -60,6 +60,8 @@ def test_capabilities_and_whoami_are_typed_and_token_is_call_scoped() -> None:
                 "description": "Synthetic client fixture",
                 "expires_at": "2026-09-01T00:00:00.000000Z",
                 "policy_version": 3,
+                "policy_mode": "legacy_section",
+                "library_grants": [],
                 "grants": [
                     {
                         "section_id": "sec_synthetic",
@@ -85,6 +87,8 @@ def test_capabilities_and_whoami_are_typed_and_token_is_call_scoped() -> None:
         "page:read",
         "archive:write",
     )
+    assert whoami.value.policy_mode == "legacy_section"
+    assert whoami.value.library_grants == ()
     assert whoami.value.name == "Synthetic Agent"
     assert whoami.value.description == "Synthetic client fixture"
     assert all(
@@ -107,6 +111,8 @@ def test_whoami_accepts_older_server_without_display_fields() -> None:
 
     assert legacy.name is None
     assert legacy.description is None
+    assert legacy.policy_mode is None
+    assert legacy.library_grants is None
 
 
 def test_collection_routes_expose_opaque_cursor() -> None:

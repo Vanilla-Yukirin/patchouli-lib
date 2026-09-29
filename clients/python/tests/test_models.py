@@ -555,6 +555,46 @@ def test_response_timestamp_requires_valid_rfc3339_offset(timestamp: str) -> Non
         PageDocument.from_dict(response)
 
 
+@pytest.mark.parametrize(
+    ("change", "error"),
+    [
+        ({"policy_mode": "library_grants"}, "supplied together"),
+        ({"library_grants": []}, "supplied together"),
+        ({"policy_mode": None, "library_grants": []}, "unknown mode"),
+        ({"policy_mode": "future", "library_grants": []}, "unknown mode"),
+        ({"policy_mode": "operator", "library_grants": {}}, "array"),
+        (
+            {
+                "policy_mode": "library_grants",
+                "library_grants": [{"library_id": "lib_one", "actions": ["admin"]}],
+            },
+            "invalid permission",
+        ),
+        (
+            {
+                "policy_mode": "library_grants",
+                "library_grants": [{"library_id": "lib_one", "actions": ["read"], "extra": 1}],
+            },
+            "exactly",
+        ),
+    ],
+)
+def test_whoami_rejects_partial_or_unknown_library_policy(
+    change: dict[str, object], error: str
+) -> None:
+    identity: dict[str, object] = {
+        "caller_id": "caller_synthetic",
+        "credential_id": "credential_synthetic",
+        "kind": "agent",
+        "expires_at": "2026-09-01T00:00:00Z",
+        "policy_version": 1,
+        "grants": [],
+        **change,
+    }
+    with pytest.raises(ProtocolError, match=error):
+        WhoAmI.from_dict(identity)
+
+
 def test_request_value_invariants_are_strict() -> None:
     with pytest.raises(ValueError, match="source kind"):
         SourceInput(kind="")

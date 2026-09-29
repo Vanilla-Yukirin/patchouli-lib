@@ -128,6 +128,7 @@ def test_mcp_inventory_and_synthetic_structured_content(
     response = admin_client.get("/admin/mcp?lang=zh-CN")
     assert "MCP 工具名称" in response.text
     assert "合成响应，非实时数据" in response.text
+    assert "连接旧服务时后两个字段为未知" in response.text
     for name in (
         "capabilities",
         "whoami",
@@ -144,7 +145,13 @@ def test_mcp_inventory_and_synthetic_structured_content(
     success = _preview(response.text, "mcp-success-preview")
     assert success["ok"] is True
     assert set(success) == {"ok", "data", "metadata"}
-    assert success["data"]["grants"][0]["actions"] == ["page:read"]
+    assert success["data"]["name"] == "Example Agent"
+    assert success["data"]["description"] == "Synthetic integration example"
+    assert success["data"]["policy_mode"] == "library_grants"
+    assert success["data"]["library_grants"] == [
+        {"library_id": "example-library", "actions": ["read"]}
+    ]
+    assert success["data"]["grants"] == []
     assert success["metadata"]["etag"] is None
 
     unavailable = _preview(response.text, "mcp-error-preview")

@@ -20,8 +20,8 @@ _API_ENDPOINTS = (
     (
         "GET",
         "/api/v1/auth/whoami",
-        "Caller identity and Section grants",
-        "调用方身份与分区授权",
+        "Caller identity and effective authorization mode",
+        "调用方身份与当前授权模式",
         "always",
     ),
     ("GET", "/api/v1/sections", "Granted Sections", "已授权的分区", "retrieval"),
@@ -92,9 +92,13 @@ _MCP_SUCCESS_EXAMPLE: dict[str, object] = {
     "data": {
         "caller_id": "example-caller",
         "kind": "agent",
+        "name": "Example Agent",
+        "description": "Synthetic integration example",
         "expires_at": "2030-01-01T00:00:00.000000Z",
         "policy_version": 1,
-        "grants": [{"section_id": "example-section", "actions": ["page:read"]}],
+        "policy_mode": "library_grants",
+        "library_grants": [{"library_id": "example-library", "actions": ["read"]}],
+        "grants": [],
     },
     "metadata": {
         "request_id": "req_00000000000000000000000000000000",
@@ -260,9 +264,15 @@ def mcp_guide(locale: GuideLocale) -> str:
             locale,
             "MCP uses the separate local stdio adapter. It is optional, and its tools "
             "do not accept a token, endpoint, local file path, or journal path as input. "
-            "The search tool is listed for compatibility but currently returns an error.",
+            "The whoami result reports the caller name, description, policy_mode and "
+            "library_grants without a credential ID. "
+            "Older servers leave both fields unknown. The search tool is listed for "
+            "compatibility but currently returns an error.",
             "MCP 通过独立的本地 stdio 适配器提供，是可选接入方式。工具参数不接收 "
-            "Token、服务地址、本地文件路径或日志路径。搜索工具保留兼容入口，但目前返回错误。",
+            "Token、服务地址、本地文件路径或日志路径。whoami 结果会报告调用方名称、"
+            "说明、policy_mode 和 library_grants，但不包含凭据 ID；连接旧服务时后两个"
+            "字段为未知。"
+            "搜索工具保留兼容入口，但目前返回错误。",
         )
         + '</p><ul class="item-list interface-list">'
         + rows

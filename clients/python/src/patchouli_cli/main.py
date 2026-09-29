@@ -74,9 +74,9 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("capabilities", help="show safe server capabilities").set_defaults(
         handler="capabilities"
     )
-    commands.add_parser("whoami", help="show the current caller grants").set_defaults(
-        handler="whoami"
-    )
+    commands.add_parser(
+        "whoami", help="show the current caller and authorization mode"
+    ).set_defaults(handler="whoami")
 
     sections = commands.add_parser("sections", help="Section operations").add_subparsers(
         dest="sections_action", required=True
@@ -535,7 +535,7 @@ def _map_problem(error: ProblemError, *, operation_id: str | None) -> CliError:
     if status == 401 or code in {"authentication_required", "invalid_token"}:
         return CliError(ExitCode.AUTH, "auth", code, "caller credential was rejected")
     if status == 403 or code == "insufficient_scope":
-        return CliError(ExitCode.SCOPE, "scope", code, "caller lacks the required Section action")
+        return CliError(ExitCode.SCOPE, "scope", code, "caller lacks the required action")
     if status == 404 or code == "resource_not_found":
         return CliError(
             ExitCode.NOT_FOUND, "not_found", code, "resource was not found or is hidden"

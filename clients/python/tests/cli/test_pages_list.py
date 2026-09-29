@@ -167,7 +167,7 @@ def test_pages_list_maps_application_errors_without_rendering_server_detail(tmp_
     assert json.loads(result.stderr)["error"] == {
         "category": "scope",
         "code": "insufficient_scope",
-        "message": "caller lacks the required Section action",
+        "message": "caller lacks the required action",
         "request_id": request_id,
     }
     assert "private server detail marker" not in result.stderr
