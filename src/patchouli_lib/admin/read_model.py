@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import Connection, Engine, and_, func, select
+from sqlalchemy import Connection, Engine, and_, func, or_, select
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.sql import Select
 
@@ -44,6 +44,35 @@ class PageItem:
     page_type: str
     occurred_at: int
     revision_number: int
+
+
+@dataclass(frozen=True)
+class TrashItem:
+    id: str
+    title: str
+    page_type: str
+    section_id: str
+    section_name: str
+    book_id: str
+    book_name: str
+    occurred_at: int
+    deleted_at: int
+    revision_number: int
+
+
+@dataclass(frozen=True)
+class TrashDirectoryView:
+    library: LibraryItem
+    section: SectionItem | None
+    pages: tuple[TrashItem, ...]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True)
+class TrashPageView:
+    library: LibraryItem
+    section: SectionItem
+    page: TrashItem
 
 
 @dataclass(frozen=True)
@@ -176,6 +205,62 @@ class AdminReadModel:
         with self._engine.connect() as connection:
             rows = connection.execute(_library_summary_query()).mappings().all()
             return tuple(_library_item(row) for row in rows)
+
+    def list_trash(
+        self, library_id: str, *, section_id: str | None = None, before: str | None = None
+    ) -> TrashDirectoryView | None:
+        cursor = _parse_trash_cursor(before)
+        with self._engine.connect() as connection:
+            library = _get_library(connection, library_id)
+            if library is None:
+                return None
+            section = (
+                None if section_id is None else _get_section(connection, library_id, section_id)
+            )
+            if section_id is not None and section is None:
+                return None
+            statement = _trash_query(library_id).where(Page.deleted_at.is_not(None))
+            if section_id is not None:
+                statement = statement.where(Page.section_id == section_id)
+            if cursor is not None:
+                deleted_at, page_id = cursor
+                statement = statement.where(
+                    or_(
+                        Page.deleted_at < deleted_at,
+                        and_(Page.deleted_at == deleted_at, Page.page_id > page_id),
+                    )
+                )
+            rows = (
+                connection.execute(
+                    statement.order_by(Page.deleted_at.desc(), Page.page_id).limit(21)
+                )
+                .mappings()
+                .all()
+            )
+            items = tuple(_trash_item(row) for row in rows[:20])
+            next_cursor = f"{items[-1].deleted_at}:{items[-1].id}" if len(rows) > 20 else None
+            return TrashDirectoryView(library, section, items, next_cursor)
+
+    def get_trash_page(
+        self, library_id: str, section_id: str, page_id: str
+    ) -> TrashPageView | None:
+        with self._engine.connect() as connection:
+            library = _get_library(connection, library_id)
+            section = _get_section(connection, library_id, section_id)
+            if library is None or section is None:
+                return None
+            row = (
+                connection.execute(
+                    _trash_query(library_id).where(
+                        Page.section_id == section_id,
+                        Page.page_id == page_id,
+                        Page.deleted_at.is_not(None),
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            return None if row is None else TrashPageView(library, section, _trash_item(row))
 
     def list_callers(self) -> tuple[CallerItem, ...]:
         """List identity metadata, never credential verifiers or raw tokens."""
@@ -572,6 +657,73 @@ def _library_summary_query() -> Select[Any]:
         .group_by(Library.id, Library.name, Library.created_at)
         .order_by(Library.name, Library.id)
     )
+
+
+def _trash_query(library_id: str) -> Select[Any]:
+    # Deliberately omit Revision, RevisionFile and credential columns. This projection
+    # must remain metadata-only even when the deleted Page has private body text.
+    return (
+        select(
+            Page.page_id,
+            Page.title,
+            Page.page_type,
+            Page.section_id,
+            Section.name.label("section_name"),
+            Page.book_id,
+            Book.name.label("book_name"),
+            Page.occurred_at,
+            Page.deleted_at,
+            Page.current_revision_number,
+        )
+        .select_from(Page)
+        .join(
+            Section,
+            and_(Section.library_id == Page.library_id, Section.id == Page.section_id),
+        )
+        .join(
+            Book,
+            and_(
+                Book.library_id == Page.library_id,
+                Book.section_id == Page.section_id,
+                Book.id == Page.book_id,
+            ),
+        )
+        .where(Page.library_id == library_id)
+    )
+
+
+def _trash_item(row: RowMapping) -> TrashItem:
+    return TrashItem(
+        id=row["page_id"],
+        title=row["title"],
+        page_type=row["page_type"],
+        section_id=row["section_id"],
+        section_name=row["section_name"],
+        book_id=row["book_id"],
+        book_name=row["book_name"],
+        occurred_at=row["occurred_at"],
+        deleted_at=row["deleted_at"],
+        revision_number=row["current_revision_number"],
+    )
+
+
+def _parse_trash_cursor(value: str | None) -> tuple[int, str] | None:
+    if value is None:
+        return None
+    if len(value) > 100:
+        raise ValueError("Invalid trash cursor.")
+    timestamp, separator, page_id = value.partition(":")
+    if (
+        separator != ":"
+        or not timestamp.isascii()
+        or not timestamp.isdecimal()
+        or not 0 <= int(timestamp) <= (1 << 63) - 1
+        or not 1 <= len(page_id) <= 80
+        or not page_id.isascii()
+        or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in page_id)
+    ):
+        raise ValueError("Invalid trash cursor.")
+    return int(timestamp), page_id
 
 
 def _tag_summary_query(library_id: str) -> Select[Any]:

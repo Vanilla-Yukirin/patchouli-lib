@@ -15,6 +15,8 @@ from patchouli_lib.admin.read_model import (
     SectionView,
     TagDirectoryView,
     TagView,
+    TrashDirectoryView,
+    TrashPageView,
 )
 from patchouli_lib.admin.service import DeliveredCredential
 from patchouli_lib.auth.schemas import SectionAction
@@ -189,6 +191,13 @@ _ZH_CN: dict[str, str] = {
     "Books": "书籍",
     "Pages": "页面",
     "Tags": "标签",
+    "Trash": "回收站",
+    "No deleted pages.": "暂无已删除页面。",
+    "Deleted": "删除时间",
+    "Next page": "下一页",
+    "This view shows metadata only; page contents remain unavailable here.": (
+        "此处仅显示元数据，不提供已删除页面的正文。"
+    ),
     "Tagged pages": "标记的页面",
     "No tags yet.": "暂无标签。",
     "No tagged pages yet.": "暂无已标记的页面。",
@@ -839,6 +848,7 @@ def library_page(
         f'<p class="meta">{localize(locale, "Created")}: {_time(view.library.created_at)} · '
         f"{localize(locale, 'Page count')}: {view.library.page_count}</p>"
         f'<p><a href="{base}/tags">{localize(locale, "Tags")}</a></p>'
+        f'<p><a href="{base}/trash">{localize(locale, "Trash")}</a></p>'
         f"<h2>{localize(locale, 'Sections')}</h2>"
         + (
             f'<ul class="item-list">{cards}</ul>'
@@ -973,7 +983,11 @@ def section_page(
         f"{escape(item.name)}</a><p>{escape(item.summary)}</p></li>"
         for item in view.books
     )
-    body = f"<p>{escape(view.section.description)}</p><h2>{localize(locale, 'Books')}</h2>" + (
+    body = (
+        f"<p>{escape(view.section.description)}</p>"
+        f'<p><a href="{base}/trash">{localize(locale, "Trash")}</a></p>'
+        f"<h2>{localize(locale, 'Books')}</h2>"
+    ) + (
         f'<ul class="item-list">{cards}</ul>'
         if view.books
         else f'<p class="card">{localize(locale, "No books yet.")}</p>'
@@ -998,6 +1012,88 @@ def section_page(
         crumbs=(
             (localize(locale, "Libraries"), "/admin/libraries"),
             (view.library.name, library_path),
+        ),
+    )
+
+
+def trash_directory_page(
+    csrf_token: str, view: TrashDirectoryView, *, locale: AdminLocale = "en"
+) -> str:
+    library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
+    base = (
+        f"{library_path}/trash"
+        if view.section is None
+        else f"{library_path}/sections/{escape(view.section.id, quote=True)}/trash"
+    )
+    cards = "".join(
+        f'<li><a href="{library_path}/sections/{escape(item.section_id, quote=True)}'
+        f'/trash/{escape(item.id, quote=True)}">{escape(item.title)}</a>'
+        f'<p class="meta">{localize(locale, "Deleted")}: {_time(item.deleted_at)} · '
+        f"{localize(locale, 'Sections')}: {escape(item.section_name)} · "
+        f"{localize(locale, 'Books')}: {escape(item.book_name)}</p></li>"
+        for item in view.pages
+    )
+    metadata_note = localize(
+        locale, "This view shows metadata only; page contents remain unavailable here."
+    )
+    body = f'<p class="section-help">{metadata_note}</p>' + (
+        f'<ul class="item-list">{cards}</ul>'
+        if view.pages
+        else f'<p class="card">{localize(locale, "No deleted pages.")}</p>'
+    )
+    if view.next_cursor is not None:
+        body += (
+            f'<p><a href="{base}?before={escape(view.next_cursor, quote=True)}">'
+            f"{localize(locale, 'Next page')}</a></p>"
+        )
+    crumbs: tuple[tuple[str, str], ...] = (
+        (localize(locale, "Libraries"), "/admin/libraries"),
+        (view.library.name, library_path),
+    )
+    if view.section is not None:
+        crumbs += (
+            (
+                view.section.name,
+                f"{library_path}/sections/{escape(view.section.id, quote=True)}",
+            ),
+        )
+    return _browser_document(
+        csrf_token, locale, localize(locale, "Trash"), base, body, crumbs=crumbs
+    )
+
+
+def trash_detail_page(csrf_token: str, view: TrashPageView, *, locale: AdminLocale = "en") -> str:
+    library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
+    section_path = f"{library_path}/sections/{escape(view.section.id, quote=True)}"
+    base = f"{section_path}/trash/{escape(view.page.id, quote=True)}"
+    metadata_note = localize(
+        locale, "This view shows metadata only; page contents remain unavailable here."
+    )
+    body = (
+        f'<p class="section-help">'
+        f"{metadata_note}"
+        "</p>"
+        f'<dl class="card"><dt>{localize(locale, "Page type")}</dt>'
+        f"<dd>{escape(view.page.page_type)}</dd>"
+        f"<dt>{localize(locale, 'Sections')}</dt><dd>{escape(view.page.section_name)}</dd>"
+        f"<dt>{localize(locale, 'Books')}</dt><dd>{escape(view.page.book_name)}</dd>"
+        f"<dt>Page ID</dt><dd><code>{escape(view.page.id)}</code></dd>"
+        f"<dt>{localize(locale, 'Occurred')}</dt><dd>{_time(view.page.occurred_at)}</dd>"
+        f"<dt>{localize(locale, 'Deleted')}</dt><dd>{_time(view.page.deleted_at)}</dd>"
+        f"<dt>{localize(locale, 'Current revision')}</dt>"
+        f"<dd>{view.page.revision_number}</dd></dl>"
+    )
+    return _browser_document(
+        csrf_token,
+        locale,
+        view.page.title,
+        base,
+        body,
+        crumbs=(
+            (localize(locale, "Libraries"), "/admin/libraries"),
+            (view.library.name, library_path),
+            (view.section.name, section_path),
+            (localize(locale, "Trash"), f"{section_path}/trash"),
         ),
     )
 

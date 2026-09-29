@@ -45,6 +45,8 @@ from patchouli_lib.admin.pages import (
     section_page,
     tag_detail_page,
     tag_directory_page,
+    trash_detail_page,
+    trash_directory_page,
 )
 from patchouli_lib.admin.passwords import password_matches
 from patchouli_lib.admin.read_model import AdminReadModel
@@ -530,6 +532,20 @@ def create_admin_router(
 
         return protected_page(request, render)
 
+    @router.get("/libraries/{library_id}/trash")
+    def library_trash(request: Request, library_id: str) -> Response:
+        def render(csrf: str, locale: AdminLocale) -> str | None:
+            values = request.query_params.getlist("before")
+            if len(values) > 1:
+                return None
+            try:
+                view = read_model.list_trash(library_id, before=values[0] if values else None)
+            except ValueError:
+                return None
+            return None if view is None else trash_directory_page(csrf, view, locale=locale)
+
+        return protected_page(request, render)
+
     @router.get("/libraries/{library_id}/tags")
     def library_tags(request: Request, library_id: str) -> Response:
         def render(csrf: str, locale: AdminLocale) -> str | None:
@@ -621,6 +637,30 @@ def create_admin_router(
         def render(csrf: str, locale: AdminLocale) -> str | None:
             view = read_model.get_section(library_id, section_id)
             return None if view is None else section_page(csrf, view, locale=locale)
+
+        return protected_page(request, render)
+
+    @router.get("/libraries/{library_id}/sections/{section_id}/trash")
+    def section_trash(request: Request, library_id: str, section_id: str) -> Response:
+        def render(csrf: str, locale: AdminLocale) -> str | None:
+            values = request.query_params.getlist("before")
+            if len(values) > 1:
+                return None
+            try:
+                view = read_model.list_trash(
+                    library_id, section_id=section_id, before=values[0] if values else None
+                )
+            except ValueError:
+                return None
+            return None if view is None else trash_directory_page(csrf, view, locale=locale)
+
+        return protected_page(request, render)
+
+    @router.get("/libraries/{library_id}/sections/{section_id}/trash/{page_id}")
+    def trash_detail(request: Request, library_id: str, section_id: str, page_id: str) -> Response:
+        def render(csrf: str, locale: AdminLocale) -> str | None:
+            view = read_model.get_trash_page(library_id, section_id, page_id)
+            return None if view is None else trash_detail_page(csrf, view, locale=locale)
 
         return protected_page(request, render)
 
