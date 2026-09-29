@@ -490,6 +490,33 @@ def test_browser_requires_session_and_empty_state(browser: tuple[TestClient, Eng
     assert "1970-01-01 00:00 UTC" in listing.text
 
 
+def test_browser_navigation_landmarks_and_narrow_grid(browser: tuple[TestClient, Engine]) -> None:
+    client, engine = browser
+    library_id, _, _ = _seed_structure(engine)
+    _login(client)
+
+    dashboard = client.get("/admin")
+    assert '<nav aria-label="Administration">' in dashboard.text
+    assert '<nav class="side-nav" aria-label="Administration sections">' in dashboard.text
+    assert '<a href="/admin" aria-current="page">Home</a>' in dashboard.text
+
+    detail = client.get(f"/admin/libraries/{library_id}")
+    assert '<nav class="breadcrumb" aria-label="Breadcrumb">' in detail.text
+    assert '<span aria-current="page">First Synthetic Library</span></nav>' in detail.text
+    assert '<nav class="side-nav" aria-label="Administration sections">' in detail.text
+
+    chinese = client.get(f"/admin/libraries/{library_id}?lang=zh-CN")
+    assert '<nav class="breadcrumb" aria-label="当前位置">' in chinese.text
+    assert '<nav class="side-nav" aria-label="管理栏目">' in chinese.text
+    assert 'href="/admin/libraries"' in chinese.text
+
+    stylesheet = client.get("/admin/style.css")
+    assert stylesheet.status_code == 200
+    assert "header nav { display: flex;" in stylesheet.text
+    assert "\nnav { display: flex;" not in stylesheet.text
+    assert "minmax(min(100%, 20rem), 1fr)" in stylesheet.text
+
+
 def test_browser_reads_scoped_hierarchy_and_escapes_markdown(
     browser: tuple[TestClient, Engine],
 ) -> None:

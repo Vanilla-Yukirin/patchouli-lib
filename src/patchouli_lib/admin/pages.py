@@ -53,10 +53,14 @@ header {
   padding: 1rem max(1rem, calc((100% - 70rem) / 2));
 }
 header a { color: #fff; text-decoration: none; }
-nav { display: flex; flex-wrap: wrap; gap: .8rem; align-items: center; }
+header nav { display: flex; flex-wrap: wrap; gap: .8rem; align-items: center; }
 main { max-width: 70rem; margin: 0 auto; padding: 2rem 1rem 4rem; }
 .narrow { max-width: 30rem; }
-.grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); }
+.grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+}
 .card {
   background: #fff;
   border: 1px solid #d6ddd5;
@@ -168,6 +172,7 @@ details summary { cursor: pointer; font-weight: 700; }
 _ZH_CN: dict[str, str] = {
     "A required form field is missing.": "缺少必填字段。",
     "Administration": "管理面板",
+    "Administration sections": "管理栏目",
     "Administration password": "管理密码",
     "Administration sign in": "管理面板登录",
     "Agent caller ID": "Agent 调用方 ID",
@@ -179,6 +184,7 @@ _ZH_CN: dict[str, str] = {
     "Agent name": "Agent 名称",
     "Book name": "书籍名称",
     "Book summary": "书籍摘要",
+    "Breadcrumb": "当前位置",
     "Caller ID": "调用方 ID",
     "Check the submitted fields and try again.": "请检查填写内容后重试。",
     "Create Agent credential": "创建 Agent 凭据",
@@ -1454,7 +1460,8 @@ def _browser_document(
         f"{_header(escape(csrf_token, quote=True), locale, switch_path=path)}"
         '<div class="admin-shell">'
         f"{_sidebar(locale, current='libraries')}"
-        f'<main><div class="breadcrumb">{links}<span>{heading}</span></div>'
+        f'<main><nav class="breadcrumb" aria-label="{localize(locale, "Breadcrumb")}">'
+        f'{links}<span aria-current="page">{heading}</span></nav>'
         f"<h1>{heading}</h1>{body}</main></div>"
     )
     return _document(title, content, locale)
@@ -1477,7 +1484,8 @@ def _sidebar(locale: AdminLocale, *, current: str) -> str:
         for key, label, path in entries
     )
     return (
-        f'<aside class="side-nav" aria-label="{localize(locale, "Administration")}">{links}</aside>'
+        f'<nav class="side-nav" aria-label="{localize(locale, "Administration sections")}">'
+        f"{links}</nav>"
     )
 
 
