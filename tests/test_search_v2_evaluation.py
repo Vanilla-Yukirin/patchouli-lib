@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import os
 import runpy
+import sqlite3
 import subprocess
 import sys
 from collections.abc import Callable
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -111,6 +113,56 @@ def test_independent_oracle_uses_literal_page_membership_not_candidate_rank() ->
     for name in SHORT_LITERAL_QUERIES:
         query = next(item for item in evaluation_queries(96) if item.name == name)
         assert literal_oracle(documents, query) == frozenset({"page-00003"})
+
+
+def test_two_text_files_keep_literal_boundaries_through_update_and_rebuild(
+    tmp_path: Path,
+) -> None:
+    documents = generate_corpus(96, 1_024)
+    target = replace(
+        documents[4],
+        text_files=(("left.txt", "qzabc"), ("right.txt", "qzdef")),
+    )
+    documents = (*documents[:4], target, *documents[5:])
+    query_type = cast(Any, _MODULE["Query"])
+    create_authority = cast(
+        Callable[[sqlite3.Connection, tuple[Any, ...]], None], _MODULE["_create_authority"]
+    )
+    index_documents = cast(Callable[[sqlite3.Connection], float], _MODULE["_index_documents"])
+    candidate_search = cast(
+        Callable[[sqlite3.Connection, Any], tuple[tuple[str, ...], int]],
+        _MODULE["_candidate_search"],
+    )
+    update_one = cast(Callable[[sqlite3.Connection], float], _MODULE["_update_one_current_page"])
+    left = query_type("left_file", (target.library_id,), ("qzabc",))
+    right = query_type("right_file", (target.library_id,), ("qzdef",))
+    joined = query_type("cross_file_only", (target.library_id,), ("qzabcqzdef",))
+
+    def assert_literal_results(connection: sqlite3.Connection) -> None:
+        for query in (left, right):
+            actual, candidates = candidate_search(connection, query)
+            assert candidates >= 1
+            assert actual == (target.page_id,)
+            assert frozenset(actual) == literal_oracle(documents, query)
+        # A three-character gram in the right file makes this a plausible FTS
+        # candidate. The whole literal exists only if two file bodies are
+        # improperly concatenated, so the independent oracle and exact rank
+        # must both reject it.
+        actual, candidates = candidate_search(connection, joined)
+        assert candidates >= 1
+        assert actual == ()
+        assert literal_oracle(documents, joined) == frozenset()
+
+    with closing(sqlite3.connect(tmp_path / "file-boundaries.sqlite3")) as connection:
+        create_authority(connection, documents)
+        index_documents(connection)
+        assert_literal_results(connection)
+        update_one(connection)
+        assert_literal_results(connection)
+        with connection:
+            connection.execute("DELETE FROM search_index")
+        index_documents(connection)
+        assert_literal_results(connection)
 
 
 def test_caller_text_is_encoded_before_fts_compilation() -> None:

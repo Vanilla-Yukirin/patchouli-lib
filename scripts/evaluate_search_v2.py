@@ -25,7 +25,14 @@ from typing import Any, TypedDict
 from patchouli_lib.search.ngram import (
     HAN_RANGE_VERSION,
     NORMALIZATION_VERSION,
-    extract_term_frequencies,
+)
+from patchouli_lib.search.projection_v2 import (
+    PROJECTION_VERSION,
+    SHORT_LITERAL_TERMS_VERSION,
+    LiteralPageProjection,
+    candidate_match_expression,
+    normalize_literal,
+    project_page_text,
 )
 
 DEFAULT_PAGES = 96
@@ -35,25 +42,9 @@ SCALE_BODY_BYTES = 10 * 1_024
 BASE_TIME = 1_700_000_000_000_000
 TOP_K = 20
 MAX_CORPUS_BODY_BYTES = 64 * 1_024 * 1_024
-SHORT_LITERAL_TERMS_VERSION = "non-Han-codepoint-1-2-3-NFC-casefold-NFC-v1"
 type TagIdentity = tuple[str, str]
 type SyntheticTag = tuple[str, str]  # Stable ID and display name within one Library.
 _HAN_ALPHABET = "知识库文档版本检索时间来源技术新闻视频摘要索引安全权限项目系统研究实验数据分析报告"
-_HAN_RANGES = (
-    (0x3007, 0x3007),
-    (0x3400, 0x4DBF),
-    (0x4E00, 0x9FFF),
-    (0xF900, 0xFAFF),
-    (0x20000, 0x2A6DF),
-    (0x2A700, 0x2B73F),
-    (0x2B740, 0x2B81F),
-    (0x2B820, 0x2CEAF),
-    (0x2CEB0, 0x2EBEF),
-    (0x2EBF0, 0x2EE5F),
-    (0x2F800, 0x2FA1F),
-    (0x30000, 0x3134F),
-    (0x31350, 0x323AF),
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,38 +227,8 @@ def evaluation_queries(page_count: int) -> tuple[Query, ...]:
     )
 
 
-def _normalized(value: str) -> str:
+def _oracle_normalized(value: str) -> str:
     return unicodedata.normalize("NFC", unicodedata.normalize("NFC", value).casefold())
-
-
-def _is_han(character: str) -> bool:
-    point = ord(character)
-    return any(start <= point <= end for start, end in _HAN_RANGES)
-
-
-def _non_han_short_terms(value: str) -> set[str]:
-    """Versioned codepoint grams include symbols and substrings within words.
-
-    A literal without Han remains inside one non-Han run when it occurs. Han
-    literals use the separately versioned Han grams from search.ngram.
-    """
-
-    normalized = _normalized(value)
-    terms: set[str] = set()
-    start = 0
-    while start < len(normalized):
-        if _is_han(normalized[start]):
-            start += 1
-            continue
-        end = start + 1
-        while end < len(normalized) and not _is_han(normalized[end]):
-            end += 1
-        run = normalized[start:end]
-        for width in range(1, min(3, len(run)) + 1):
-            for offset in range(len(run) - width + 1):
-                terms.add(f"c{width}{run[offset : offset + width].encode('utf-8').hex()}")
-        start = end
-    return terms
 
 
 def literal_oracle(documents: tuple[Document, ...], query: Query) -> frozenset[str]:
@@ -295,7 +256,10 @@ def literal_oracle(documents: tuple[Document, ...], query: Query) -> frozenset[s
                 *(name for name, _content in document.binary_files),
             )
             if not any(
-                any(_normalized(keyword) in _normalized(field) for field in searchable_fields)
+                any(
+                    _oracle_normalized(keyword) in _oracle_normalized(field)
+                    for field in searchable_fields
+                )
                 for keyword in query.keywords
             ):
                 continue
@@ -303,36 +267,21 @@ def literal_oracle(documents: tuple[Document, ...], query: Query) -> frozenset[s
     return frozenset(relevant)
 
 
-def _encoded_terms(text: str) -> str:
-    terms = {
-        f"{term.kind}{term.text.encode('utf-8').hex()}"
-        for term in extract_term_frequencies(text)
-        if term.kind != "word"
-    }
-    terms.update(_non_han_short_terms(text))
-    return " ".join(sorted(terms))
+_keyword_match = candidate_match_expression
 
 
-def _keyword_match(keywords: tuple[str, ...]) -> str:
-    tokens: set[str] = set()
-    for keyword in keywords:
-        if keyword == "":
-            raise ValueError("Empty keywords have no accepted experimental semantics.")
-        han_terms = [
-            term
-            for term in extract_term_frequencies(keyword)
-            if term.kind in {"han1", "han2", "han3"}
-        ]
-        if han_terms:
-            chosen = max(han_terms, key=lambda term: (int(term.kind[-1]), term.text))
-            tokens.add(f"{chosen.kind}{chosen.text.encode('utf-8').hex()}")
-        else:
-            short_terms = _non_han_short_terms(keyword)
-            if not short_terms:
-                raise ValueError("Keyword has no indexable literal terms.")
-            tokens.add(max(short_terms, key=lambda token: (int(token[1]), token)))
-    # Hex-encoded terms contain only [a-z0-9]; caller text never becomes FTS syntax.
-    return " OR ".join(f'"{token}"' for token in sorted(tokens))
+def _project_authority_row(
+    title: str, body: str, text_files_json: str, file_names_json: str
+) -> LiteralPageProjection:
+    text_files = tuple(tuple(entry) for entry in json.loads(text_files_json))
+    text_names = {name for name, _content in text_files}
+    opaque_names = tuple(name for name in json.loads(file_names_json) if name not in text_names)
+    return project_page_text(
+        title=title,
+        body=body,
+        text_files=text_files,
+        opaque_file_names=opaque_names,
+    )
 
 
 def _create_authority(connection: sqlite3.Connection, documents: tuple[Document, ...]) -> None:
@@ -413,13 +362,14 @@ def _index_documents(connection: sqlite3.Connection) -> float:
             (
                 (
                     number,
-                    _encoded_terms(title),
-                    _encoded_terms(body),
-                    _encoded_terms("\n".join(text for _name, text in json.loads(text_files_json)))
-                    + " "
-                    + _encoded_terms("\n".join(json.loads(file_names_json))),
+                    projection.title_terms,
+                    projection.body_terms,
+                    projection.file_terms,
                 )
                 for number, title, body, text_files_json, file_names_json in rows
+                for projection in (
+                    _project_authority_row(title, body, text_files_json, file_names_json),
+                )
             ),
         )
     return (time.perf_counter_ns() - started) / 1_000_000
@@ -433,11 +383,8 @@ def _statement(query: Query) -> tuple[str, tuple[object, ...]]:
     conditions = ["d.deleted = 0"]
     if query.keywords:
         from_clause += " JOIN search_index ON search_index.rowid = d.number"
-        match = _keyword_match(query.keywords)
-        if not match:
-            return "SELECT d.number FROM documents AS d WHERE 0", ()
         conditions.append("search_index MATCH ?")
-        parameters.append(match)
+        parameters.append(_keyword_match(query.keywords))
     slots = ", ".join("?" for _ in query.libraries)
     conditions.append(f"d.library_id IN ({slots})")
     parameters.extend(query.libraries)
@@ -470,12 +417,12 @@ def _candidate_rank(
     tags: set[TagIdentity],
     query: Query,
 ) -> tuple[int, str] | None:
-    title_text = _normalized(title)
-    body_text = _normalized(body)
-    extra_text = tuple(_normalized(text) for _name, text in json.loads(text_files_json))
-    file_names = tuple(_normalized(name) for name in json.loads(file_names_json))
+    title_text = normalize_literal(title)
+    body_text = normalize_literal(body)
+    extra_text = tuple(normalize_literal(text) for _name, text in json.loads(text_files_json))
+    file_names = tuple(normalize_literal(name) for name in json.loads(file_names_json))
     score = 0
-    for literal in dict.fromkeys(_normalized(keyword) for keyword in query.keywords):
+    for literal in dict.fromkeys(normalize_literal(keyword) for keyword in query.keywords):
         if literal in title_text:
             score += 100
         if literal in body_text:
@@ -560,16 +507,15 @@ def _update_one_current_page(connection: sqlite3.Connection) -> float:
             (changed, "revision-00001-updated"),
         )
         connection.execute("DELETE FROM search_index WHERE rowid = 2")
+        projection = _project_authority_row(title, changed, text_files_json, file_names_json)
         connection.execute(
             "INSERT INTO search_index(rowid, title_terms, body_terms, file_terms) "
             "VALUES (?, ?, ?, ?)",
             (
                 2,
-                _encoded_terms(title),
-                _encoded_terms(changed),
-                _encoded_terms("\n".join(text for _name, text in json.loads(text_files_json)))
-                + " "
-                + _encoded_terms("\n".join(json.loads(file_names_json))),
+                projection.title_terms,
+                projection.body_terms,
+                projection.file_terms,
             ),
         )
     return (time.perf_counter_ns() - started) / 1_000_000
@@ -585,6 +531,7 @@ def _probe_unauthorized_noise(connection: sqlite3.Connection, number: int) -> di
     try:
         for offset in range(noise_count):
             noise_number = number + offset
+            projection = project_page_text(title=noise_title, body=noise_body)
             connection.execute(
                 "INSERT INTO documents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -605,7 +552,12 @@ def _probe_unauthorized_noise(connection: sqlite3.Connection, number: int) -> di
             connection.execute(
                 "INSERT INTO search_index(rowid, title_terms, body_terms, file_terms) "
                 "VALUES (?, ?, ?, ?)",
-                (noise_number, _encoded_terms(noise_title), _encoded_terms(noise_body), ""),
+                (
+                    noise_number,
+                    projection.title_terms,
+                    projection.body_terms,
+                    projection.file_terms,
+                ),
             )
         after_hits, after_candidates = _candidate_search(connection, query)
         global_query = Query(
@@ -766,6 +718,7 @@ def evaluate(
         "normalization_version": NORMALIZATION_VERSION,
         "han_range_version": HAN_RANGE_VERSION,
         "short_literal_terms_version": SHORT_LITERAL_TERMS_VERSION,
+        "projection_version": PROJECTION_VERSION,
         "corpus_body_budget_bytes": MAX_CORPUS_BODY_BYTES,
         "build_ms": round(build_ms, 3),
         "update_ms": round(update_ms, 3),
