@@ -61,7 +61,7 @@ from patchouli_lib.identifiers import canonical_utc_wire, generate_revision_id, 
 Clock = Callable[[], int]
 IdFactory = Callable[[], str]
 RevisionIdFactory = Callable[[], str]
-_FILE_SET_APPEND_ROUTE_TEMPLATE: Final = (
+FILE_SET_APPEND_ROUTE_TEMPLATE: Final = (
     "/api/v1/sections/{section_id}/pages/{page_id}/file-revisions"
 )
 
@@ -205,7 +205,7 @@ class FileSetWriteService:
             )
             request = IdempotencyRequest(
                 method="POST",
-                route_template=_FILE_SET_APPEND_ROUTE_TEMPLATE,
+                route_template=FILE_SET_APPEND_ROUTE_TEMPLATE,
                 key_digest=idempotency.key_digest,
                 request_fingerprint=self._fingerprint(command, manifest),
             )
@@ -375,6 +375,7 @@ class FileSetWriteService:
 
 
 __all__ = [
+    "FILE_SET_APPEND_ROUTE_TEMPLATE",
     "FileSetAppendCommand",
     "FileSetWriteNotFoundError",
     "FileSetWritePersistenceError",

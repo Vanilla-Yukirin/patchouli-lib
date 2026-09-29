@@ -8,8 +8,10 @@ import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 from urllib.parse import quote
+
+from pydantic import Field
 
 from patchouli_lib.backup.errors import BackupDatabaseError
 from patchouli_lib.backup.manifest import (
@@ -27,10 +29,16 @@ from patchouli_lib.content.file_manifest import (
     MAX_PAGE_BYTES,
     build_file_manifest,
 )
+from patchouli_lib.content.file_set_create_service import FILE_SET_CREATE_ROUTE_TEMPLATE
+from patchouli_lib.content.file_set_write_service import FILE_SET_APPEND_ROUTE_TEMPLATE
 from patchouli_lib.content.schemas import (
     ArchiveResponseBody,
+    ContentSchema,
     OccurrenceCorrectionResponseBody,
+    OpaqueId,
+    PageId,
     PageLifecycleResponseBody,
+    RevisionId,
 )
 from patchouli_lib.content.service import (
     CORRECT_OCCURRENCE_ROUTE_TEMPLATE,
@@ -1306,6 +1314,274 @@ def _require_lifecycle_replay(
         raise BackupDatabaseError
 
 
+class _FileSetReplayFile(ContentSchema):
+    name: str
+    size_bytes: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class _FileSetCreateReplayBody(ContentSchema):
+    section_id: OpaqueId
+    book_id: OpaqueId
+    page_id: PageId
+    revision_id: RevisionId
+    revision_number: Literal[1]
+    occurred_at: str
+    occurrence_defaulted: bool
+    snapshot_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    files: tuple[_FileSetReplayFile, ...]
+
+
+class _FileSetAppendReplayBody(ContentSchema):
+    changed: bool
+    section_id: OpaqueId
+    page_id: PageId
+    revision_id: RevisionId
+    revision_number: int = Field(ge=1)
+    snapshot_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    files: tuple[_FileSetReplayFile, ...]
+
+
+def _file_set_occurrence_at(
+    connection: sqlite3.Connection,
+    library_id: str,
+    page_uid: bytes,
+    current_occurrence: int,
+    at: int,
+) -> int:
+    corrections = connection.execute(
+        "SELECT old_occurred_at, new_occurred_at, corrected_at "
+        "FROM page_occurrence_corrections WHERE library_id = ? AND page_uid = ? "
+        "ORDER BY sequence",
+        (library_id, page_uid),
+    ).fetchall()
+    occurrence = corrections[0][0] if corrections else current_occurrence
+    if type(occurrence) is not int:
+        raise BackupDatabaseError
+    for _old, new, corrected_at in corrections:
+        if type(new) is not int or type(corrected_at) is not int:
+            raise BackupDatabaseError
+        if corrected_at >= at:
+            break
+        occurrence = new
+    return occurrence
+
+
+def _file_set_valid_current_etags(
+    connection: sqlite3.Connection,
+    *,
+    library_id: str,
+    page_uid: bytes,
+    revision_id: str,
+    revision_number: int,
+    revision_at: int,
+    occurrence: int,
+) -> set[str]:
+    """Reconstruct active states of one Revision, including later corrections."""
+
+    valid = {page_current_etag(page_uid, revision_id, revision_number, occurrence, revision_at)}
+    events: list[tuple[int, str, int | str]] = []
+    for new, changed_at in connection.execute(
+        "SELECT new_occurred_at, corrected_at FROM page_occurrence_corrections "
+        "WHERE library_id = ? AND page_uid = ? AND at_revision_number = ?",
+        (library_id, page_uid, revision_number),
+    ):
+        if type(new) is not int or type(changed_at) is not int:
+            raise BackupDatabaseError
+        events.append((changed_at, "correction", new))
+    for action, changed_at in connection.execute(
+        "SELECT action, changed_at FROM page_lifecycle_events "
+        "WHERE library_id = ? AND page_uid = ? AND at_revision_number = ?",
+        (library_id, page_uid, revision_number),
+    ):
+        if action not in {"delete", "restore"} or type(changed_at) is not int:
+            raise BackupDatabaseError
+        events.append((changed_at, "lifecycle", action))
+    active = True
+    for changed_at, kind, value in sorted(events, key=lambda event: event[0]):
+        if changed_at <= revision_at:
+            raise BackupDatabaseError
+        if kind == "correction":
+            if type(value) is not int:
+                raise BackupDatabaseError
+            occurrence = value
+        else:
+            active = value == "restore"
+        if active:
+            valid.add(
+                page_current_etag(page_uid, revision_id, revision_number, occurrence, changed_at)
+            )
+    return valid
+
+
+def _require_file_set_replay(
+    connection: sqlite3.Connection,
+    *,
+    library_id: str,
+    caller_id: str,
+    method: str,
+    route: str,
+    status: int,
+    body_bytes: bytes,
+    location: str | None,
+    etag: str,
+    original_request_id: str,
+    original_request_timestamp: str,
+) -> None:
+    is_create = route == FILE_SET_CREATE_ROUTE_TEMPLATE
+    if method != "POST" or status != (201 if is_create else 200) or location is not None:
+        raise BackupDatabaseError
+    try:
+        operation_at = parse_occurrence_time(original_request_timestamp).utc_microseconds
+        if original_request_timestamp != canonical_utc_wire(operation_at):
+            raise ValueError("Noncanonical file-set operation timestamp.")
+        body: _FileSetCreateReplayBody | _FileSetAppendReplayBody
+        if is_create:
+            body = _FileSetCreateReplayBody.model_validate_json(body_bytes)
+        else:
+            body = _FileSetAppendReplayBody.model_validate_json(body_bytes)
+    except ValueError:
+        raise BackupDatabaseError from None
+    row = connection.execute(
+        "SELECT p.page_uid, p.book_id, p.page_type, p.occurred_at, p.created_at, "
+        "r.created_at, m.storage_format, m.snapshot_sha256 "
+        "FROM pages AS p JOIN revisions AS r "
+        "ON r.library_id = p.library_id AND r.page_uid = p.page_uid "
+        "JOIN revision_file_sets AS m ON m.library_id = r.library_id "
+        "AND m.page_uid = r.page_uid AND m.revision_id = r.revision_id "
+        "AND m.revision_number = r.revision_number "
+        "WHERE p.library_id = ? AND p.section_id = ? AND p.page_id = ? "
+        "AND r.revision_id = ? AND r.revision_number = ?",
+        (library_id, body.section_id, body.page_id, body.revision_id, body.revision_number),
+    ).fetchone()
+    if row is None:
+        raise BackupDatabaseError
+    page_uid, book_id, page_type, current_occurrence, created_at, revision_at, format_, snapshot = (
+        row
+    )
+    if (
+        type(page_uid) is not bytes
+        or type(book_id) is not str
+        or page_type != "archive"
+        or type(current_occurrence) is not int
+        or type(created_at) is not int
+        or type(revision_at) is not int
+        or format_ not in {"legacy_markdown", "file_set_v1"}
+    ):
+        raise BackupDatabaseError
+    actual_files = connection.execute(
+        "SELECT filename, content_bytes, size_bytes, content_sha256 FROM revision_files "
+        "WHERE library_id = ? AND page_uid = ? AND revision_id = ? AND revision_number = ? "
+        "ORDER BY filename",
+        (library_id, page_uid, body.revision_id, body.revision_number),
+    ).fetchall()
+    try:
+        manifest = build_file_manifest(
+            (name, content) for name, content, _size, _hash in actual_files
+        )
+    except (TypeError, ValueError, OverflowError, UnicodeError):
+        raise BackupDatabaseError from None
+    if (
+        manifest.snapshot_sha256.hex() != body.snapshot_sha256
+        or (format_ == "file_set_v1" and snapshot != manifest.snapshot_sha256)
+        or (format_ == "legacy_markdown" and snapshot is not None)
+    ):
+        raise BackupDatabaseError
+    response_files = [(entry.name, entry.size_bytes, entry.sha256) for entry in body.files]
+    if response_files != [
+        (name, size, digest.hex() if type(digest) is bytes else None)
+        for name, _content, size, digest in actual_files
+    ]:
+        raise BackupDatabaseError
+
+    if is_create:
+        if not isinstance(body, _FileSetCreateReplayBody):
+            raise BackupDatabaseError
+        occurrence = _file_set_occurrence_at(
+            connection, library_id, page_uid, current_occurrence, revision_at
+        )
+        if (
+            format_ != "file_set_v1"
+            or body.book_id != book_id
+            or revision_at != created_at
+            or revision_at != operation_at
+            or body.occurred_at != canonical_utc_wire(occurrence)
+            or (body.occurrence_defaulted and occurrence != operation_at)
+            or etag != page_current_etag(page_uid, body.revision_id, 1, occurrence, revision_at)
+        ):
+            raise BackupDatabaseError
+        action = "content.page.file_set.create"
+        resource_type = "page"
+        resource_id = body.page_id
+        changed = True
+    else:
+        if not isinstance(body, _FileSetAppendReplayBody):
+            raise BackupDatabaseError
+        if body.changed:
+            occurrence = _file_set_occurrence_at(
+                connection, library_id, page_uid, current_occurrence, revision_at
+            )
+            if (
+                format_ != "file_set_v1"
+                or revision_at < operation_at
+                or etag
+                != page_current_etag(
+                    page_uid,
+                    body.revision_id,
+                    body.revision_number,
+                    occurrence,
+                    revision_at,
+                )
+            ):
+                raise BackupDatabaseError
+        else:
+            occurrence = _file_set_occurrence_at(
+                connection, library_id, page_uid, current_occurrence, revision_at
+            )
+            if etag not in _file_set_valid_current_etags(
+                connection,
+                library_id=library_id,
+                page_uid=page_uid,
+                revision_id=body.revision_id,
+                revision_number=body.revision_number,
+                revision_at=revision_at,
+                occurrence=occurrence,
+            ):
+                raise BackupDatabaseError
+        action = "content.page.file_set.revise"
+        resource_type = "revision"
+        resource_id = body.revision_id
+        changed = body.changed
+    if changed:
+        source = connection.execute(
+            "SELECT count(*) FROM page_sources WHERE library_id = ? AND page_uid = ? "
+            "AND revision_id = ? AND revision_number = ? AND created_at = ?",
+            (library_id, page_uid, body.revision_id, body.revision_number, operation_at),
+        ).fetchone()
+        if source != (1,):
+            raise BackupDatabaseError
+    audit = connection.execute(
+        "SELECT count(*) FROM auth_audit_events WHERE library_id = ? "
+        "AND actor_caller_id = ? AND action = ? AND resource_type = ? "
+        "AND resource_id = ? AND outcome = 'succeeded' AND request_id = ? "
+        "AND occurred_at = ?",
+        (
+            library_id,
+            caller_id,
+            action,
+            resource_type,
+            resource_id,
+            original_request_id,
+            operation_at,
+        ),
+    ).fetchone()
+    # Request IDs are generated at the HTTP edge but are not a unique database
+    # key. A no-op may share one with an earlier changed operation; do not
+    # mistake that earlier audit event for a mutation made by this no-op.
+    if changed and audit != (1,):
+        raise BackupDatabaseError
+
+
 def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: str) -> None:
     def reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
         result: dict[str, object] = {}
@@ -1463,6 +1739,24 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
                 route=route,
                 status=status,
                 parsed=parsed,
+                location=location,
+                etag=etag,
+                original_request_id=original_request_id,
+                original_request_timestamp=original_request_timestamp,
+            )
+            continue
+
+        if route in {FILE_SET_CREATE_ROUTE_TEMPLATE, FILE_SET_APPEND_ROUTE_TEMPLATE}:
+            if schema_revision != SUPPORTED_SCHEMA_REVISION:
+                raise BackupDatabaseError
+            _require_file_set_replay(
+                connection,
+                library_id=library_id,
+                caller_id=caller_id,
+                method=method,
+                route=route,
+                status=status,
+                body_bytes=body_bytes,
                 location=location,
                 etag=etag,
                 original_request_id=original_request_id,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from inspect import signature
+from pathlib import Path
 
 import pytest
 from sqlalchemy import Connection, Engine, func, select
@@ -14,6 +15,7 @@ from patchouli_lib.auth.models import AuditEvent
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import NewSectionGrant, SectionAction
 from patchouli_lib.auth.service import AuthenticationError, AuthorizationError
+from patchouli_lib.backup.validation import validate_database
 from patchouli_lib.content.file_set_service import FileSetPreconditionFailedError
 from patchouli_lib.content.file_set_write_service import (
     FileSetAppendCommand,
@@ -166,6 +168,9 @@ def test_multi_file_append_replay_and_identical_noop(
         ("content.md", LEGACY_CONTENT),
         ("figure.png", b"\x89PNG\x00\xff"),
     ]
+    database_path = content_engine.url.database
+    assert database_path is not None
+    validate_database(Path(database_path))
 
 
 def test_single_markdown_is_one_file_set_and_noop_on_legacy(
@@ -198,6 +203,9 @@ def test_single_markdown_is_one_file_set_and_noop_on_legacy(
             "file_set_v1"
         )
         assert _counts(connection) == (2, 2, 1, 2)
+    database_path = content_engine.url.database
+    assert database_path is not None
+    validate_database(Path(database_path))
 
 
 def test_reused_key_binds_full_file_bytes_etag_and_source(
