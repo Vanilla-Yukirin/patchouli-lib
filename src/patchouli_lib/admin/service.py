@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from time import time
 from uuid import uuid4
 
 from sqlalchemy import Connection, Engine, insert, select
@@ -15,6 +16,9 @@ from patchouli_lib.admin.contracts import (
     RevokeAgentCredentialInput,
     TagFormInput,
 )
+from patchouli_lib.admin.master_audit import MasterAuditRepository
+from patchouli_lib.admin.master_token_store import MasterTokenRepository
+from patchouli_lib.admin.session import MasterAdminSession
 from patchouli_lib.auth.models import AdminStructureAuditEvent
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
@@ -23,7 +27,7 @@ from patchouli_lib.auth.schemas import (
     LocalOperatorRecovery,
     OperatorBootstrap,
 )
-from patchouli_lib.auth.service import AuthenticationService, utc_microseconds
+from patchouli_lib.auth.service import AuthenticationError, AuthenticationService, utc_microseconds
 from patchouli_lib.content.models import Page
 from patchouli_lib.content.schemas import ArchiveIdempotencyKey, PageLifecycleCommand
 from patchouli_lib.content.service import ArchiveService
@@ -86,23 +90,41 @@ class AdminActionService:
         self._request_id_factory = request_id_factory or _request_id
 
     def create_library(
-        self, request: CreateLibraryInput, *, session_fingerprint: bytes
+        self,
+        request: CreateLibraryInput,
+        *,
+        session_fingerprint: bytes,
+        master_session: MasterAdminSession | None = None,
     ) -> LibraryRecord:
         now = self._clock()
         with immediate_transaction(self._engine) as connection:
+            self._require_current_structure_session(connection, master_session, session_fingerprint)
             result = LibraryStructureService(
                 LibraryRepository(connection), clock=lambda: now
             ).create_library(request)
             self._record_structure_event(
-                connection, session_fingerprint, "library.create", result.id, now
+                connection,
+                session_fingerprint,
+                "library.create",
+                result.id,
+                now,
+                master_session=master_session,
+                target_type="library",
+                target_id=result.id,
             )
         return result
 
     def create_section(
-        self, library_id: str, request: CreateSectionInput, *, session_fingerprint: bytes
+        self,
+        library_id: str,
+        request: CreateSectionInput,
+        *,
+        session_fingerprint: bytes,
+        master_session: MasterAdminSession | None = None,
     ) -> SectionRecord:
         now = self._clock()
         with immediate_transaction(self._engine) as connection:
+            self._require_current_structure_session(connection, master_session, session_fingerprint)
             result = LibraryStructureService(
                 LibraryRepository(connection), clock=lambda: now
             ).create_section(library_id, request)
@@ -113,6 +135,9 @@ class AdminActionService:
                 library_id,
                 now,
                 section_id=result.id,
+                master_session=master_session,
+                target_type="section",
+                target_id=result.id,
             )
         return result
 
@@ -123,9 +148,11 @@ class AdminActionService:
         request: CreateBookInput,
         *,
         session_fingerprint: bytes,
+        master_session: MasterAdminSession | None = None,
     ) -> BookRecord:
         now = self._clock()
         with immediate_transaction(self._engine) as connection:
+            self._require_current_structure_session(connection, master_session, session_fingerprint)
             result = LibraryStructureService(
                 LibraryRepository(connection), clock=lambda: now
             ).create_book(library_id, section_id, request)
@@ -137,8 +164,31 @@ class AdminActionService:
                 now,
                 section_id=section_id,
                 book_id=result.id,
+                master_session=master_session,
+                target_type="book",
+                target_id=result.id,
             )
         return result
+
+    @staticmethod
+    def _require_current_structure_session(
+        connection: Connection, session: MasterAdminSession | None, fingerprint: bytes
+    ) -> None:
+        repository = MasterTokenRepository(connection)
+        if session is None:
+            # A legacy cookie is only admitted before local master setup.
+            # Recheck inside the write transaction so setup cannot race it.
+            if repository.has_identity():
+                raise AuthenticationError
+            return
+        if (
+            fingerprint != session.audit_fingerprint()
+            or session.expires_at <= int(time())
+            or not repository.is_session_generation_current(
+                session.identity_id, session.session_generation
+            )
+        ):
+            raise AuthenticationError
 
     def _record_structure_event(
         self,
@@ -150,9 +200,26 @@ class AdminActionService:
         *,
         section_id: str | None = None,
         book_id: str | None = None,
+        master_session: MasterAdminSession | None = None,
+        target_type: str | None = None,
+        target_id: str | None = None,
     ) -> None:
         if type(fingerprint) is not bytes or len(fingerprint) != 32:
             raise ValueError("Invalid administration session fingerprint.")
+        if master_session is not None:
+            if target_type is None or target_id is None:
+                raise ValueError("A master structure write requires a target.")
+            MasterAuditRepository(connection).add_success(
+                identity_id=master_session.identity_id,
+                session_generation=master_session.session_generation,
+                session_fingerprint=fingerprint,
+                action=action,
+                target_type=target_type,
+                target_id=target_id,
+                occurred_at=occurred_at,
+                event_id=uuid4().hex,
+            )
+            return
         connection.execute(
             insert(AdminStructureAuditEvent),
             {

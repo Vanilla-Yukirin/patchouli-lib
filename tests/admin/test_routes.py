@@ -20,6 +20,7 @@ from patchouli_lib.admin.passwords import hash_password
 from patchouli_lib.admin.session import AdminSessionCodec
 from patchouli_lib.app import create_app
 from patchouli_lib.auth.models import (
+    AdminStructureAuditEvent,
     AgentTokenValue,
     Caller,
     Credential,
@@ -31,6 +32,7 @@ from patchouli_lib.auth.schemas import CallerKind
 from patchouli_lib.auth.service import AuthenticationError, AuthenticationService, CredentialIssuer
 from patchouli_lib.config import Settings
 from patchouli_lib.database import immediate_transaction
+from patchouli_lib.library.models import Book, Library, Section
 
 _ORIGIN = "https://admin.example.invalid"
 _ADMIN_PASSWORD = "synthetic admin password"
@@ -419,7 +421,6 @@ def test_initialized_master_token_login_retires_legacy_web_login_but_not_operato
     assert _post(admin_web.client, "/admin/logout", data={"csrf_token": "wrong"}).status_code == 403
     for path, fields in (
         ("/admin/bootstrap", _bootstrap_data(csrf)),
-        ("/admin/libraries", {"csrf_token": csrf, "name": "Cannot Create With Master Session"}),
         (
             f"/admin/libraries/{library_id}/tags",
             {"csrf_token": csrf, "name": "Synthetic Tag", "operator_token": operator_token},
@@ -436,6 +437,136 @@ def test_initialized_master_token_login_retires_legacy_web_login_but_not_operato
     assert codec.verify(legacy_encoded) is not None
     assert codec.verify_master(legacy_encoded) is None
     assert encoded != legacy_encoded
+
+
+def test_master_session_creates_structure_with_atomic_identity_audit(admin_web: AdminWeb) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+
+    library = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Synthetic Master Library"},
+    )
+    assert library.status_code == 303
+    library_path = library.headers["location"]
+    section = _post(
+        admin_web.client,
+        f"{library_path}/sections",
+        data={"csrf_token": csrf, "name": "Synthetic Master Section", "description": "Brief"},
+    )
+    assert section.status_code == 303
+    section_path = section.headers["location"]
+    book = _post(
+        admin_web.client,
+        f"{section_path}/books",
+        data={"csrf_token": csrf, "name": "Synthetic Master Book", "summary": "Brief"},
+    )
+    assert book.status_code == 303
+    with admin_web.engine.connect() as connection:
+        assert len(connection.execute(select(Library.id)).all()) == 1
+        assert len(connection.execute(select(Section.id)).all()) == 1
+        assert len(connection.execute(select(Book.id)).all()) == 1
+        assert connection.execute(select(AdminStructureAuditEvent.id)).all() == []
+        events = connection.execute(
+            select(
+                MasterAuditEvent.action,
+                MasterAuditEvent.target_type,
+                MasterAuditEvent.target_id,
+                MasterAuditEvent.identity_id,
+                MasterAuditEvent.session_generation,
+            ).order_by(MasterAuditEvent.occurred_at)
+        ).all()
+    assert len(events) == 3
+    assert {(event.action, event.target_type) for event in events} == {
+        ("library.create", "library"),
+        ("section.create", "section"),
+        ("book.create", "book"),
+    }
+    assert {event.target_id for event in events} == {
+        library_path.rsplit("/", 1)[-1],
+        section_path.rsplit("/", 1)[-1],
+        book.headers["location"].rsplit("/", 1)[-1],
+    }
+    assert all(event.identity_id == "a" * 32 for event in events)
+    assert all(event.session_generation == 1 for event in events)
+
+
+def test_master_structure_write_rechecks_generation_inside_transaction(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+
+    async def rotate_before_action(action: Any, *args: Any) -> Any:
+        with immediate_transaction(admin_web.engine) as connection:
+            assert (
+                MasterTokenRepository(connection).rotate(
+                    _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
+                )
+                is not None
+            )
+        return await starlette_run_in_threadpool(action, *args)
+
+    monkeypatch.setattr(admin_router, "run_in_threadpool", rotate_before_action)
+    rejected = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Must Not Be Created"},
+    )
+    assert rejected.status_code == 401
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(Library.id)).all() == []
+        assert connection.execute(select(MasterAuditEvent.id)).all() == []
+
+
+def test_legacy_structure_write_rechecks_master_setup_inside_transaction(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    csrf = _login(admin_web)
+
+    async def initialize_before_action(action: Any, *args: Any) -> Any:
+        with immediate_transaction(admin_web.engine) as connection:
+            MasterTokenRepository(
+                connection, identity_factory=lambda: "a" * 32
+            ).initialize_from_local_cli(_MASTER_TOKEN, now=1_000)
+        return await starlette_run_in_threadpool(action, *args)
+
+    monkeypatch.setattr(admin_router, "run_in_threadpool", initialize_before_action)
+    rejected = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Must Not Be Created"},
+    )
+    assert rejected.status_code == 401
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(Library.id)).all() == []
+        assert connection.execute(select(AdminStructureAuditEvent.id)).all() == []
+
+
+def test_master_structure_write_requires_origin_csrf_and_committed_audit(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    path = "/admin/libraries"
+    fields = {"csrf_token": csrf, "name": "Must Not Be Created"}
+    assert (
+        _post(
+            admin_web.client, path, data=fields, origin="https://other.example.invalid"
+        ).status_code
+        == 403
+    )
+    assert _post(admin_web.client, path, data={**fields, "csrf_token": "wrong"}).status_code == 403
+
+    def reject_audit(self: MasterAuditRepository, **kwargs: Any) -> None:
+        raise RuntimeError("synthetic audit failure")
+
+    monkeypatch.setattr(MasterAuditRepository, "add_success", reject_audit)
+    assert _post(admin_web.client, path, data=fields).status_code == 500
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(Library.id)).all() == []
+        assert connection.execute(select(MasterAuditEvent.id)).all() == []
 
 
 @pytest.mark.parametrize(

@@ -399,7 +399,7 @@ def create_admin_router(
         request: Request,
         *,
         allowed_fields: frozenset[str],
-        action: Callable[[FormValues, bytes], str],
+        action: Callable[[FormValues, AdminSession], str],
         render: Callable[[str, AdminLocale, str], str | None],
     ) -> Response:
         locale = locale_for(request)
@@ -415,13 +415,13 @@ def create_admin_router(
         try:
             values = await _read_form(request, allowed_fields=allowed_fields | {"csrf_token"})
             _require_csrf(values, session)
-            if isinstance(session, MasterAdminSession):
-                return master_write_forbidden(request, session)
-            location = await run_in_threadpool(action, values, session.audit_fingerprint())
+            location = await run_in_threadpool(action, values, session)
         except _FormError as exc:
             status, message = exc.status_code, exc.safe_message
         except (ValidationError, ValueError):
             status, message = 422, "Check the submitted fields and try again."
+        except AuthenticationError:
+            status, message = 401, "Sign in again."
         except LibraryStructureNotFoundError:
             status, message = 404, "The requested local resource was not found."
         except (LibrarySeedConflictError, IntegrityError):
@@ -579,9 +579,11 @@ def create_admin_router(
 
     @router.post("/libraries")
     async def create_library(request: Request) -> Response:
-        def action(values: FormValues, fingerprint: bytes) -> str:
+        def action(values: FormValues, session: AdminSession) -> str:
             created = service.create_library(
-                CreateLibraryInput.model_validate(values), session_fingerprint=fingerprint
+                CreateLibraryInput.model_validate(values),
+                session_fingerprint=session.audit_fingerprint(),
+                master_session=session if isinstance(session, MasterAdminSession) else None,
             )
             return f"/admin/libraries/{created.id}"
 
@@ -673,11 +675,12 @@ def create_admin_router(
 
     @router.post("/libraries/{library_id}/sections")
     async def create_section(request: Request, library_id: str) -> Response:
-        def action(values: FormValues, fingerprint: bytes) -> str:
+        def action(values: FormValues, session: AdminSession) -> str:
             created = service.create_section(
                 library_id,
                 CreateSectionInput.model_validate(values),
-                session_fingerprint=fingerprint,
+                session_fingerprint=session.audit_fingerprint(),
+                master_session=session if isinstance(session, MasterAdminSession) else None,
             )
             return f"/admin/libraries/{library_id}/sections/{created.id}"
 
@@ -864,12 +867,13 @@ def create_admin_router(
 
     @router.post("/libraries/{library_id}/sections/{section_id}/books")
     async def create_book(request: Request, library_id: str, section_id: str) -> Response:
-        def action(values: FormValues, fingerprint: bytes) -> str:
+        def action(values: FormValues, session: AdminSession) -> str:
             created = service.create_book(
                 library_id,
                 section_id,
                 CreateBookInput.model_validate(values),
-                session_fingerprint=fingerprint,
+                session_fingerprint=session.audit_fingerprint(),
+                master_session=session if isinstance(session, MasterAdminSession) else None,
             )
             return f"/admin/libraries/{library_id}/sections/{section_id}/books/{created.id}"
 
