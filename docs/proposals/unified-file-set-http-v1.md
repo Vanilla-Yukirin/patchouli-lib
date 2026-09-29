@@ -12,7 +12,7 @@ Status: Proposed
 | --- | --- |
 | 存储方向 | [ADR 0004](../decisions/0004-page-file-storage.md)只接受“文件字节、清单、历史 Revision 均在 SQLite 中”及不静默丢失旧格式内容。 |
 | 产品目标 | [下一阶段设计](next-phase-product-and-api.md)确认新客户端使用统一文件集；具体 HTTP 契约仍为 Proposed。 |
-| 开发分支 | 已编写 0013 迁移、内部新建与整组修订服务、当前状态及精确历史读取、备份校验、有界 multipart 解析器及 HTTP 读写路由，并在开发分支的 `create_app` 中成对注册；有合成测试和真实应用测试。首版仅处理现有 Archive Page 和 Section 授权。 |
+| 开发分支 | 已编写 0013 迁移、内部新建与整组修订服务、当前状态、分页历史版本身份及精确历史读取、备份校验、有界 multipart 解析器及 HTTP 读写路由，并在开发分支的 `create_app` 中成对注册；有合成测试和真实应用测试。首版仅处理现有 Archive Page 和 Section 授权。 |
 | 已发布服务 | 此开发分支尚未合并、发布或部署，也未导入真实资料。不能把开发树上的注册及测试当成线上 API 已可用。 |
 
 下面凡称“草稿当前行为”，仅指本开发分支的实现。凡称“建议契约”，均须经
@@ -43,6 +43,7 @@ Status: Proposed
 | 新建 | `POST /api/v1/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages` | 在既有 Book 中直接创建首版文件集。 |
 | 修订 | `POST /api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/file-revisions` | 原子替换指定 Page 当前整组文件；不创建另一个 Page。 |
 | 当前状态 | `GET /api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}` | 取得当前 Revision 的已核验文件清单和强 Page ETag，以便重新打开后安全修订；不下载文件字节。 |
+| 历史身份 | `GET /api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/revisions` | 按版本号倒序列出有界历史身份与创建时间；文件内容仍须按准确 Revision 另取。 |
 | 精确清单 | `GET /api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/revisions/{revision_id}/files` | 读取指定历史 Revision 的完整文件清单。 |
 | 精确文件 | `GET /api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/revisions/{revision_id}/files/{file_name}` | 下载该 Revision 清单中的一个文件。 |
 
@@ -118,6 +119,7 @@ Status: Proposed
 | 新建成功 | `201 Created`；JSON 含 `section_id`、`book_id`、`page_id`、`revision_id`、`revision_number: 1`、规范化的 `occurred_at`、`occurrence_defaulted`、`snapshot_sha256`、`files`；响应头含当前强 `ETag` 和指向该首版清单的 `Location`。 |
 | 修订成功或同内容 | `200 OK`；JSON 含 `changed`、`section_id`、`page_id`、准确的当前 `revision_id`／`revision_number`、`snapshot_sha256`、`files`；`changed: false` 时 Revision 不增加，ETag 不变。 |
 | 当前状态 | `200 OK`；JSON 给出当前 Revision 的已核验文件集清单，不含文件字节；响应头携带强当前 Page `ETag`。当前草稿沿用历史清单的字段，尚未包含 Book、标题和声明时间，接受契约前需决定是否补齐。 |
+| 历史身份 | `200 OK`；`items` 最多 100 项，默认 20 项，按版本号倒序；可用严格正整数 `limit` 与排他性的 `before_revision_number` 继续读取。响应含当前版本身份与 `next_before_revision_number`，不含文件字节，也不代替精确清单校验。 |
 | 完全相同请求重放 | 保留首次成功的状态码、响应正文和 ETag，并添加 `Idempotency-Replayed: true`；重放得到的历史 ETag 不保证仍是当前 ETag。当前这次 HTTP 请求的 `X-Request-ID` 仍单独生成。 |
 | 精确清单 | `200 OK`；按指定 Page／Revision 返回 `page_id`、`revision_id`、`revision_number`、`snapshot_sha256` 和文件名、字节数、SHA-256。历史清单不因当前 Revision 变化而改指针。 |
 | 精确文件 | `200 OK`、`application/octet-stream`、`Content-Disposition: attachment`、`X-Content-Type-Options: nosniff`；返回准确原始字节，不因扩展名或上传 MIME 在浏览器内联执行。 |

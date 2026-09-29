@@ -16,7 +16,12 @@ from sqlalchemy import Engine
 from starlette.responses import JSONResponse, Response
 
 from patchouli_lib.api.authentication import AuthenticatedRequestContext, BearerAuthentication
-from patchouli_lib.api.contracts import API_V1_PREFIX, PROTECTED_CACHE_CONTROL
+from patchouli_lib.api.contracts import (
+    API_V1_PREFIX,
+    DEFAULT_PAGE_LIMIT,
+    MAX_PAGE_LIMIT,
+    PROTECTED_CACHE_CONTROL,
+)
 from patchouli_lib.api.errors import (
     ApplicationProblem,
     insufficient_scope,
@@ -41,7 +46,7 @@ from patchouli_lib.retrieval.file_set_read import (
     FileSetReadService,
     FileSetRevisionManifestView,
 )
-from patchouli_lib.retrieval.schemas import RevisionFileRead
+from patchouli_lib.retrieval.schemas import RevisionFileRead, RevisionHistoryPage
 
 _OPAQUE_ID_ADAPTER = TypeAdapter(OpaqueId)
 type ReadOperation[ResultT] = Callable[[FileSetReadService], ResultT]
@@ -77,6 +82,35 @@ def _filename(value: str) -> str:
     except (TypeError, ValueError, UnicodeError):
         raise _validation_problem() from None
     return value
+
+
+def _history_window(request: Request) -> tuple[int, int | None]:
+    if any(key not in {"limit", "before_revision_number"} for key in request.query_params):
+        raise _validation_problem()
+
+    def positive_integer(name: str, maximum: int) -> int | None:
+        values = request.query_params.getlist(name)
+        if not values:
+            return None
+        if len(values) != 1:
+            raise _validation_problem()
+        value = values[0]
+        if (
+            not value
+            or not value.isascii()
+            or not value.isdecimal()
+            or value.startswith("0")
+            or len(value) > len(str(maximum))
+        ):
+            raise _validation_problem()
+        number = int(value)
+        if not 1 <= number <= maximum:
+            raise _validation_problem()
+        return number
+
+    limit = positive_integer("limit", MAX_PAGE_LIMIT) or DEFAULT_PAGE_LIMIT
+    before = positive_integer("before_revision_number", (1 << 63) - 1)
+    return limit, before
 
 
 def _perform_read[ResultT](
@@ -133,7 +167,7 @@ def create_file_set_read_router(
     *,
     clock: Clock = utc_microseconds,
 ) -> APIRouter:
-    """Build the unregistered, read-only unified file-set router."""
+    """Build the read-only unified file-set router."""
 
     router = APIRouter(prefix=API_V1_PREFIX)
     authenticate = BearerAuthentication(engine, clock=clock)
@@ -141,6 +175,33 @@ def create_file_set_read_router(
         "/libraries/{library_id}/sections/{section_id}/pages/{page_id}"
         "/revisions/{revision_id}/files"
     )
+
+    @router.get("/libraries/{library_id}/sections/{section_id}/pages/{page_id}/revisions")
+    async def list_page_revisions(
+        library_id: str,
+        section_id: str,
+        page_id: str,
+        request: Request,
+    ) -> JSONResponse:
+        context = await anyio.to_thread.run_sync(
+            partial(authenticate, request), abandon_on_cancel=False
+        )
+        scoped_library_id = _scope_id(library_id)
+        scoped_section_id = _scope_id(section_id)
+        limit, before = _history_window(request)
+        history: RevisionHistoryPage = await _read(
+            engine,
+            context,
+            lambda service: service.list_revisions(
+                scoped_library_id,
+                scoped_section_id,
+                page_id,
+                limit=limit,
+                before_revision_number=before,
+            ),
+            clock=clock,
+        )
+        return JSONResponse(content=history.model_dump(mode="json"), headers=_headers(request))
 
     @router.get("/libraries/{library_id}/sections/{section_id}/pages/{page_id}")
     async def get_current_page_files(

@@ -12,18 +12,31 @@ from typing import Annotated
 from pydantic import Field
 from sqlalchemy import Connection, select
 
+from patchouli_lib.api.contracts import MAX_PAGE_LIMIT
 from patchouli_lib.auth.schemas import AuthenticatedCaller, CallerKind, CallerRecord, SectionAction
 from patchouli_lib.auth.service import Clock, utc_microseconds
 from patchouli_lib.content.file_manifest import FileManifest, build_file_manifest
-from patchouli_lib.content.models import Revision, RevisionFileSet
+from patchouli_lib.content.models import (
+    Revision,
+    RevisionFileSeal,
+    RevisionFileSealGuard,
+    RevisionFileSet,
+)
 from patchouli_lib.content.schemas import PageRecord, StrongPageETag
 from patchouli_lib.content.service import page_current_etag
-from patchouli_lib.identifiers import validate_page_id, validate_revision_id
+from patchouli_lib.identifiers import (
+    canonical_utc_wire,
+    validate_page_id,
+    validate_revision_id,
+    validate_revision_number,
+)
 from patchouli_lib.retrieval.repository import RetrievalRepository
 from patchouli_lib.retrieval.schemas import (
     RevisionFileManifestView,
     RevisionFileRead,
     RevisionFileView,
+    RevisionHistoryItem,
+    RevisionHistoryPage,
 )
 
 
@@ -117,6 +130,109 @@ class FileSetReadService:
         except ValueError:
             raise FileSetReadPersistenceError from None
         return FileSetCurrentRead(manifest=self._manifest_view(snapshot), etag=etag)
+
+    def list_revisions(
+        self,
+        library_id: str,
+        section_id: str,
+        page_id: str,
+        *,
+        limit: int,
+        before_revision_number: int | None,
+    ) -> RevisionHistoryPage:
+        """List bounded, newest-first Revision identities without loading file bytes."""
+
+        if type(limit) is not int or not 1 <= limit <= MAX_PAGE_LIMIT:
+            raise ValueError("Revision history limit is invalid.")
+        page = self._visible_page(library_id, section_id, page_id)
+        if before_revision_number is not None:
+            validate_revision_number(before_revision_number)
+        statement = (
+            select(
+                Revision.revision_id,
+                Revision.revision_number,
+                Revision.created_at,
+                RevisionFileSet.storage_format,
+                RevisionFileSeal.revision_id.label("seal_id"),
+                RevisionFileSealGuard.revision_id.label("guard_id"),
+            )
+            .outerjoin(
+                RevisionFileSet,
+                (RevisionFileSet.library_id == Revision.library_id)
+                & (RevisionFileSet.page_uid == Revision.page_uid)
+                & (RevisionFileSet.revision_id == Revision.revision_id)
+                & (RevisionFileSet.revision_number == Revision.revision_number),
+            )
+            .outerjoin(
+                RevisionFileSeal,
+                (RevisionFileSeal.library_id == Revision.library_id)
+                & (RevisionFileSeal.page_uid == Revision.page_uid)
+                & (RevisionFileSeal.revision_id == Revision.revision_id)
+                & (RevisionFileSeal.revision_number == Revision.revision_number),
+            )
+            .outerjoin(
+                RevisionFileSealGuard,
+                (RevisionFileSealGuard.library_id == Revision.library_id)
+                & (RevisionFileSealGuard.page_uid == Revision.page_uid)
+                & (RevisionFileSealGuard.revision_id == Revision.revision_id)
+                & (RevisionFileSealGuard.revision_number == Revision.revision_number),
+            )
+            .where(
+                Revision.library_id == page.library_id,
+                Revision.page_uid == page.page_uid,
+                Revision.revision_number <= page.current_revision_number,
+            )
+            .order_by(Revision.revision_number.desc())
+        )
+        if before_revision_number is not None:
+            statement = statement.where(Revision.revision_number < before_revision_number)
+        rows = self._connection.execute(statement.limit(limit + 1)).mappings().all()
+        expected_number = min(
+            page.current_revision_number,
+            before_revision_number - 1
+            if before_revision_number is not None
+            else page.current_revision_number,
+        )
+        if expected_number >= 1 and not rows:
+            raise FileSetReadPersistenceError
+        if before_revision_number is None and (
+            not rows
+            or rows[0]["revision_id"] != page.current_revision_id
+            or rows[0]["revision_number"] != page.current_revision_number
+        ):
+            raise FileSetReadPersistenceError
+        items: list[RevisionHistoryItem] = []
+        try:
+            for index, row in enumerate(rows):
+                number = row["revision_number"]
+                if (
+                    row["storage_format"] not in ("legacy_markdown", "file_set_v1")
+                    or row["seal_id"] != row["revision_id"]
+                    or row["guard_id"] != row["revision_id"]
+                    or number != expected_number
+                ):
+                    raise ValueError("Stored Revision history is inconsistent.")
+                if index < limit:
+                    items.append(
+                        RevisionHistoryItem(
+                            revision_id=validate_revision_id(row["revision_id"]),
+                            revision_number=validate_revision_number(number),
+                            created_at=canonical_utc_wire(row["created_at"]),
+                        )
+                    )
+                expected_number -= 1
+            if len(rows) <= limit and expected_number >= 1:
+                raise ValueError("Stored Revision history is incomplete.")
+        except (TypeError, ValueError, OverflowError, UnicodeError):
+            raise FileSetReadPersistenceError from None
+        next_before = items[-1].revision_number if len(rows) > limit else None
+        return RevisionHistoryPage(
+            page_id=page.page_id,
+            current_revision_id=page.current_revision_id,
+            current_revision_number=page.current_revision_number,
+            items=items,
+            next_before_revision_number=next_before,
+        )
 
     @staticmethod
     def _manifest_view(snapshot: _VerifiedSnapshot) -> FileSetRevisionManifestView:

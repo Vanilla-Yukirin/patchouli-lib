@@ -1,4 +1,4 @@
-"""Synthetic contract checks for the unregistered unified file-set read router."""
+"""Synthetic contract checks for the unified file-set read router."""
 
 from __future__ import annotations
 
@@ -221,6 +221,10 @@ def test_router_exposes_current_and_two_exact_file_reads(file_set_api: FileSetAp
             ("GET",),
         ),
         (
+            "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/revisions",
+            ("GET",),
+        ),
+        (
             "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}"
             "/revisions/{revision_id}/files",
             ("GET",),
@@ -231,6 +235,116 @@ def test_router_exposes_current_and_two_exact_file_reads(file_set_api: FileSetAp
             ("GET",),
         ),
     }
+
+
+def test_revision_history_is_bounded_newest_first_and_scoped(file_set_api: FileSetApi) -> None:
+    scope = file_set_api.scope
+    path = (
+        f"/api/v1/libraries/{scope.library_id}/sections/{scope.query_section_id}"
+        f"/pages/{scope.first_page_id}/revisions"
+    )
+    first = _get(file_set_api, path + "?limit=1")
+    assert first.status_code == 200
+    assert first.json() == {
+        "page_id": scope.first_page_id,
+        "current_revision_id": scope.second_revision_id,
+        "current_revision_number": 2,
+        "items": [
+            {
+                "revision_id": scope.second_revision_id,
+                "revision_number": 2,
+                "created_at": "1970-01-01T00:00:03.000000Z",
+            }
+        ],
+        "next_before_revision_number": 2,
+    }
+    assert first.headers["Cache-Control"] == PROTECTED_CACHE_CONTROL
+    second = _get(file_set_api, path + "?limit=1&before_revision_number=2")
+    assert second.status_code == 200
+    assert [item["revision_number"] for item in second.json()["items"]] == [1]
+    assert second.json()["items"][0]["revision_id"] == scope.first_revision_id
+    assert second.json()["next_before_revision_number"] is None
+    assert _get(file_set_api, path + "?before_revision_number=1").json()["items"] == []
+    _problem(_get(file_set_api, path, authenticated=False), 401, "authentication_required")
+    _problem(
+        _get(file_set_api, path.replace(scope.library_id, "f" * 32, 1)),
+        404,
+        "resource_not_found",
+    )
+    _problem(
+        _get(file_set_api, path.replace(scope.query_section_id, SECOND_QUERY_SECTION_ID, 1)),
+        403,
+        "insufficient_scope",
+    )
+    _problem(
+        _get(file_set_api, path.replace(scope.first_page_id, scope.deleted_page_id, 1)),
+        404,
+        "resource_not_found",
+    )
+
+
+def test_revision_history_lists_file_set_without_returning_file_bytes(
+    file_set_api: FileSetApi,
+) -> None:
+    revision_id, files = _install_file_set(file_set_api)
+    scope = file_set_api.scope
+    path = (
+        f"/api/v1/libraries/{scope.library_id}/sections/{scope.query_section_id}"
+        f"/pages/{scope.first_page_id}/revisions"
+    )
+    response = _get(file_set_api, path)
+    assert response.status_code == 200
+    assert [item["revision_id"] for item in response.json()["items"]] == [
+        revision_id,
+        scope.first_revision_id,
+    ]
+    for filename, content in files.items():
+        assert filename not in response.text
+        assert content.decode("utf-8", errors="ignore") not in response.text
+
+
+def test_revision_history_does_not_return_partial_list_when_manifest_is_missing(
+    file_set_api: FileSetApi,
+) -> None:
+    scope = file_set_api.scope
+    with immediate_transaction(file_set_api.engine) as connection:
+        connection.exec_driver_sql(
+            "DELETE FROM revision_file_sets WHERE library_id = ? AND revision_id = ?",
+            (scope.library_id, scope.first_revision_id),
+        )
+    path = (
+        f"/api/v1/libraries/{scope.library_id}/sections/{scope.query_section_id}"
+        f"/pages/{scope.first_page_id}/revisions"
+    )
+    response = _get(file_set_api, path)
+    assert response.status_code == 500
+    assert scope.first_revision_id not in response.text
+    assert scope.historical_content not in response.text
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "?limit=0",
+        "?limit=101",
+        "?limit=01",
+        "?limit=1&limit=2",
+        "?before_revision_number=0",
+        "?before_revision_number=01",
+        "?before_revision_number=9223372036854775808",
+        "?before_revision_number=2&before_revision_number=1",
+        "?unexpected=1",
+    ),
+)
+def test_revision_history_rejects_ambiguous_or_unbounded_query(
+    file_set_api: FileSetApi, query: str
+) -> None:
+    scope = file_set_api.scope
+    path = (
+        f"/api/v1/libraries/{scope.library_id}/sections/{scope.query_section_id}"
+        f"/pages/{scope.first_page_id}/revisions{query}"
+    )
+    _problem(_get(file_set_api, path), 422, "request_validation_failed")
 
 
 def test_current_page_returns_verified_manifest_and_strong_etag(file_set_api: FileSetApi) -> None:

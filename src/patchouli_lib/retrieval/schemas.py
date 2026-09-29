@@ -111,6 +111,27 @@ class RevisionFileManifestView(RetrievalSchema):
     files: Annotated[list[RevisionFileView], Field(min_length=1, max_length=MAX_FILES_PER_PAGE)]
 
 
+class RevisionHistoryItem(RetrievalSchema):
+    revision_id: RevisionId
+    revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+    created_at: str
+
+    @field_validator("created_at")
+    @classmethod
+    def require_canonical_created_at(cls, value: str) -> str:
+        if parse_occurrence_time(value).canonical_utc != value:
+            raise ValueError("Revision timestamp must be canonical UTC text.")
+        return value
+
+
+class RevisionHistoryPage(RetrievalSchema):
+    page_id: PageId
+    current_revision_id: RevisionId
+    current_revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+    items: Annotated[list[RevisionHistoryItem], Field(max_length=MAX_PAGE_LIMIT)]
+    next_before_revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)] | None
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class RevisionFileRead:
     filename: str
@@ -180,6 +201,8 @@ __all__ = [
     "RevisionFileManifestView",
     "RevisionFileRead",
     "RevisionFileView",
+    "RevisionHistoryItem",
+    "RevisionHistoryPage",
     "RevisionView",
     "SectionView",
 ]
