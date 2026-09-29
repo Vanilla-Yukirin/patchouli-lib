@@ -35,6 +35,7 @@ from patchouli_client.models import (
     Section,
     WhoAmI,
     require_canonical_api_path,
+    require_file_set_name,
     response_cursor,
     response_items,
     response_object,
@@ -287,7 +288,8 @@ class PatchouliClient:
         token: BearerToken,
         idempotency_key: IdempotencyKey,
     ) -> ClientResponse[FileSetCreateResult]:
-        multipart = build_file_set_multipart(metadata.to_wire(), files)
+        submitted_files = tuple(files)
+        multipart = build_file_set_multipart(metadata.to_wire(), submitted_files)
         response = self._transport.send(
             "POST",
             (
@@ -302,6 +304,7 @@ class PatchouliClient:
             idempotency_key=idempotency_key,
         )
         result = self._success(response, {201}, FileSetCreateResult.from_dict)
+        self._require_uploaded_files_match(submitted_files, result.value.manifest)
         if result.value.section_id != section_id or result.value.book_id != book_id:
             raise ProtocolError("file-set create response did not match the requested scope")
         self._require_file_set_etag(result.metadata.etag)
@@ -331,7 +334,8 @@ class PatchouliClient:
         if_match: str,
     ) -> ClientResponse[FileSetRevisionResult]:
         self._require_file_set_etag(if_match)
-        multipart = build_file_set_multipart(metadata.to_wire(), files)
+        submitted_files = tuple(files)
+        multipart = build_file_set_multipart(metadata.to_wire(), submitted_files)
         response = self._transport.send(
             "POST",
             (
@@ -346,6 +350,7 @@ class PatchouliClient:
             idempotency_key=idempotency_key,
         )
         result = self._success(response, {200}, FileSetRevisionResult.from_dict)
+        self._require_uploaded_files_match(submitted_files, result.value.manifest)
         if result.value.section_id != section_id or result.value.manifest.page_id != page_id:
             raise ProtocolError("file-set revision response did not match the requested Page")
         self._require_file_set_etag(result.metadata.etag)
@@ -441,6 +446,31 @@ class PatchouliClient:
         if value is None or _FILE_SET_ETAG.fullmatch(value) is None:
             raise ProtocolError("file-set response did not contain a strong Page ETag")
         return value
+
+    @staticmethod
+    def _require_uploaded_files_match(
+        submitted_files: tuple[FileSetFile, ...], manifest: FileSetManifest
+    ) -> None:
+        """Bind a successful write receipt to this call's immutable upload bytes."""
+
+        expected = tuple(
+            sorted(
+                (
+                    FileSetFileSummary(
+                        require_file_set_name(file.filename),
+                        len(file.body),
+                        hashlib.sha256(file.body).hexdigest(),
+                    )
+                    for file in submitted_files
+                ),
+                key=lambda item: item.filename.encode("utf-8"),
+            )
+        )
+        # FileSetManifest.from_dict already checked that snapshot_sha256 matches
+        # the returned entries. Exact entry equality therefore also binds the
+        # returned snapshot digest to the submitted file set.
+        if manifest.files != expected:
+            raise ProtocolError("file-set write response did not match the uploaded files")
 
     @staticmethod
     def _single_header(response: httpx.Response, name: str) -> str:

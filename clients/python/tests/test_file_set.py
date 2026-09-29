@@ -131,6 +131,45 @@ def test_create_uses_one_multipart_operation_for_every_file_count(
     assert result.metadata.etag == ETAG
 
 
+def test_create_accepts_canonical_name_in_receipt_for_decomposed_upload_name() -> None:
+    original_name = "cafe\u0301.md"
+    canonical_name = "caf\u00e9.md"
+    expected = manifest(((canonical_name, b"# Example"),))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert canonical_name.encode() in request.content
+        assert original_name.encode() not in request.content
+        return httpx.Response(
+            201,
+            headers=protected_headers(
+                ETag=ETAG,
+                Location=(
+                    f"/api/v1/libraries/lib_1/sections/sec_1/pages/{PAGE}"
+                    f"/revisions/{REVISION}/files"
+                ),
+            ),
+            json={
+                **expected,
+                "section_id": "sec_1",
+                "book_id": "book_1",
+                "occurred_at": "2026-09-29T12:00:00.000000Z",
+                "occurrence_defaulted": False,
+            },
+        )
+
+    with client(httpx.MockTransport(handler)) as api:
+        response = api.create_file_set(
+            "lib_1",
+            "sec_1",
+            "book_1",
+            FileSetCreateMetadata("Example", FileSetSource("manual")),
+            (FileSetFile(original_name, b"# Example"),),
+            token=TOKEN,
+            idempotency_key=KEY,
+        )
+    assert response.value.manifest.files[0].filename == canonical_name
+
+
 def test_revise_current_exact_manifest_and_download() -> None:
     expected = manifest((("content.md", b"# Example"), ("figure.png", b"\x00\xff")))
     seen: list[str] = []
@@ -232,6 +271,72 @@ def test_create_rejects_mismatched_or_unsafe_response(
             token=TOKEN,
             idempotency_key=KEY,
         )
+
+
+@pytest.mark.parametrize("operation", ["create", "revise"])
+@pytest.mark.parametrize(
+    "returned_files",
+    [
+        (("content.md", b"# Changed"),),
+        (("other.md", b"# Example"),),
+        (("content.md", b"# Example"), ("extra.png", b"\x00")),
+    ],
+)
+def test_file_set_write_rejects_self_consistent_receipt_for_other_bytes(
+    operation: str, returned_files: tuple[tuple[str, bytes], ...]
+) -> None:
+    wrong_manifest = manifest(returned_files)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        if operation == "create":
+            return httpx.Response(
+                201,
+                headers=protected_headers(
+                    ETag=ETAG,
+                    Location=(
+                        f"/api/v1/libraries/lib_1/sections/sec_1/pages/{PAGE}"
+                        f"/revisions/{REVISION}/files"
+                    ),
+                ),
+                json={
+                    **wrong_manifest,
+                    "section_id": "sec_1",
+                    "book_id": "book_1",
+                    "occurred_at": "2026-09-29T12:00:00.000000Z",
+                    "occurrence_defaulted": False,
+                },
+            )
+        return httpx.Response(
+            200,
+            headers=protected_headers(ETag=ETAG),
+            json={**wrong_manifest, "changed": False, "section_id": "sec_1"},
+        )
+
+    with (
+        client(httpx.MockTransport(handler)) as api,
+        pytest.raises(ProtocolError, match="uploaded files"),
+    ):
+        if operation == "create":
+            api.create_file_set(
+                "lib_1",
+                "sec_1",
+                "book_1",
+                FileSetCreateMetadata("Example", FileSetSource("manual")),
+                (FileSetFile("content.md", b"# Example"),),
+                token=TOKEN,
+                idempotency_key=KEY,
+            )
+        else:
+            api.revise_file_set(
+                "lib_1",
+                "sec_1",
+                PAGE,
+                FileSetRevisionMetadata(FileSetSource("manual")),
+                (FileSetFile("content.md", b"# Example"),),
+                token=TOKEN,
+                idempotency_key=KEY,
+                if_match=ETAG,
+            )
 
 
 def test_download_rejects_unsafe_headers_and_corrupt_bytes() -> None:
