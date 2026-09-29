@@ -418,6 +418,8 @@ _ZH_CN: dict[str, str] = {
     "Recorded": "记录时间",
     "Back to current version": "返回当前版本",
     "No libraries yet.": "暂无知识库。",
+    "Choose a Library to browse its Tags.": "选择知识库以浏览其标签。",
+    "Choose a Library to browse its Trash.": "选择知识库以浏览其回收站。",
     "No sections yet.": "暂无分区。",
     "No books yet.": "暂无书籍。",
     "No pages yet.": "暂无页面。",
@@ -1452,6 +1454,39 @@ def libraries_page(
     )
 
 
+def library_scope_index_page(
+    csrf_token: str,
+    libraries: tuple[LibraryItem, ...],
+    *,
+    section: Literal["tags", "trash"],
+    locale: AdminLocale = "en",
+) -> str:
+    title = "Tags" if section == "tags" else "Trash"
+    description = (
+        "Choose a Library to browse its Tags."
+        if section == "tags"
+        else "Choose a Library to browse its Trash."
+    )
+    cards = "".join(
+        f'<li><a href="/admin/libraries/{escape(item.id, quote=True)}/{section}">'
+        f"{escape(item.name)}</a></li>"
+        for item in libraries
+    )
+    body = f'<p class="section-help">{localize(locale, description)}</p>' + (
+        f'<ul class="item-list library-grid">{cards}</ul>'
+        if libraries
+        else f'<p class="card">{localize(locale, "No libraries yet.")}</p>'
+    )
+    return _browser_document(
+        csrf_token,
+        locale,
+        localize(locale, title),
+        f"/admin/{section}",
+        body,
+        current_section=section,
+    )
+
+
 def library_page(
     csrf_token: str,
     view: LibraryView,
@@ -1545,6 +1580,7 @@ def tag_directory_page(
             (localize(locale, "Libraries"), "/admin/libraries"),
             (view.library.name, library_path),
         ),
+        current_section="tags",
     )
 
 
@@ -1589,6 +1625,7 @@ def tag_detail_page(
             (view.library.name, library_path),
             (localize(locale, "Tags"), tag_path),
         ),
+        current_section="tags",
     )
 
 
@@ -1681,7 +1718,13 @@ def trash_directory_page(
             ),
         )
     return _browser_document(
-        csrf_token, locale, localize(locale, "Trash"), base, body, crumbs=crumbs
+        csrf_token,
+        locale,
+        localize(locale, "Trash"),
+        base,
+        body,
+        crumbs=crumbs,
+        current_section="trash",
     )
 
 
@@ -1753,6 +1796,7 @@ def trash_detail_page(
             (view.section.name, section_path),
             (localize(locale, "Trash"), f"{section_path}/trash"),
         ),
+        current_section="trash",
     )
 
 
@@ -1771,7 +1815,12 @@ def restore_error_page(
     body = _notice(localize(locale, message), error=True)
     body += f'<p><a href="{section_path}/trash">{localize(locale, "Trash")}</a></p>'
     return _browser_document(
-        csrf_token, locale, localize(locale, "Restore page"), section_path, body
+        csrf_token,
+        locale,
+        localize(locale, "Restore page"),
+        section_path,
+        body,
+        current_section="trash",
     )
 
 
@@ -1938,6 +1987,7 @@ def _browser_document(
     *,
     crumbs: tuple[tuple[str, str], ...] = (),
     script_src: str | None = None,
+    current_section: str = "libraries",
 ) -> str:
     links = "".join(
         f'<a href="{escape(href, quote=True)}">{escape(label)}</a><span aria-hidden="true">/</span>'
@@ -1947,7 +1997,7 @@ def _browser_document(
     content = (
         f"{_header(escape(csrf_token, quote=True), locale, switch_path=path)}"
         '<div class="admin-shell">'
-        f"{_sidebar(locale, current='libraries')}"
+        f"{_sidebar(locale, current=current_section)}"
         f'<main><nav class="breadcrumb" aria-label="{localize(locale, "Breadcrumb")}">'
         f'{links}<span aria-current="page">{heading}</span></nav>'
         f"<h1>{heading}</h1>{body}</main></div>"
@@ -1959,6 +2009,8 @@ def _sidebar(locale: AdminLocale, *, current: str) -> str:
     entries = (
         ("home", "Home", "/admin"),
         ("libraries", "Libraries", "/admin/libraries"),
+        ("tags", "Tags", "/admin/tags"),
+        ("trash", "Trash", "/admin/trash"),
         ("agents", "Identities", "/admin/agents"),
         ("setup", "Setup and credentials", "/admin/setup"),
         ("guide", "Guide", "/admin/guide"),

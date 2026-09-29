@@ -17,6 +17,8 @@ from patchouli_lib.api.errors import ProblemDetails
 from patchouli_lib.app import create_app
 from patchouli_lib.auth.models import Caller
 from patchouli_lib.config import Settings
+from patchouli_lib.retrieval.file_set_read import FileSetRevisionManifestView
+from patchouli_lib.tags.schemas import TagCollection
 
 _ORIGIN = "https://admin.example.invalid"
 _PASSWORD = "synthetic guide password"
@@ -89,17 +91,33 @@ def test_api_directory_and_synthetic_examples_match_reviewed_wire_shapes(
     assert "管理登录 Cookie 不能代替它" in response.text
     assert "需要检索配置" in response.text
     assert "/api/v1/sections/{section_id}/books/{book_id}/pages" in response.text
+    assert (
+        "/api/v1/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages"
+        in response.text
+    )
+    assert "单份 Markdown 也用此接口" in response.text
+    assert "/file-revisions" in response.text
+    assert "/api/v1/libraries/{library_id}/tags/{tag_id}/pages" in response.text
     assert "搜索：不可用（503）" in response.text
 
     capabilities = _preview(response.text, "capabilities-preview")
     parsed_capabilities = CapabilitiesResponse.model_validate(capabilities)
     assert parsed_capabilities.api_versions == ("v1",)
-    assert parsed_capabilities.features == ("archive", "tags")
+    assert parsed_capabilities.features == ("archive", "file-sets", "tags")
+    assert parsed_capabilities.limits.file_set is not None
 
     search_error = _preview(response.text, "search-preview")
     parsed_problem = ProblemDetails.model_validate(search_error)
     assert parsed_problem.status == 503
     assert parsed_problem.code == "search_unavailable"
+
+    file_set = FileSetRevisionManifestView.model_validate(
+        _preview(response.text, "file-set-preview")
+    )
+    assert file_set.page_id == "example-page"
+    assert file_set.files[0].filename == "content.md"
+    tags = TagCollection.model_validate(_preview(response.text, "tags-preview"))
+    assert tags.items[0].page_count == 1
 
 
 def test_skill_guide_shows_only_packaged_manifest_and_escaped_fixed_files(

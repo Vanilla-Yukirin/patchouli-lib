@@ -128,6 +128,30 @@ def _seed_page(
     return identifier.value
 
 
+def test_global_tag_index_requires_session_and_links_every_library(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    first, _, _ = _seed_structure(engine, prefix="1")
+    second, _, _ = _seed_structure(engine, prefix="4")
+    anonymous = client.get("/admin/tags")
+    assert anonymous.status_code == 303
+    assert anonymous.headers["location"] == "/admin/login"
+    assert anonymous.headers["cache-control"] == "no-store, max-age=0"
+
+    _login(client)
+    response = client.get("/admin/tags?lang=zh-CN")
+    assert response.status_code == 200
+    assert response.headers["content-language"] == "zh-CN"
+    assert response.headers["cache-control"] == "no-store, max-age=0"
+    assert 'href="/admin/tags" aria-current="page"' in response.text
+    assert f'href="/admin/libraries/{first}/tags"' in response.text
+    assert f'href="/admin/libraries/{second}/tags"' in response.text
+    assert "选择知识库以浏览其标签。" in response.text
+    assert 'href="/admin/tags?lang=en"' in response.text
+    assert client.get(f"/admin/libraries/{second}/tags").status_code == 200
+
+
 def test_tag_browser_is_session_protected_library_scoped_and_escaped(
     browser: tuple[TestClient, Engine],
 ) -> None:
@@ -205,6 +229,7 @@ def test_tag_browser_is_session_protected_library_scoped_and_escaped(
     assert f'href="{base}/tags"' in library_page.text
     directory = client.get(f"{base}/tags?lang=zh-CN")
     assert directory.status_code == 200
+    assert 'href="/admin/tags" aria-current="page"' in directory.text
     assert directory.headers["content-language"] == "zh-CN"
     assert directory.headers["cache-control"] == "no-store, max-age=0"
     assert "标签" in directory.text

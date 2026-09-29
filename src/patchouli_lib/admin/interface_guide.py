@@ -12,6 +12,12 @@ from html import escape
 from typing import Literal
 
 from patchouli_lib.api.agent_skill_routes import SkillBundle
+from patchouli_lib.api.auth_contracts import (
+    FILE_SET_FEATURE,
+    CapabilityConfiguration,
+    capabilities_response,
+)
+from patchouli_lib.content.file_manifest import build_file_manifest
 
 GuideLocale = Literal["en", "zh-CN"]
 
@@ -47,6 +53,48 @@ _API_ENDPOINTS = (
         "always",
     ),
     (
+        "POST",
+        "/api/v1/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages",
+        "Create a flat file-set Page (one Markdown file uses the same route)",
+        "创建同层文件集页面（单份 Markdown 也用此接口）",
+        "always",
+    ),
+    (
+        "POST",
+        "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/file-revisions",
+        "Replace the complete file set with a new Revision",
+        "用新版本替换整组文件",
+        "always",
+    ),
+    (
+        "GET",
+        "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}",
+        "Read the current file-set manifest and ETag",
+        "读取当前文件清单及 ETag",
+        "always",
+    ),
+    (
+        "GET",
+        "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/revisions/{revision_id}/files/{file_name}",
+        "Safely download a file from an exact Revision",
+        "安全下载指定版本中的文件",
+        "always",
+    ),
+    (
+        "GET",
+        "/api/v1/libraries/{library_id}/tags",
+        "List or find Tags within one Library",
+        "列出或查找知识库中的标签",
+        "always",
+    ),
+    (
+        "GET",
+        "/api/v1/libraries/{library_id}/tags/{tag_id}/pages",
+        "List Pages carrying one Tag",
+        "列出带有指定标签的页面",
+        "always",
+    ),
+    (
         "GET",
         "/api/v1/agent/skill/manifest",
         "Protected Skill manifest",
@@ -62,21 +110,6 @@ _API_ENDPOINTS = (
     ),
 )
 
-_CAPABILITIES_EXAMPLE: dict[str, object] = {
-    "api_versions": ["v1"],
-    "features": ["archive", "retrieval", "tags"],
-    "limits": {
-        "max_content_bytes": 2_097_152,
-        "default_page_size": 20,
-        "max_page_size": 100,
-        "max_query_bytes": 4096,
-    },
-    "idempotency": {
-        "content_mutations": True,
-        "successful_replay_retention": "indefinite-alpha",
-    },
-}
-
 _SEARCH_EXAMPLE: dict[str, object] = {
     "type": "about:blank",
     "title": "Service unavailable",
@@ -85,6 +118,39 @@ _SEARCH_EXAMPLE: dict[str, object] = {
     "code": "search_unavailable",
     "request_id": "req_00000000000000000000000000000000",
     "details": {},
+}
+
+
+def _file_set_example() -> dict[str, object]:
+    """Build a synthetic wire example from the same digest rules as the API."""
+
+    manifest = build_file_manifest([("content.md", b"# Example\n")])
+    return {
+        "page_id": "example-page",
+        "revision_id": "rev_" + "0" * 32,
+        "revision_number": 1,
+        "snapshot_sha256": manifest.snapshot_sha256.hex(),
+        "files": [
+            {
+                "filename": item.name,
+                "size_bytes": item.content_size_bytes,
+                "content_sha256": item.content_sha256.hex(),
+            }
+            for item in manifest.files
+        ],
+    }
+
+
+_TAGS_EXAMPLE: dict[str, object] = {
+    "items": [
+        {
+            "tag_id": "0" * 32,
+            "name": "Example Tag",
+            "created_at": 1_893_456_000_000_000,
+            "page_count": 1,
+        }
+    ],
+    "next_offset": None,
 }
 
 _MCP_SUCCESS_EXAMPLE: dict[str, object] = {
@@ -163,12 +229,15 @@ def _preview(
 
 
 def api_guide(locale: GuideLocale, *, retrieval_available: bool) -> str:
-    capabilities_example = {
-        **_CAPABILITIES_EXAMPLE,
-        "features": ["archive", "retrieval", "tags"]
-        if retrieval_available
-        else ["archive", "tags"],
-    }
+    capabilities_example = capabilities_response(
+        CapabilityConfiguration(
+            features=("archive", FILE_SET_FEATURE, "retrieval", "tags")
+            if retrieval_available
+            else ("archive", FILE_SET_FEATURE, "tags"),
+            content_mutation_idempotency=True,
+            successful_replay_retention="indefinite-alpha",
+        )
+    ).model_dump(mode="json")
     rows = "".join(
         "<li><strong>"
         + escape(method)
@@ -213,6 +282,18 @@ def api_guide(locale: GuideLocale, *, retrieval_available: bool) -> str:
             "search-preview",
             "POST /api/v1/sections/{section_id}/search · 503",
             _SEARCH_EXAMPLE,
+            locale,
+        )
+        + _preview(
+            "file-set-preview",
+            "GET /api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}",
+            _file_set_example(),
+            locale,
+        )
+        + _preview(
+            "tags-preview",
+            "GET /api/v1/libraries/{library_id}/tags",
+            _TAGS_EXAMPLE,
             locale,
         )
     )

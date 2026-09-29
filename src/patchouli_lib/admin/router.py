@@ -51,6 +51,7 @@ from patchouli_lib.admin.pages import (
     guide_page,
     libraries_page,
     library_page,
+    library_scope_index_page,
     login_page,
     operations_page,
     page_preview_page,
@@ -607,6 +608,24 @@ def create_admin_router(
         return protected_page(
             request,
             lambda csrf, locale: libraries_page(csrf, read_model.list_libraries(), locale=locale),
+        )
+
+    @router.get("/tags")
+    def tags_index(request: Request) -> Response:
+        return protected_page(
+            request,
+            lambda csrf, locale: library_scope_index_page(
+                csrf, read_model.list_libraries(), section="tags", locale=locale
+            ),
+        )
+
+    @router.get("/trash")
+    def trash_index(request: Request) -> Response:
+        return protected_page(
+            request,
+            lambda csrf, locale: library_scope_index_page(
+                csrf, read_model.list_libraries(), section="trash", locale=locale
+            ),
         )
 
     @router.get("/agents")

@@ -230,6 +230,33 @@ def _restore(client: TestClient, detail: str, values: dict[str, str]):  # type: 
     return client.post(detail + "/restore", data=values, headers={"Origin": _ORIGIN})
 
 
+def test_global_trash_index_requires_session_and_links_every_library(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    first = _seed(engine, "1")
+    second = _seed(engine, "4")
+    deleted_title = "Private deleted Page title"
+    _page(engine, first, 1, title=deleted_title, deleted_at=3_000_000)
+    anonymous = client.get("/admin/trash")
+    assert anonymous.status_code == 303
+    assert anonymous.headers["location"] == "/admin/login"
+    assert anonymous.headers["cache-control"] == "no-store, max-age=0"
+
+    _login(client)
+    response = client.get("/admin/trash?lang=zh-CN")
+    assert response.status_code == 200
+    assert response.headers["content-language"] == "zh-CN"
+    assert response.headers["cache-control"] == "no-store, max-age=0"
+    assert 'href="/admin/trash" aria-current="page"' in response.text
+    assert f'href="/admin/libraries/{first[0]}/trash"' in response.text
+    assert f'href="/admin/libraries/{second[0]}/trash"' in response.text
+    assert "选择知识库以浏览其回收站。" in response.text
+    assert deleted_title not in response.text
+    assert "PRIVATE BODY MUST NOT APPEAR" not in response.text
+    assert client.get(f"/admin/libraries/{second[0]}/trash").status_code == 200
+
+
 def test_trash_requires_session_and_has_empty_bilingual_view(
     browser: tuple[TestClient, Engine],
 ) -> None:
@@ -244,6 +271,7 @@ def test_trash_requires_session_and_has_empty_bilingual_view(
     _login(client)
     empty = client.get(section_trash + "?lang=zh-CN")
     assert empty.status_code == 200
+    assert 'href="/admin/trash" aria-current="page"' in empty.text
     assert "暂无已删除页面。" in empty.text
     assert "此处仅显示元数据" in empty.text
     assert empty.headers["content-language"] == "zh-CN"
