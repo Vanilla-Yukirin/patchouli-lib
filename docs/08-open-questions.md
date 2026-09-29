@@ -89,6 +89,9 @@
 - [x] Page 正文使用不可变 Revision；恢复会创建新 Revision。
 - [x] Page 在任意时刻属于一个 Book，移动时无需复制历史。
 - [x] 一个 Book 可以只有一个 Page；Page 的展示标题不要求英文连字符命名。
+- [x] Page 的全部文件字节与历史版本保存在 SQLite，不设外部权威文件目录；
+  旧单 Markdown 接口不得静默丢弃新格式文件，见
+  [ADR 0004](decisions/0004-page-file-storage.md)。
 - [x] Tag 和 Shelf 是检索投影，不是内容所有者。
 - [x] 模型提供方和部署位置由管理员配置。
 - [x] 自动整理默认生成可供审查的建议。

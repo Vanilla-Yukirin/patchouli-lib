@@ -31,11 +31,13 @@
 - [ADR 0001：实现与交付基线](decisions/0001-implementation-baseline.md)
 - [ADR 0002：由管理员发起的私有更新](decisions/0002-manual-private-updates.md)
 - [ADR 0003：受限的网页管理面板](decisions/0003-admin-web-console.md)
+- [ADR 0004：Page 文件字节保存在 SQLite](decisions/0004-page-file-storage.md)
 - [管理面板入口简化提案](proposals/admin-request-origin.md)
 
 下一阶段设计包含与当前已接受的单文件 Page、一次性 Token 展示和按 Section 授权
-不一致的目标。读者应以现有文档和代码判断**当前行为**；新提案不能自行取代既有
-决策，也不能被当成已经上线的能力。
+不一致的目标。ADR 0004 只确定多文件的 SQLite 存储方向，并未启用新写入。读者
+应以现有文档和代码判断**当前行为**；新提案不能自行取代既有决策，也不能被当成
+已经上线的能力。
 
 ## 状态词汇
 
