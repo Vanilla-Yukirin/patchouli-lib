@@ -175,6 +175,10 @@ def test_application_registers_exact_agent_access_routes(tmp_path: Path) -> None
             ("/api/v1/sections/{section_id}/books", "GET"),
             ("/api/v1/sections/{section_id}/pages", "GET"),
             ("/api/v1/sections/{section_id}/pages/{page_id}", "GET"),
+            ("/api/v1/sections/{section_id}/pages/{page_id}", "DELETE"),
+            ("/api/v1/sections/{section_id}/pages/{page_id}/restore", "POST"),
+            ("/api/v1/sections/{section_id}/trash", "GET"),
+            ("/api/v1/sections/{section_id}/trash/{page_id}", "GET"),
             (
                 "/api/v1/sections/{section_id}/pages/{page_id}/revisions/{revision_number}",
                 "GET",
@@ -209,7 +213,9 @@ def test_application_does_not_register_retrieval_without_cursor_secret(tmp_path:
     try:
         paths = application.openapi()["paths"]
         assert "/api/v1/sections" not in paths
-        assert "/api/v1/sections/{section_id}/pages/{page_id}" not in paths
+        assert set(paths["/api/v1/sections/{section_id}/pages/{page_id}"]) == {"delete"}
+        assert "/api/v1/sections/{section_id}/trash" not in paths
+        assert "/api/v1/sections/{section_id}/trash/{page_id}" in paths
         assert "/api/v1/sections/{section_id}/search" in paths
         section_id, _book_id, token = _seed_agent(application.state.engine)
         with TestClient(application, raise_server_exceptions=False) as client:

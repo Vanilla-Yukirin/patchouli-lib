@@ -6,7 +6,7 @@ import hashlib
 import hmac
 import json
 from collections.abc import Callable
-from typing import Final
+from typing import Final, Literal
 from uuid import uuid4
 
 from sqlalchemy import Connection
@@ -39,6 +39,8 @@ from patchouli_lib.content.schemas import (
     NewPageSource,
     NewRevision,
     OccurrenceCorrectionResponseBody,
+    PageLifecycleCommand,
+    PageLifecycleResponseBody,
     PageOccurrenceCorrectionCommand,
     PageRecord,
     PageSourceRecord,
@@ -80,6 +82,9 @@ REVISE_ROUTE_TEMPLATE: Final = "/api/v1/sections/{section_id}/pages/{page_id}/re
 CORRECT_OCCURRENCE_ROUTE_TEMPLATE: Final = (
     "/api/v1/sections/{section_id}/pages/{page_id}/occurrence"
 )
+DELETE_PAGE_ROUTE_TEMPLATE: Final = "/api/v1/sections/{section_id}/pages/{page_id}"
+RESTORE_PAGE_ROUTE_TEMPLATE: Final = "/api/v1/sections/{section_id}/pages/{page_id}/restore"
+LifecycleAction = Literal["delete", "restore"]
 PAGE_ETAG_DOMAIN: Final = b"patchouli-lib/page-current-etag/v2\x00"
 _LEGACY_PAGE_ETAG_DOMAIN: Final = b"patchouli-lib/page-current-etag/v1\x00"
 
@@ -107,6 +112,11 @@ class ArchivePreconditionFailedError(RuntimeError):
 class ArchiveOccurrenceUnchangedError(RuntimeError):
     def __init__(self) -> None:
         super().__init__("The Page already has the requested declared time.")
+
+
+class ArchiveLifecycleUnchangedError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("The Page already has the requested lifecycle state.")
 
 
 class ArchivePersistenceError(RuntimeError):
@@ -341,7 +351,7 @@ class ArchiveService:
 
         self._require_transaction()
         page = self._content.get_page(command.library_id, command.page_id)
-        if page is None or page.page_type != "archive" or page.deleted_at is not None:
+        if page is None or page.page_type != "archive":
             raise ArchiveNotFoundError
         operation_at = self._operation_time()
         authenticated = AuthenticationService(
@@ -369,6 +379,8 @@ class ArchiveService:
         self._require_route_section(page.section_id, command.section_id)
         if replay is not None:
             return self._replay_result(replay)
+        if page.deleted_at is not None:
+            raise ArchiveNotFoundError
         if command.expected_etag is None:
             raise ArchivePreconditionRequiredError
         current_etag = page_current_etag(
@@ -452,7 +464,7 @@ class ArchiveService:
 
         self._require_transaction()
         page = self._content.get_page(command.library_id, command.page_id)
-        if page is None or page.page_type != "archive" or page.deleted_at is not None:
+        if page is None or page.page_type != "archive":
             raise ArchiveNotFoundError
         operation_at = self._operation_time()
         authenticated = AuthenticationService(
@@ -482,6 +494,8 @@ class ArchiveService:
             except ValueError:
                 raise ArchiveReplayCorruptError from None
             return replay
+        if page.deleted_at is not None:
+            raise ArchiveNotFoundError
 
         current_etag = page_current_etag(
             page.page_uid,
@@ -560,6 +574,135 @@ class ArchiveService:
                     outcome=AuditOutcome.SUCCEEDED,
                     request_id=command.request_id,
                     occurred_at=correction.corrected_at,
+                )
+            )
+            self._idempotency.record_success(caller, request, response)
+        except SQLAlchemyError:
+            raise ArchivePersistenceError from None
+        return response
+
+    def transition_page_lifecycle(
+        self,
+        token_value: str,
+        command: PageLifecycleCommand,
+        idempotency: ArchiveIdempotencyKey,
+        *,
+        action: LifecycleAction,
+    ) -> OriginalResponse | ReplayResponse:
+        """Soft-delete or restore one Archive Page without changing its Revisions."""
+
+        self._require_transaction()
+        page = self._content.get_page(command.library_id, command.page_id)
+        if page is None or page.page_type != "archive":
+            raise ArchiveNotFoundError
+        operation_at = self._operation_time()
+        authenticated = AuthenticationService(
+            self._auth_repository,
+            clock=lambda: operation_at,
+        ).authorize_content(
+            token_value,
+            library_id=command.library_id,
+            section_id=page.section_id,
+            action=SectionAction.ARCHIVE_WRITE,
+        )
+        caller = TransactionValidatedCaller(
+            library_id=command.library_id,
+            caller_id=authenticated.caller.id,
+        )
+        route = DELETE_PAGE_ROUTE_TEMPLATE if action == "delete" else RESTORE_PAGE_ROUTE_TEMPLATE
+        request = IdempotencyRequest(
+            method="DELETE" if action == "delete" else "POST",
+            route_template=route,
+            key_digest=idempotency.key_digest,
+            request_fingerprint=self._lifecycle_fingerprint(command, action),
+        )
+        replay = self._idempotency.lookup(caller, request)
+        self._require_route_section(page.section_id, command.section_id)
+        if replay is not None:
+            try:
+                PageLifecycleResponseBody.model_validate_json(replay.response_body)
+            except ValueError:
+                raise ArchiveReplayCorruptError from None
+            return replay
+
+        current_etag = page_current_etag(
+            page.page_uid,
+            page.current_revision_id,
+            page.current_revision_number,
+            page.occurred_at,
+            page.updated_at,
+        )
+        if not hmac.compare_digest(command.expected_etag, current_etag):
+            raise ArchivePreconditionFailedError
+        if (action == "delete") == (page.deleted_at is not None):
+            raise ArchiveLifecycleUnchangedError
+        if page.updated_at >= (1 << 63) - 1:
+            raise ArchivePersistenceError
+
+        try:
+            updated, event = self._content.transition_page_lifecycle(
+                page,
+                action=action,
+                actor_caller_id=authenticated.caller.id,
+                request_id=command.request_id,
+                changed_at=operation_at,
+            )
+            href = build_api_v1_path(
+                "sections",
+                page.section_id,
+                "pages",
+                page.page_id,
+                "revisions",
+                str(page.current_revision_number),
+            )
+            body = PageLifecycleResponseBody(
+                section_id=page.section_id,
+                page_id=page.page_id,
+                state="trashed" if action == "delete" else "active",
+                deleted_at=(
+                    canonical_utc_wire(updated.deleted_at)
+                    if updated.deleted_at is not None
+                    else None
+                ),
+                updated_at=canonical_utc_wire(updated.updated_at),
+                current_revision_id=page.current_revision_id,
+                current_revision_number=page.current_revision_number,
+                citation=ArchiveCitation(
+                    section_id=page.section_id,
+                    page_id=page.page_id,
+                    revision_id=page.current_revision_id,
+                    revision_number=page.current_revision_number,
+                    href=href,
+                ),
+            )
+            response = OriginalResponse(
+                response_status=200,
+                response_body=body.model_dump_json().encode("utf-8"),
+                response_location=build_api_v1_path(
+                    "sections", page.section_id, "pages", page.page_id
+                ),
+                response_etag=page_current_etag(
+                    updated.page_uid,
+                    updated.current_revision_id,
+                    updated.current_revision_number,
+                    updated.occurred_at,
+                    updated.updated_at,
+                ),
+                original_request_id=command.request_id,
+                original_request_timestamp=canonical_utc_wire(event.changed_at),
+            )
+            self._auth_repository.add_audit_event(
+                NewAuditEvent(
+                    id=self._id_factory(),
+                    library_id=page.library_id,
+                    actor_caller_id=authenticated.caller.id,
+                    actor_credential_id=authenticated.credential.id,
+                    action=f"content.archive.{action}",
+                    resource_type="page",
+                    resource_id=page.page_id,
+                    outcome=AuditOutcome.SUCCEEDED,
+                    request_id=command.request_id,
+                    occurred_at=event.changed_at,
                 )
             )
             self._idempotency.record_success(caller, request, response)
@@ -831,15 +974,35 @@ class ArchiveService:
             ).encode("utf-8")
         )
 
+    @staticmethod
+    def _lifecycle_fingerprint(command: PageLifecycleCommand, action: LifecycleAction) -> bytes:
+        return digest_request_fingerprint(
+            json.dumps(
+                {
+                    "expected_etag": command.expected_etag,
+                    "library_id": command.library_id,
+                    "operation": f"archive-{action}-v1",
+                    "page_id": command.page_id,
+                    "section_id": command.section_id,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        )
+
 
 __all__ = [
     "CORRECT_OCCURRENCE_ROUTE_TEMPLATE",
     "CREATE_ROUTE_TEMPLATE",
+    "DELETE_PAGE_ROUTE_TEMPLATE",
     "PAGE_ETAG_DOMAIN",
     "REVISE_ROUTE_TEMPLATE",
+    "RESTORE_PAGE_ROUTE_TEMPLATE",
     "ArchiveIdentifierExhaustedError",
     "ArchiveNotFoundError",
     "ArchiveOccurrenceUnchangedError",
+    "ArchiveLifecycleUnchangedError",
     "ArchivePersistenceError",
     "ArchivePreconditionFailedError",
     "ArchivePreconditionRequiredError",

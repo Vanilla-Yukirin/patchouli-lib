@@ -13,14 +13,19 @@ from python_multipart import MultipartParser
 from python_multipart.exceptions import FormParserError, MultipartParseError
 from python_multipart.multipart import parse_options_header
 from sqlalchemy import Connection, Engine
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 
 from patchouli_lib.api.authentication import (
     AuthenticatedRequestContext,
     BearerAuthentication,
     extract_bearer_token,
 )
-from patchouli_lib.api.contracts import API_V1_PREFIX, PROTECTED_CACHE_CONTROL
+from patchouli_lib.api.contracts import (
+    API_V1_PREFIX,
+    PROTECTED_CACHE_CONTROL,
+    PaginationParameters,
+    build_api_v1_path,
+)
 from patchouli_lib.api.errors import (
     ApplicationProblem,
     insufficient_scope,
@@ -40,6 +45,7 @@ from patchouli_lib.auth.service import (
 from patchouli_lib.content import (
     AppendArchiveRevisionCommand,
     ArchiveIdempotencyKey,
+    ArchiveLifecycleUnchangedError,
     ArchiveMutationReplay,
     ArchiveMutationResult,
     ArchiveNotFoundError,
@@ -50,15 +56,23 @@ from patchouli_lib.content import (
     ArchiveSourceInput,
     CorrectArchiveOccurrenceCommand,
     CreateArchiveCommand,
+    page_current_etag,
 )
 from patchouli_lib.content.models import MAX_MARKDOWN_BYTES
 from patchouli_lib.content.repository import ContentRepository
-from patchouli_lib.content.schemas import StrongPageETag
+from patchouli_lib.content.schemas import (
+    ArchiveCitation,
+    PageLifecycleCommand,
+    PageLifecycleResponseBody,
+    PageRecord,
+    StrongPageETag,
+)
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.idempotency import IdempotencyConflictError, digest_idempotency_key
 from patchouli_lib.idempotency.schemas import OriginalResponse, ReplayResponse
-from patchouli_lib.identifiers import parse_occurrence_time
+from patchouli_lib.identifiers import InvalidPageIdError, canonical_utc_wire, parse_occurrence_time
 from patchouli_lib.library.schemas import OpaqueId
+from patchouli_lib.retrieval.cursor import CursorBinding, CursorCodec, InvalidCursorError
 
 if TYPE_CHECKING:
     from python_multipart.multipart import MultipartCallbacks
@@ -79,6 +93,7 @@ _MIME_TOKEN_BYTES = frozenset(
 _MAX_MIME_HEADER_BYTES = 1_024
 _OPAQUE_ID_ADAPTER = TypeAdapter(OpaqueId)
 _PAGE_ETAG_ADAPTER = TypeAdapter(StrongPageETag)
+_TRASH_CURSOR_KEY_PATTERN = re.compile(r"^[0-9]{20}:[a-z0-9-]{1,80}$", re.ASCII)
 
 ArchiveServiceFactory = Callable[[Connection], ArchiveService]
 MutationKind = Literal["create", "revise"]
@@ -165,6 +180,15 @@ def _occurrence_unchanged_problem() -> ApplicationProblem:
         code="occurrence_unchanged",
         title="Declared time unchanged",
         detail="The Page already has the requested declared time.",
+    )
+
+
+def _lifecycle_unchanged_problem() -> ApplicationProblem:
+    return ApplicationProblem(
+        status_code=409,
+        code="page_state_unchanged",
+        title="Page state unchanged",
+        detail="The Page is already in the requested state.",
     )
 
 
@@ -605,6 +629,114 @@ def _occurrence_command(
         raise _validation_problem() from None
 
 
+def _lifecycle_command(
+    *,
+    context: AuthenticatedRequestContext,
+    section_id: str,
+    page_id: str,
+    expected_etag: str,
+    request_id: str,
+) -> PageLifecycleCommand:
+    try:
+        return PageLifecycleCommand(
+            library_id=context.authenticated.caller.library_id,
+            section_id=section_id,
+            page_id=page_id,
+            expected_etag=expected_etag,
+            request_id=request_id,
+        )
+    except (ValidationError, ValueError, TypeError):
+        raise _validation_problem() from None
+
+
+async def _require_empty_body(request: Request) -> None:
+    async for chunk in request.stream():
+        if chunk:
+            raise _validation_problem()
+
+
+def _trash_pagination(request: Request) -> PaginationParameters:
+    pairs = request.query_params.multi_items()
+    if any(key not in {"limit", "cursor"} for key, _ in pairs):
+        raise _validation_problem()
+    values: dict[str, str] = {}
+    for key, value in pairs:
+        if key in values:
+            raise _validation_problem()
+        values[key] = value
+    try:
+        return PaginationParameters.model_validate(values)
+    except ValidationError:
+        raise _validation_problem() from None
+
+
+def _trash_cursor_binding(
+    context: AuthenticatedRequestContext, section_id: str, limit: int
+) -> CursorBinding:
+    caller = context.authenticated.caller
+    return CursorBinding(
+        caller_id=caller.id,
+        policy_version=caller.policy_version,
+        section_id=section_id,
+        route_identity="trash.list",
+        limit=limit,
+        filters_identity=b"deleted:true;archive:write",
+        sort_identity=b"deleted-at:descending;page-id:ascending",
+    )
+
+
+def _trash_cursor_key(page: PageRecord) -> str:
+    if page.deleted_at is None:
+        raise ValueError("Trash cursor requires a deleted Page.")
+    return f"{page.deleted_at:020d}:{page.page_id}"
+
+
+def _trash_cursor_before(value: str) -> tuple[int, str]:
+    if _TRASH_CURSOR_KEY_PATTERN.fullmatch(value) is None:
+        raise InvalidCursorError
+    timestamp, page_id = value.split(":", maxsplit=1)
+    return int(timestamp), page_id
+
+
+def _trash_item(page: PageRecord) -> dict[str, object]:
+    if page.deleted_at is None:
+        raise ValueError("Trash view requires a deleted Page.")
+    citation = ArchiveCitation(
+        section_id=page.section_id,
+        page_id=page.page_id,
+        revision_id=page.current_revision_id,
+        revision_number=page.current_revision_number,
+        href=build_api_v1_path(
+            "sections",
+            page.section_id,
+            "pages",
+            page.page_id,
+            "revisions",
+            str(page.current_revision_number),
+        ),
+    )
+    body = PageLifecycleResponseBody(
+        section_id=page.section_id,
+        page_id=page.page_id,
+        state="trashed",
+        deleted_at=canonical_utc_wire(page.deleted_at),
+        updated_at=canonical_utc_wire(page.updated_at),
+        current_revision_id=page.current_revision_id,
+        current_revision_number=page.current_revision_number,
+        citation=citation,
+    )
+    return {
+        **body.model_dump(mode="json"),
+        "etag": page_current_etag(
+            page.page_uid,
+            page.current_revision_id,
+            page.current_revision_number,
+            page.occurred_at,
+            page.updated_at,
+        ),
+    }
+
+
 def _require_archive_access(
     context: AuthenticatedRequestContext,
     section_id: str,
@@ -615,6 +747,20 @@ def _require_archive_access(
     if not section_actions:
         raise resource_not_found()
     if SectionAction.ARCHIVE_WRITE not in section_actions:
+        raise insufficient_scope()
+
+
+def _require_trash_read_access(
+    context: AuthenticatedRequestContext,
+    section_id: str,
+    *,
+    detail: bool,
+) -> None:
+    _require_archive_access(context, section_id)
+    required = SectionAction.PAGE_READ if detail else SectionAction.QUERY
+    if not any(
+        grant.section_id == section_id and grant.action == required for grant in context.grants
+    ):
         raise insufficient_scope()
 
 
@@ -694,12 +840,7 @@ def _perform_occurrence_correction(
                 action=SectionAction.ARCHIVE_WRITE,
             )
             page = ContentRepository(connection).get_page(command.library_id, command.page_id)
-            if (
-                page is None
-                or page.page_type != "archive"
-                or page.deleted_at is not None
-                or page.section_id != command.section_id
-            ):
+            if page is None or page.page_type != "archive" or page.section_id != command.section_id:
                 raise ArchiveNotFoundError
             return service_factory(connection).correct_occurrence(token, command, idempotency)
     except AuthenticationError:
@@ -714,6 +855,92 @@ def _perform_occurrence_correction(
         raise _occurrence_unchanged_problem() from None
     except IdempotencyConflictError:
         raise _idempotency_conflict_problem() from None
+
+
+def _perform_lifecycle(
+    engine: Engine,
+    service_factory: ArchiveServiceFactory,
+    token: str,
+    command: PageLifecycleCommand,
+    idempotency: ArchiveIdempotencyKey,
+    action: Literal["delete", "restore"],
+    clock: Clock,
+) -> OriginalResponse | ReplayResponse:
+    try:
+        with immediate_transaction(engine) as connection:
+            AuthenticationService(AuthRepository(connection), clock=clock).authorize_content(
+                token,
+                library_id=command.library_id,
+                section_id=command.section_id,
+                action=SectionAction.ARCHIVE_WRITE,
+            )
+            page = ContentRepository(connection).get_page(command.library_id, command.page_id)
+            if page is None or page.page_type != "archive" or page.section_id != command.section_id:
+                raise ArchiveNotFoundError
+            return service_factory(connection).transition_page_lifecycle(
+                token, command, idempotency, action=action
+            )
+    except AuthenticationError:
+        raise invalid_token() from None
+    except AuthorizationError:
+        raise insufficient_scope() from None
+    except ArchiveNotFoundError:
+        raise resource_not_found() from None
+    except ArchivePreconditionFailedError:
+        raise _occurrence_conflict_problem() from None
+    except ArchiveLifecycleUnchangedError:
+        raise _lifecycle_unchanged_problem() from None
+    except IdempotencyConflictError:
+        raise _idempotency_conflict_problem() from None
+
+
+def _read_trash(
+    engine: Engine,
+    token: str,
+    library_id: str,
+    section_id: str,
+    clock: Clock,
+    *,
+    page_id: str | None = None,
+    limit: int = 20,
+    before: tuple[int, str] | None = None,
+) -> PageRecord | tuple[PageRecord, ...]:
+    try:
+        with engine.connect() as connection, connection.begin():
+            AuthenticationService(AuthRepository(connection), clock=clock).authorize_content(
+                token,
+                library_id=library_id,
+                section_id=section_id,
+                action=SectionAction.ARCHIVE_WRITE,
+            )
+            AuthenticationService(AuthRepository(connection), clock=clock).authorize_content(
+                token,
+                library_id=library_id,
+                section_id=section_id,
+                action=(SectionAction.PAGE_READ if page_id is not None else SectionAction.QUERY),
+            )
+            repository = ContentRepository(connection)
+            if page_id is None:
+                return repository.list_deleted_pages(
+                    library_id, section_id, limit=limit, before=before
+                )
+            page = repository.get_page(library_id, page_id)
+            if (
+                page is None
+                or page.page_type != "archive"
+                or page.section_id != section_id
+                or page.deleted_at is None
+            ):
+                raise ArchiveNotFoundError
+            return page
+    except AuthenticationError:
+        raise invalid_token() from None
+    except AuthorizationError:
+        raise insufficient_scope() from None
+    except ArchiveNotFoundError:
+        raise resource_not_found() from None
+    except InvalidPageIdError:
+        raise _validation_problem() from None
 
 
 async def _authenticate(
@@ -775,11 +1002,11 @@ def _success_response(request: Request, result: ArchiveMutationResult) -> Respon
     )
 
 
-def _occurrence_success_response(
+def _metadata_success_response(
     request: Request, stored: OriginalResponse | ReplayResponse
 ) -> Response:
     if stored.response_status != 200 or stored.response_location is None:
-        raise RuntimeError("Occurrence correction returned an invalid success response.")
+        raise RuntimeError("Page metadata mutation returned an invalid success response.")
     headers = {
         "Location": stored.response_location,
         "ETag": stored.response_etag,
@@ -801,6 +1028,7 @@ def create_archive_router(
     *,
     clock: Clock = utc_microseconds,
     service_factory: ArchiveServiceFactory | None = None,
+    cursor_codec: CursorCodec | None = None,
 ) -> APIRouter:
     """Create protected Archive mutation routes for an application Engine."""
 
@@ -907,7 +1135,140 @@ def create_archive_router(
             ),
             abandon_on_cancel=False,
         )
-        return _occurrence_success_response(request, stored)
+        return _metadata_success_response(request, stored)
+
+    async def lifecycle_action(
+        action: Literal["delete", "restore"],
+        section_id: str,
+        page_id: str,
+        request: Request,
+    ) -> Response:
+        validated_section_id = _validate_route_id(section_id)
+        idempotency = _idempotency_key(request)
+        expected_etag = _revision_precondition(request)
+        await _require_empty_body(request)
+        context = await _authenticate(authenticate, request)
+        _require_archive_access(context, validated_section_id)
+        command = _lifecycle_command(
+            context=context,
+            section_id=validated_section_id,
+            page_id=page_id,
+            expected_etag=expected_etag,
+            request_id=get_request_id(request),
+        )
+        token = extract_bearer_token(request)
+        stored = await anyio.to_thread.run_sync(
+            partial(
+                _perform_lifecycle,
+                engine,
+                resolved_service_factory,
+                token,
+                command,
+                idempotency,
+                action,
+                clock,
+            ),
+            abandon_on_cancel=False,
+        )
+        return _metadata_success_response(request, stored)
+
+    @router.delete("/sections/{section_id}/pages/{page_id}", status_code=200)
+    async def delete_page(section_id: str, page_id: str, request: Request) -> Response:
+        return await lifecycle_action("delete", section_id, page_id, request)
+
+    @router.post("/sections/{section_id}/pages/{page_id}/restore", status_code=200)
+    async def restore_page(section_id: str, page_id: str, request: Request) -> Response:
+        return await lifecycle_action("restore", section_id, page_id, request)
+
+    @router.get("/sections/{section_id}/trash/{page_id}")
+    async def get_trashed_page(section_id: str, page_id: str, request: Request) -> JSONResponse:
+        validated_section_id = _validate_route_id(section_id)
+        context = await _authenticate(authenticate, request)
+        _require_trash_read_access(context, validated_section_id, detail=True)
+        page = await anyio.to_thread.run_sync(
+            partial(
+                _read_trash,
+                engine,
+                extract_bearer_token(request),
+                context.authenticated.caller.library_id,
+                validated_section_id,
+                clock,
+                page_id=page_id,
+            ),
+            abandon_on_cancel=False,
+        )
+        if not isinstance(page, PageRecord):
+            raise RuntimeError("Trash detail read returned a collection.")
+        item = _trash_item(page)
+        return JSONResponse(
+            content=item,
+            headers={
+                REQUEST_ID_HEADER: get_request_id(request),
+                "Cache-Control": PROTECTED_CACHE_CONTROL,
+                "ETag": cast(str, item["etag"]),
+            },
+        )
+
+    if cursor_codec is not None:
+
+        @router.get("/sections/{section_id}/trash")
+        async def list_trashed_pages(section_id: str, request: Request) -> JSONResponse:
+            validated_section_id = _validate_route_id(section_id)
+            pagination = _trash_pagination(request)
+            context = await _authenticate(authenticate, request)
+            _require_trash_read_access(context, validated_section_id, detail=False)
+            binding = _trash_cursor_binding(context, validated_section_id, pagination.limit)
+            before: tuple[int, str] | None = None
+            if pagination.cursor is not None:
+                try:
+                    key = cursor_codec.decode(pagination.cursor, binding=binding)
+                except InvalidCursorError:
+                    raise ApplicationProblem(
+                        status_code=400,
+                        code="invalid_cursor",
+                        title="Invalid cursor",
+                        detail="The pagination cursor is invalid or no longer applicable.",
+                    ) from None
+                try:
+                    before = _trash_cursor_before(key)
+                except InvalidCursorError:
+                    raise ApplicationProblem(
+                        status_code=400,
+                        code="invalid_cursor",
+                        title="Invalid cursor",
+                        detail="The pagination cursor is invalid or no longer applicable.",
+                    ) from None
+            rows = await anyio.to_thread.run_sync(
+                partial(
+                    _read_trash,
+                    engine,
+                    extract_bearer_token(request),
+                    context.authenticated.caller.library_id,
+                    validated_section_id,
+                    clock,
+                    limit=pagination.limit + 1,
+                    before=before,
+                ),
+                abandon_on_cancel=False,
+            )
+            if not isinstance(rows, tuple):
+                raise RuntimeError("Trash list read returned one Page.")
+            visible = rows[: pagination.limit]
+            next_cursor = (
+                cursor_codec.encode(binding=binding, last_key=_trash_cursor_key(visible[-1]))
+                if len(rows) > pagination.limit
+                else None
+            )
+            return JSONResponse(
+                content={
+                    "items": [_trash_item(page) for page in visible],
+                    "next_cursor": next_cursor,
+                },
+                headers={
+                    REQUEST_ID_HEADER: get_request_id(request),
+                    "Cache-Control": PROTECTED_CACHE_CONTROL,
+                },
+            )
 
     return router
 

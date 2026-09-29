@@ -247,6 +247,32 @@ class PageOccurrenceCorrectionRecord(PageOccurrenceCorrectionCommand):
     at_revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
 
 
+class PageLifecycleEventRecord(ContentSchema):
+    """Immutable proof of one Page tombstone transition."""
+
+    library_id: OpaqueId
+    page_uid: PageUid
+    sequence: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+    action: Literal["delete", "restore"]
+    section_id: OpaqueId
+    old_deleted_at: StoredTimestamp | None
+    old_updated_at: StoredTimestamp
+    changed_at: StoredTimestamp
+    at_revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+    occurred_at_at_event: OccurrenceMicros
+    actor_caller_id: OpaqueId
+    request_id: RequestId
+
+    @model_validator(mode="after")
+    def require_actual_transition(self) -> Self:
+        if self.changed_at <= self.old_updated_at:
+            raise ValueError("Page lifecycle time must strictly advance.")
+        if (self.action == "delete") != (self.old_deleted_at is None):
+            raise ValueError("Page lifecycle action does not match the prior state.")
+        canonical_utc_wire(self.changed_at)
+        return self
+
+
 class NewRevision(MarkdownContent):
     library_id: OpaqueId
     revision_id: RevisionId
@@ -475,6 +501,21 @@ class CorrectArchiveOccurrenceCommand(ContentSchema):
         return validate_page_id(value)
 
 
+class PageLifecycleCommand(ContentSchema):
+    """One conditional Archive Page tombstone operation."""
+
+    library_id: OpaqueId
+    section_id: OpaqueId
+    page_id: PageId
+    expected_etag: StrongPageETag
+    request_id: RequestId
+
+    @field_validator("page_id")
+    @classmethod
+    def require_page_id(cls, value: str) -> str:
+        return validate_page_id(value)
+
+
 class ArchiveIdempotencyKey(ContentSchema):
     """Already-digested key material safe to cross the domain boundary."""
 
@@ -594,6 +635,42 @@ class OccurrenceCorrectionResponseBody(ContentSchema):
         return self
 
 
+class PageLifecycleResponseBody(ContentSchema):
+    """No content bytes: a write grant does not imply Page read access."""
+
+    section_id: OpaqueId
+    page_id: PageId
+    state: Literal["trashed", "active"]
+    deleted_at: str | None
+    updated_at: str
+    current_revision_id: RevisionId
+    current_revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+    citation: ArchiveCitation
+
+    @field_validator("deleted_at", "updated_at")
+    @classmethod
+    def require_canonical_time(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        from patchouli_lib.identifiers import parse_occurrence_time
+
+        if parse_occurrence_time(value).canonical_utc != value:
+            raise ValueError("Page lifecycle time must be canonical UTC text.")
+        return value
+
+    @model_validator(mode="after")
+    def require_consistent_identity_and_state(self) -> Self:
+        if (
+            (self.state == "trashed") != (self.deleted_at is not None)
+            or self.citation.section_id != self.section_id
+            or self.citation.page_id != self.page_id
+            or self.citation.revision_id != self.current_revision_id
+            or self.citation.revision_number != self.current_revision_number
+        ):
+            raise ValueError("Page lifecycle response identity or state is inconsistent.")
+        return self
+
+
 @dataclass(frozen=True, slots=True, repr=False, eq=False)
 class ArchiveMutationSuccess:
     page: PageRecord
@@ -643,6 +720,9 @@ __all__ = [
     "NewPageSource",
     "NewRevision",
     "OccurrenceCorrectionResponseBody",
+    "PageLifecycleCommand",
+    "PageLifecycleEventRecord",
+    "PageLifecycleResponseBody",
     "PageIdCollisionCounterRecord",
     "PageIdentifierRecord",
     "PageOccurrenceCorrectionCommand",

@@ -91,6 +91,26 @@ Archive Page。请求须携带本 Section 的 `archive:write` bearer 凭据、`I
 普通删除会设置 `deleted_at` 等墓碑标记。已删除的 Page 不出现在默认读取和搜索中，
 但获授权的操作者可以恢复它。
 
+本开发分支为 Archive Page 增加了删除和恢复接口（尚未合并或部署）：
+
+- `DELETE /api/v1/sections/{section_id}/pages/{page_id}` 将整个 Page 移入回收站；
+  `POST /api/v1/sections/{section_id}/pages/{page_id}/restore` 恢复同一 Page ID。
+  两者均要求本 Section 的 `archive:write`、`Idempotency-Key`、当前强 `If-Match`
+  和空请求正文；成功返回 200、新 ETag、状态、删除时间与当前 Revision 引用。
+- 同键同请求重试重放原成功响应；过期 ETag 返回 412，已处于目标状态返回 409。
+  删除和恢复不创建 Revision，不修改历史正文、Source 或 Tag；数据库记录连续、
+  不可变的状态事件和成功审计。若旧数据库已有无法说明来源的删除标记，新迁移
+  拒绝为其虚构事件史。
+- 删除后，新修订与新声明时间校正均返回 404；删除前已成功的相同幂等请求仍可
+  重放原成功响应，不会再次改动已删除 Page。
+- `GET /api/v1/sections/{section_id}/trash` 列出本 Section 的已删除 Page，
+  同时要求 `archive:write` 与 `section:query`；带 Page ID 的回收站详情还要求
+  `page:read`。写权限本身不授予枚举或读取权限。回收站只提供状态和引用，
+  不在此返回正文；恢复后仍可按原 Page ID 浏览已有 Revision。
+
+回收站读取的分页游标需要服务端配置签名密钥；未配置该密钥时不会注册列表路由。
+正常 Page 的读取与检索继续排除删除标记。
+
 ## 管理性擦除
 
 不可变历史不应意味着泄漏的凭据、非法内容或个人数据永远无法删除。后续实现必须

@@ -199,7 +199,7 @@ def test_correction_keeps_id_and_history_and_old_replays_valid(
         assert [item["at_revision_number"] for item in corrections] == [1, 2]
     assert validate_database(
         _portable_copy(content_engine, tmp_path / "corrected.db")
-    ).schema_revision == ("20260929_0011")
+    ).schema_revision == ("20260929_0012")
 
 
 def test_authorized_correction_replay_and_backup_graph(
@@ -265,7 +265,7 @@ def test_authorized_correction_replay_and_backup_graph(
         assert connection.scalar(select(func.count()).select_from(Revision)) == 2
         assert connection.scalar(select(func.count()).select_from(PageOccurrenceCorrection)) == 1
     validated = _portable_copy(content_engine, tmp_path / "correction-replay.db")
-    assert validate_database(validated).schema_revision == "20260929_0011"
+    assert validate_database(validated).schema_revision == "20260929_0012"
 
 
 def test_backup_rejects_patch_replay_that_is_not_its_correction(
@@ -366,7 +366,7 @@ def test_historical_v1_replay_survives_later_occurrence_correction(
         assert connection.scalar(select(func.count()).select_from(PageOccurrenceCorrection)) == 1
     assert validate_database(
         _portable_copy(content_engine, tmp_path / "historical-v1-corrected.db")
-    ).schema_revision == ("20260929_0011")
+    ).schema_revision == ("20260929_0012")
 
 
 def test_same_microsecond_correction_and_revision_keep_strict_clock_and_etag(
@@ -444,7 +444,7 @@ def test_same_microsecond_correction_and_revision_keep_strict_clock_and_etag(
             != revised.response.response_etag
         )
     portable = _portable_copy(content_engine, tmp_path / "same-microsecond.db")
-    assert validate_database(portable).schema_revision == ("20260929_0011")
+    assert validate_database(portable).schema_revision == ("20260929_0012")
     with sqlite3.connect(portable) as connection:
         trigger_sql = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'trigger' "
@@ -452,7 +452,7 @@ def test_same_microsecond_correction_and_revision_keep_strict_clock_and_etag(
         ).fetchone()[0]
         connection.execute("DROP TRIGGER trg_idempotency_records_immutable_update")
         connection.execute(trigger_sql)
-    assert validate_database(portable).schema_revision == ("20260929_0011")
+    assert validate_database(portable).schema_revision == ("20260929_0012")
     with sqlite3.connect(portable) as connection:
         connection.execute("DROP TRIGGER trg_idempotency_records_immutable_update")
         connection.execute(
@@ -510,7 +510,7 @@ def test_backup_rejects_correction_timestamp_at_or_after_next_revision(
         assert isinstance(revised, ArchiveMutationSuccess)
 
     database = _portable_copy(content_engine, tmp_path / "correction-after-revision.db")
-    assert validate_database(database).schema_revision == "20260929_0011"
+    assert validate_database(database).schema_revision == "20260929_0012"
     with sqlite3.connect(database) as connection:
         trigger = connection.execute(
             "SELECT sql FROM sqlite_schema WHERE type = 'trigger' "

@@ -12,6 +12,7 @@ from patchouli_lib.content.models import (
     PageSource,
     Revision,
 )
+from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import (
     MarkdownContent,
     NewPageIdentifier,
@@ -22,6 +23,7 @@ from patchouli_lib.database import immediate_transaction
 from patchouli_lib.identifiers import PAGE_ID_SCHEME, generate_page_id, page_id_registry_digest
 from patchouli_lib.identifiers.page_ids import parse_occurrence_time
 
+from .conftest import ArchiveScope
 from .helpers import insert_page_graph, page_graph_values, seed_library_structure
 
 
@@ -739,8 +741,13 @@ def test_failed_graph_write_rolls_back_every_content_row(content_engine: Engine)
 
 def test_soft_deleted_page_keeps_canonical_namespace_reservation(
     content_engine: Engine,
+    archive_scope: ArchiveScope,
 ) -> None:
-    library_id, section_id, book_id = seed_library_structure(content_engine)
+    library_id, section_id, book_id = (
+        archive_scope.library_id,
+        archive_scope.section_id,
+        archive_scope.book_id,
+    )
     values = page_graph_values(
         library_id=library_id,
         section_id=section_id,
@@ -749,10 +756,14 @@ def test_soft_deleted_page_keeps_canonical_namespace_reservation(
     with immediate_transaction(content_engine) as connection:
         insert_page_graph(connection, values)
     with immediate_transaction(content_engine) as connection:
-        connection.execute(
-            update(Page)
-            .where(Page.library_id == library_id, Page.page_uid == values[0].page_uid)
-            .values(deleted_at=3_000_000, updated_at=3_000_000)
+        page = ContentRepository(connection).get_page(library_id, values[0].page_id)
+        assert page is not None
+        ContentRepository(connection).transition_page_lifecycle(
+            page,
+            action="delete",
+            actor_caller_id=archive_scope.caller_id,
+            request_id="req_" + "a" * 32,
+            changed_at=3_000_000,
         )
 
     with content_engine.connect() as connection:

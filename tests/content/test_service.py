@@ -5,7 +5,7 @@ from collections.abc import Iterator
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import Connection, Engine, func, select, update
+from sqlalchemy import Connection, Engine, func, select
 
 from patchouli_lib.auth.models import AuditEvent, SectionGrant
 from patchouli_lib.auth.repository import AuthRepository
@@ -20,6 +20,7 @@ from patchouli_lib.content.models import (
     PageSource,
     Revision,
 )
+from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import (
     AppendArchiveRevisionCommand,
     ArchiveIdempotencyKey,
@@ -557,7 +558,7 @@ def test_revision_preconditions_append_once_keep_old_and_replay_after_advance(
         assert create_replay.response.response_etag == created.response.response_etag
 
 
-def test_deleted_page_rejects_fresh_revision_and_prior_replay_without_mutation(
+def test_deleted_page_rejects_fresh_revision_but_replays_prior_success_without_mutation(
     content_engine: Engine,
     archive_scope: ArchiveScope,
 ) -> None:
@@ -581,13 +582,16 @@ def test_deleted_page_rejects_fresh_revision_and_prior_replay_without_mutation(
         ).append_revision(archive_scope.token.value, command, replay_key)
         assert isinstance(revised, ArchiveMutationSuccess)
     with immediate_transaction(content_engine) as connection:
-        connection.execute(
-            update(Page)
-            .where(
-                Page.library_id == archive_scope.library_id,
-                Page.page_uid == created.page.page_uid,
-            )
-            .values(deleted_at=OPERATION_TIME + 1, updated_at=OPERATION_TIME + 1)
+        page = ContentRepository(connection).get_page(
+            archive_scope.library_id, created.page.page_id
+        )
+        assert page is not None
+        deleted, _ = ContentRepository(connection).transition_page_lifecycle(
+            page,
+            action="delete",
+            actor_caller_id=archive_scope.caller_id,
+            request_id="req_" + "f" * 32,
+            changed_at=OPERATION_TIME + 1,
         )
         baseline = _counts(connection)
 
@@ -597,20 +601,26 @@ def test_deleted_page_rejects_fresh_revision_and_prior_replay_without_mutation(
             "request_id": f"req_{'e' * 32}",
         }
     )
-    for attempted, key in ((command, replay_key), (fresh, _key("revision-after-deletion"))):
-        with immediate_transaction(content_engine) as connection:
-            with pytest.raises(ArchiveNotFoundError, match="not found"):
-                _service(connection).append_revision(archive_scope.token.value, attempted, key)
-            assert _counts(connection) == baseline
-            current = connection.execute(
-                select(
-                    Page.current_revision_id, Page.current_revision_number, Page.deleted_at
-                ).where(
-                    Page.library_id == archive_scope.library_id,
-                    Page.page_uid == created.page.page_uid,
-                )
-            ).one()
-            assert current == (revised.revision.revision_id, 2, OPERATION_TIME + 1)
+    with immediate_transaction(content_engine) as connection:
+        replayed = _service(connection).append_revision(
+            archive_scope.token.value, command, replay_key
+        )
+        assert isinstance(replayed, ArchiveMutationReplay)
+        assert replayed.response.response_body == revised.response.response_body
+        assert _counts(connection) == baseline
+    with immediate_transaction(content_engine) as connection:
+        with pytest.raises(ArchiveNotFoundError, match="not found"):
+            _service(connection).append_revision(
+                archive_scope.token.value, fresh, _key("revision-after-deletion")
+            )
+        assert _counts(connection) == baseline
+        current = connection.execute(
+            select(Page.current_revision_id, Page.current_revision_number, Page.deleted_at).where(
+                Page.library_id == archive_scope.library_id,
+                Page.page_uid == created.page.page_uid,
+            )
+        ).one()
+        assert current == (revised.revision.revision_id, 2, deleted.deleted_at)
 
 
 def test_revision_route_section_must_match_page_without_mutation(

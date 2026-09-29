@@ -38,6 +38,7 @@ from patchouli_lib.backup import (
 )
 from patchouli_lib.backup.manifest import (
     LEGACY_SCHEMA_REVISION,
+    OCCURRENCE_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
     TAG_SCHEMA_REVISION,
 )
@@ -148,7 +149,12 @@ def _add_output_format(parser: argparse.ArgumentParser) -> None:
 def _add_schema_revision(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--schema-revision",
-        choices=(SUPPORTED_SCHEMA_REVISION, TAG_SCHEMA_REVISION, LEGACY_SCHEMA_REVISION),
+        choices=(
+            SUPPORTED_SCHEMA_REVISION,
+            OCCURRENCE_SCHEMA_REVISION,
+            TAG_SCHEMA_REVISION,
+            LEGACY_SCHEMA_REVISION,
+        ),
         default=SUPPORTED_SCHEMA_REVISION,
         help="require this exact database revision (older bundles require explicit selection)",
     )

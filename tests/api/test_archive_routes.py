@@ -397,6 +397,18 @@ def test_router_inventory_is_exact() -> None:
             "/api/v1/sections/{section_id}/pages/{page_id}/occurrence",
             {"PATCH"},
         ),
+        (
+            "/api/v1/sections/{section_id}/pages/{page_id}",
+            {"DELETE"},
+        ),
+        (
+            "/api/v1/sections/{section_id}/pages/{page_id}/restore",
+            {"POST"},
+        ),
+        (
+            "/api/v1/sections/{section_id}/trash/{page_id}",
+            {"GET"},
+        ),
     ]
 
 
@@ -1314,7 +1326,7 @@ def test_revision_requires_strong_if_match_and_replays_old_etag_after_advance(
     _problem(if_match_mismatch, 409, "idempotency_mismatch")
 
 
-def test_deleted_page_revision_and_prior_replay_return_404_without_mutation(
+def test_deleted_page_rejects_fresh_revision_but_replays_prior_success_without_mutation(
     archive_api: ArchiveApiFixture,
 ) -> None:
     media_type, body = _multipart(
@@ -1352,8 +1364,10 @@ def test_deleted_page_revision_and_prior_replay_return_404_without_mutation(
             content=body,
         )
 
-    for response in (replay, fresh):
-        _problem(response, 404, "resource_not_found")
+    assert replay.status_code == 201
+    assert replay.headers["Idempotency-Replayed"] == "true"
+    assert replay.content == revised.content
+    _problem(fresh, 404, "resource_not_found")
     assert _counts(archive_api.engine) == baseline
     with archive_api.engine.connect() as connection:
         current = connection.execute(

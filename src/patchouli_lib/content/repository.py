@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Connection, func, insert, select, update
+from typing import Literal
+
+from sqlalchemy import Connection, and_, func, insert, or_, select, update
 
 from patchouli_lib.content.models import (
     Page,
     PageIdCollisionCounter,
     PageIdentifier,
+    PageLifecycleEvent,
+    PageLifecycleGuard,
     PageOccurrenceCorrection,
     PageOccurrenceCorrectionGuard,
     PageSource,
@@ -21,13 +25,14 @@ from patchouli_lib.content.schemas import (
     NewRevision,
     PageIdCollisionCounterRecord,
     PageIdentifierRecord,
+    PageLifecycleEventRecord,
     PageOccurrenceCorrectionCommand,
     PageOccurrenceCorrectionRecord,
     PageRecord,
     PageSourceRecord,
     RevisionRecord,
 )
-from patchouli_lib.identifiers import canonical_utc_wire, page_id_registry_digest
+from patchouli_lib.identifiers import canonical_utc_wire, page_id_registry_digest, validate_page_id
 from patchouli_lib.library.models import Book
 from patchouli_lib.library.schemas import BookRecord
 
@@ -84,6 +89,45 @@ class ContentRepository:
         )
         row = self._connection.execute(statement).mappings().one_or_none()
         return None if row is None else PageRecord.model_validate(dict(row))
+
+    def list_deleted_pages(
+        self,
+        library_id: str,
+        section_id: str,
+        *,
+        limit: int,
+        before: tuple[int, str] | None = None,
+    ) -> tuple[PageRecord, ...]:
+        """Return only tombstones, newest first, with a stable keyset boundary."""
+
+        if type(limit) is not int or not 1 <= limit <= 101:
+            raise ValueError("Page lifecycle list limit must be within 1..101.")
+        statement = select(Page.__table__).where(
+            Page.library_id == library_id,
+            Page.section_id == section_id,
+            Page.page_type == "archive",
+            Page.deleted_at.is_not(None),
+        )
+        if before is not None:
+            if (
+                type(before) is not tuple
+                or len(before) != 2
+                or type(before[0]) is not int
+                or before[0] < 0
+                or type(before[1]) is not str
+            ):
+                raise ValueError("Invalid Page lifecycle keyset boundary.")
+            validate_page_id(before[1])
+            statement = statement.where(
+                or_(
+                    Page.deleted_at < before[0],
+                    and_(Page.deleted_at == before[0], Page.page_id > before[1]),
+                )
+            )
+        rows = self._connection.execute(
+            statement.order_by(Page.deleted_at.desc(), Page.page_id).limit(limit)
+        ).mappings()
+        return tuple(PageRecord.model_validate(dict(row)) for row in rows)
 
     def get_revision(
         self,
@@ -221,6 +265,84 @@ class ContentRepository:
                 }
             ),
             PageOccurrenceCorrectionRecord.model_validate(dict(row)),
+        )
+
+    def transition_page_lifecycle(
+        self,
+        page: PageRecord,
+        *,
+        action: Literal["delete", "restore"],
+        actor_caller_id: str,
+        request_id: str,
+        changed_at: int,
+    ) -> tuple[PageRecord, PageLifecycleEventRecord]:
+        """Apply one guarded tombstone transition within the caller's write transaction."""
+
+        if not self._connection.in_transaction():
+            raise RuntimeError("Page lifecycle change requires a write transaction.")
+        if action not in {"delete", "restore"} or page.page_type != "archive":
+            raise ValueError("Unsupported Page lifecycle operation.")
+        if (action == "delete") != (page.deleted_at is None):
+            raise ValueError("Page lifecycle operation does not change the current state.")
+        if type(changed_at) is not int or changed_at < 0:
+            raise ValueError("Invalid Page lifecycle operation time.")
+        transition_at = max(changed_at, page.updated_at + 1)
+        canonical_utc_wire(transition_at)
+        sequence = self._connection.scalar(
+            select(func.coalesce(func.max(PageLifecycleEvent.sequence), 0) + 1).where(
+                PageLifecycleEvent.library_id == page.library_id,
+                PageLifecycleEvent.page_uid == page.page_uid,
+            )
+        )
+        if type(sequence) is not int or not 1 <= sequence <= (1 << 63) - 1:
+            raise ValueError("Page lifecycle sequence is exhausted.")
+        expected_event = PageLifecycleEventRecord(
+            library_id=page.library_id,
+            page_uid=page.page_uid,
+            sequence=sequence,
+            action=action,
+            section_id=page.section_id,
+            old_deleted_at=page.deleted_at,
+            old_updated_at=page.updated_at,
+            changed_at=transition_at,
+            at_revision_number=page.current_revision_number,
+            occurred_at_at_event=page.occurred_at,
+            actor_caller_id=actor_caller_id,
+            request_id=request_id,
+        )
+        self._connection.execute(insert(PageLifecycleGuard), expected_event.model_dump())
+        next_deleted_at = transition_at if action == "delete" else None
+        statement = (
+            update(Page)
+            .where(
+                Page.library_id == page.library_id,
+                Page.page_uid == page.page_uid,
+                Page.section_id == page.section_id,
+                Page.page_type == "archive",
+                Page.updated_at == page.updated_at,
+                Page.deleted_at.is_(page.deleted_at),
+                Page.current_revision_id == page.current_revision_id,
+                Page.current_revision_number == page.current_revision_number,
+                Page.occurred_at == page.occurred_at,
+            )
+            .values(deleted_at=next_deleted_at, updated_at=transition_at)
+        )
+        if self._connection.execute(statement).rowcount != 1:
+            raise RuntimeError("Page lifecycle change encountered stale content.")
+        stored = (
+            self._connection.execute(
+                select(PageLifecycleEvent.__table__).where(
+                    PageLifecycleEvent.library_id == page.library_id,
+                    PageLifecycleEvent.page_uid == page.page_uid,
+                    PageLifecycleEvent.sequence == sequence,
+                )
+            )
+            .mappings()
+            .one()
+        )
+        return (
+            page.model_copy(update={"deleted_at": next_deleted_at, "updated_at": transition_at}),
+            PageLifecycleEventRecord.model_validate(dict(stored)),
         )
 
     def add_revision(self, revision: NewRevision) -> RevisionRecord:

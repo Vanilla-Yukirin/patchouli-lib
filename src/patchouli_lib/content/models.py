@@ -255,6 +255,149 @@ class PageOccurrenceCorrectionGuard(Base):
     corrected_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
+class PageLifecycleEvent(Base):
+    """Immutable delete/restore event written by the Page transition trigger."""
+
+    __tablename__ = "page_lifecycle_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id", "page_uid"],
+            ["pages.library_id", "pages.page_uid"],
+            name="fk_page_lifecycle_events_page",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["section_id", "library_id"],
+            ["sections.id", "sections.library_id"],
+            name="fk_page_lifecycle_events_section",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["actor_caller_id", "library_id"],
+            ["auth_callers.id", "auth_callers.library_id"],
+            name="fk_page_lifecycle_events_actor",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "sequence BETWEEN 1 AND 9223372036854775807",
+            name="ck_page_lifecycle_events_sequence",
+        ),
+        CheckConstraint(
+            "(action = 'delete' AND old_deleted_at IS NULL) "
+            "OR (action = 'restore' AND old_deleted_at IS NOT NULL)",
+            name="ck_page_lifecycle_events_action",
+        ),
+        CheckConstraint(
+            "old_updated_at >= 0 AND changed_at > old_updated_at "
+            "AND changed_at <= 9223372036854775807 "
+            "AND (old_deleted_at IS NULL OR "
+            "(old_deleted_at >= 0 AND old_deleted_at <= old_updated_at))",
+            name="ck_page_lifecycle_events_time",
+        ),
+        CheckConstraint(
+            "at_revision_number BETWEEN 1 AND 9223372036854775807 "
+            f"AND occurred_at_at_event BETWEEN {MIN_OCCURRENCE_MICROSECONDS} "
+            f"AND {MAX_OCCURRENCE_MICROSECONDS}",
+            name="ck_page_lifecycle_events_snapshot",
+        ),
+        CheckConstraint(
+            "length(request_id) = 36 AND substr(request_id, 1, 4) = 'req_' "
+            "AND substr(request_id, 5) NOT GLOB '*[^0-9a-f]*'",
+            name="ck_page_lifecycle_events_request_id",
+        ),
+    )
+
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
+    sequence: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    action: Mapped[str] = mapped_column(String(8), nullable=False)
+    section_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+    old_deleted_at: Mapped[int | None] = mapped_column(BigInteger)
+    old_updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    changed_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    at_revision_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    occurred_at_at_event: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    actor_caller_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+    request_id: Mapped[str] = mapped_column(String(36), nullable=False)
+
+
+class PageLifecycleGuard(Base):
+    """Short-lived transition proof consumed during the Page UPDATE."""
+
+    __tablename__ = "page_lifecycle_guards"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id", "page_uid"],
+            ["pages.library_id", "pages.page_uid"],
+            name="fk_page_lifecycle_guards_page",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["section_id", "library_id"],
+            ["sections.id", "sections.library_id"],
+            name="fk_page_lifecycle_guards_section",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["actor_caller_id", "library_id"],
+            ["auth_callers.id", "auth_callers.library_id"],
+            name="fk_page_lifecycle_guards_actor",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["library_id", "page_uid", "sequence"],
+            [
+                "page_lifecycle_events.library_id",
+                "page_lifecycle_events.page_uid",
+                "page_lifecycle_events.sequence",
+            ],
+            name="fk_page_lifecycle_guards_completed",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        CheckConstraint(
+            "sequence BETWEEN 1 AND 9223372036854775807",
+            name="ck_page_lifecycle_guards_sequence",
+        ),
+        CheckConstraint(
+            "(action = 'delete' AND old_deleted_at IS NULL) "
+            "OR (action = 'restore' AND old_deleted_at IS NOT NULL)",
+            name="ck_page_lifecycle_guards_action",
+        ),
+        CheckConstraint(
+            "old_updated_at >= 0 AND changed_at > old_updated_at "
+            "AND changed_at <= 9223372036854775807 "
+            "AND (old_deleted_at IS NULL OR "
+            "(old_deleted_at >= 0 AND old_deleted_at <= old_updated_at))",
+            name="ck_page_lifecycle_guards_time",
+        ),
+        CheckConstraint(
+            "at_revision_number BETWEEN 1 AND 9223372036854775807 "
+            f"AND occurred_at_at_event BETWEEN {MIN_OCCURRENCE_MICROSECONDS} "
+            f"AND {MAX_OCCURRENCE_MICROSECONDS}",
+            name="ck_page_lifecycle_guards_snapshot",
+        ),
+        CheckConstraint(
+            "length(request_id) = 36 AND substr(request_id, 1, 4) = 'req_' "
+            "AND substr(request_id, 5) NOT GLOB '*[^0-9a-f]*'",
+            name="ck_page_lifecycle_guards_request_id",
+        ),
+    )
+
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    action: Mapped[str] = mapped_column(String(8), nullable=False)
+    section_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+    old_deleted_at: Mapped[int | None] = mapped_column(BigInteger)
+    old_updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    changed_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    at_revision_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    occurred_at_at_event: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    actor_caller_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+    request_id: Mapped[str] = mapped_column(String(36), nullable=False)
+
+
 class Revision(Base):
     __tablename__ = "revisions"
     __table_args__ = (
@@ -671,6 +814,8 @@ __all__ = [
     "Page",
     "PageOccurrenceCorrection",
     "PageOccurrenceCorrectionGuard",
+    "PageLifecycleEvent",
+    "PageLifecycleGuard",
     "PageIdCollisionCounter",
     "PageIdentifier",
     "PageSource",

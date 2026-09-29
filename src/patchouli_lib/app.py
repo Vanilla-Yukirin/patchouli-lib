@@ -36,6 +36,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     resolved_settings = settings or Settings()
     engine = build_engine(resolved_settings.database_url)
     cursor_secret = resolved_settings.retrieval_cursor_signing_secret
+    cursor_codec = (
+        CursorCodec(cursor_secret.get_secret_value().encode("utf-8"))
+        if cursor_secret is not None
+        else None
+    )
     capabilities = CapabilityConfiguration(
         features=("archive", "retrieval", "tags")
         if cursor_secret is not None
@@ -66,15 +71,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             capability_configuration=capabilities,
         )
     )
-    application.include_router(create_archive_router(engine))
+    application.include_router(create_archive_router(engine, cursor_codec=cursor_codec))
     application.include_router(create_tag_router(engine))
     application.include_router(create_search_router(engine))
     application.include_router(create_agent_skill_router(engine))
-    if cursor_secret is not None:
+    if cursor_codec is not None:
         application.include_router(
             create_retrieval_router(
                 engine,
-                cursor_codec=CursorCodec(cursor_secret.get_secret_value().encode("utf-8")),
+                cursor_codec=cursor_codec,
             )
         )
     if resolved_settings.admin_enabled:

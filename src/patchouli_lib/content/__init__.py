@@ -29,6 +29,7 @@ from patchouli_lib.content.schemas import (
 )
 from patchouli_lib.content.service import (
     ArchiveIdentifierExhaustedError,
+    ArchiveLifecycleUnchangedError,
     ArchiveNotFoundError,
     ArchiveOccurrenceUnchangedError,
     ArchivePersistenceError,
@@ -45,6 +46,7 @@ __all__ = [
     "ArchiveCitation",
     "ArchiveIdempotencyKey",
     "ArchiveIdentifierExhaustedError",
+    "ArchiveLifecycleUnchangedError",
     "ArchiveMutationReplay",
     "ArchiveMutationResult",
     "ArchiveMutationSuccess",

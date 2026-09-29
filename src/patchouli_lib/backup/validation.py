@@ -15,6 +15,7 @@ from patchouli_lib.backup.errors import BackupDatabaseError
 from patchouli_lib.backup.manifest import (
     INTERMEDIATE_SCHEMA_REVISION,
     LEGACY_SCHEMA_REVISION,
+    OCCURRENCE_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
     TAG_SCHEMA_REVISION,
@@ -25,10 +26,16 @@ from patchouli_lib.content.file_manifest import (
     MAX_PAGE_BYTES,
     build_file_manifest,
 )
-from patchouli_lib.content.schemas import ArchiveResponseBody, OccurrenceCorrectionResponseBody
+from patchouli_lib.content.schemas import (
+    ArchiveResponseBody,
+    OccurrenceCorrectionResponseBody,
+    PageLifecycleResponseBody,
+)
 from patchouli_lib.content.service import (
     CORRECT_OCCURRENCE_ROUTE_TEMPLATE,
     CREATE_ROUTE_TEMPLATE,
+    DELETE_PAGE_ROUTE_TEMPLATE,
+    RESTORE_PAGE_ROUTE_TEMPLATE,
     REVISE_ROUTE_TEMPLATE,
     legacy_page_current_etag,
     page_current_etag,
@@ -251,12 +258,51 @@ _EXPECTED_SQL_HASHES_0011: Final = _EXPECTED_SQL_HASHES_0010 | {
         "78b91ef08c6ada45dda3e2871aa0c395bfa827d437587e0811218f3b353922ad"
     ),
 }
+_EXPECTED_SQL_HASHES_0012: Final = _EXPECTED_SQL_HASHES_0011 | {
+    ("table", "page_lifecycle_events"): (
+        "a6fae4ae517828eb9c82a2c5d0a85a61ce8c11fee311c4ebf5195548d28aac4f"
+    ),
+    ("table", "page_lifecycle_guards"): (
+        "5c184747f7ba506eabe0258c95c14e97910b1e078d9a61c4c1e257ccf069c8c3"
+    ),
+    ("trigger", "trg_page_lifecycle_events_no_delete"): (
+        "e97e45c33aa019c9de8918a31e2ccdc1de352100f4744c4841f707b75cfd8da6"
+    ),
+    ("trigger", "trg_page_lifecycle_events_no_update"): (
+        "d3ef66ea934acc122740fa3b4a0f313695fcfffe5ed81f46cdc3ff70ad63692d"
+    ),
+    ("trigger", "trg_page_lifecycle_events_validate_insert"): (
+        "6e20fa7fdd60de2730298a871f78f2e8e3f31a3d4f563cab0335909a15ec5166"
+    ),
+    ("trigger", "trg_page_lifecycle_guards_no_update"): (
+        "a4f98259cd17461d4de9598f6ef8b02cc2fe8f9bbdaa9ee85334adced9b04d45"
+    ),
+    ("trigger", "trg_page_lifecycle_guards_safe_delete"): (
+        "52fb5663affdbd59ab11fa746a1f2bb854c9d60130861a337a88b3cded467ed2"
+    ),
+    ("trigger", "trg_page_lifecycle_guards_validate_insert"): (
+        "b4df4a7e5004d375f682f7641ebd6d6894129317b4cb3c26370a4de3089fa9c5"
+    ),
+    ("trigger", "trg_pages_lifecycle_initial_live"): (
+        "246e23249ddc26de5624ff0c7927e99ea394f7bf0be5d4c16ce46249b43f1e49"
+    ),
+    ("trigger", "trg_pages_lifecycle_no_content_while_deleted"): (
+        "19c5e7507f805534849e722f26e4eb9a3cda7cb3b6d5598b69115e830101283b"
+    ),
+    ("trigger", "trg_pages_lifecycle_record"): (
+        "feb33d1a28741f5ebee3987b1f41ffec4a5c5d85622b65ac407e73a8dba98722"
+    ),
+    ("trigger", "trg_pages_lifecycle_require_guard"): (
+        "8ddf19a61f02d73470377dfdba12c4a50dbbdbf21d5af58c1ff71fb5726289fb"
+    ),
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
     PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
     INTERMEDIATE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0009,
     TAG_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0010,
-    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0011,
+    OCCURRENCE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0011,
+    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0012,
 }
 
 
@@ -506,7 +552,7 @@ def _require_occurrence_graph(
 ) -> dict[tuple[str, bytes], int]:
     """Validate the complete correction chain and return each Page's ID time."""
 
-    if schema_revision != SUPPORTED_SCHEMA_REVISION:
+    if schema_revision not in {OCCURRENCE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
         return {}
     if _one_integer(connection, "SELECT count(*) FROM page_occurrence_correction_guards"):
         raise BackupDatabaseError
@@ -605,6 +651,235 @@ def _require_occurrence_graph(
         if value != current:
             raise BackupDatabaseError
     return initials
+
+
+def _require_lifecycle_graph(connection: sqlite3.Connection) -> None:
+    """Rebuild each 0012 Page clock across Revisions, corrections, and trash events."""
+
+    if _one_integer(connection, "SELECT count(*) FROM page_lifecycle_guards"):
+        raise BackupDatabaseError
+
+    pages: dict[tuple[str, bytes], tuple[str, str, str, int, int | None, int, int, int]] = {}
+    for row in connection.execute(
+        "SELECT library_id, page_uid, section_id, page_id, page_type, occurred_at, "
+        "deleted_at, created_at, updated_at, current_revision_number FROM pages"
+    ):
+        (
+            library_id,
+            page_uid,
+            section_id,
+            page_id,
+            page_type,
+            occurred_at,
+            deleted_at,
+            created_at,
+            updated_at,
+            current_revision_number,
+        ) = row
+        if (
+            type(library_id) is not str
+            or type(page_uid) is not bytes
+            or type(section_id) is not str
+            or type(page_id) is not str
+            or type(page_type) is not str
+            or type(occurred_at) is not int
+            or (deleted_at is not None and type(deleted_at) is not int)
+            or type(created_at) is not int
+            or type(updated_at) is not int
+            or type(current_revision_number) is not int
+        ):
+            raise BackupDatabaseError
+        pages[(library_id, page_uid)] = (
+            section_id,
+            page_id,
+            page_type,
+            occurred_at,
+            deleted_at,
+            created_at,
+            updated_at,
+            current_revision_number,
+        )
+
+    # A Page's updated_at changes only for a Revision, an occurrence correction,
+    # or a lifecycle transition. Replay all three on a single logical clock.
+    first_revisions: dict[tuple[str, bytes], tuple[str, int]] = {}
+    operations: dict[tuple[str, bytes], list[tuple[int, str, tuple[object, ...]]]] = {}
+    for library_id, page_uid, number, revision_id, created_at in connection.execute(
+        "SELECT library_id, page_uid, revision_number, revision_id, created_at "
+        "FROM revisions ORDER BY library_id, page_uid, revision_number"
+    ):
+        key = (library_id, page_uid)
+        if (
+            key not in pages
+            or type(number) is not int
+            or type(revision_id) is not str
+            or type(created_at) is not int
+        ):
+            raise BackupDatabaseError
+        if number == 1:
+            first_revisions[key] = (revision_id, created_at)
+        else:
+            operations.setdefault(key, []).append((created_at, "revision", (number, revision_id)))
+
+    first_occurrences: dict[tuple[str, bytes], int] = {}
+    for library_id, page_uid, sequence, old, new, number, corrected_at in connection.execute(
+        "SELECT library_id, page_uid, sequence, old_occurred_at, new_occurred_at, "
+        "at_revision_number, corrected_at FROM page_occurrence_corrections "
+        "ORDER BY library_id, page_uid, sequence"
+    ):
+        key = (library_id, page_uid)
+        if (
+            key not in pages
+            or type(sequence) is not int
+            or type(old) is not int
+            or type(new) is not int
+            or type(number) is not int
+            or type(corrected_at) is not int
+        ):
+            raise BackupDatabaseError
+        first_occurrences.setdefault(key, old)
+        operations.setdefault(key, []).append(
+            (corrected_at, "correction", (sequence, old, new, number))
+        )
+
+    for row in connection.execute(
+        "SELECT library_id, page_uid, sequence, action, section_id, old_deleted_at, "
+        "old_updated_at, changed_at, at_revision_number, occurred_at_at_event, "
+        "actor_caller_id, request_id FROM page_lifecycle_events "
+        "ORDER BY library_id, page_uid, sequence"
+    ):
+        (
+            library_id,
+            page_uid,
+            sequence,
+            action,
+            section_id,
+            old_deleted_at,
+            old_updated_at,
+            changed_at,
+            number,
+            occurrence,
+            actor,
+            request_id,
+        ) = row
+        key = (library_id, page_uid)
+        if (
+            key not in pages
+            or type(sequence) is not int
+            or action not in {"delete", "restore"}
+            or type(section_id) is not str
+            or (old_deleted_at is not None and type(old_deleted_at) is not int)
+            or type(old_updated_at) is not int
+            or type(changed_at) is not int
+            or type(number) is not int
+            or type(occurrence) is not int
+            or type(actor) is not str
+            or type(request_id) is not str
+        ):
+            raise BackupDatabaseError
+        try:
+            timestamp = canonical_utc_wire(changed_at)
+        except ValueError:
+            raise BackupDatabaseError from None
+        method, route = (
+            ("DELETE", DELETE_PAGE_ROUTE_TEMPLATE)
+            if action == "delete"
+            else ("POST", RESTORE_PAGE_ROUTE_TEMPLATE)
+        )
+        replays = connection.execute(
+            "SELECT response_body FROM idempotency_records WHERE library_id = ? "
+            "AND caller_id = ? AND method = ? AND route_template = ? "
+            "AND original_request_id = ? AND original_request_timestamp = ?",
+            (library_id, actor, method, route, request_id, timestamp),
+        ).fetchall()
+        if len(replays) != 1 or type(replays[0][0]) is not bytes:
+            raise BackupDatabaseError
+        try:
+            replay_body = PageLifecycleResponseBody.model_validate_json(replays[0][0])
+        except ValueError:
+            raise BackupDatabaseError from None
+        if replay_body.section_id != section_id or replay_body.page_id != pages[key][1]:
+            raise BackupDatabaseError
+        operations.setdefault(key, []).append(
+            (
+                changed_at,
+                "lifecycle",
+                (
+                    sequence,
+                    action,
+                    section_id,
+                    old_deleted_at,
+                    old_updated_at,
+                    number,
+                    occurrence,
+                ),
+            )
+        )
+
+    for key, (
+        section_id,
+        _page_id,
+        page_type,
+        final_occurrence,
+        final_deleted_at,
+        created_at,
+        updated_at,
+        final_revision,
+    ) in pages.items():
+        first_revision = first_revisions.get(key)
+        if first_revision is None or first_revision[1] != created_at:
+            raise BackupDatabaseError
+        revision_number = 1
+        occurrence = first_occurrences.get(key, final_occurrence)
+        replayed_deleted_at: int | None = None
+        prior_time = created_at
+        correction_sequence = 0
+        lifecycle_sequence = 0
+        for time, kind, values in sorted(operations.get(key, []), key=lambda item: item[0]):
+            if time <= prior_time:
+                raise BackupDatabaseError
+            if kind == "revision":
+                number, _revision_id = values
+                if replayed_deleted_at is not None or number != revision_number + 1:
+                    raise BackupDatabaseError
+                revision_number = number
+            elif kind == "correction":
+                sequence, old, new, number = values
+                if (
+                    replayed_deleted_at is not None
+                    or sequence != correction_sequence + 1
+                    or number != revision_number
+                    or old != occurrence
+                    or new == old
+                ):
+                    raise BackupDatabaseError
+                correction_sequence = sequence
+                occurrence = new
+            else:
+                sequence, action, event_section, old_deleted, old_updated, number, event_time = (
+                    values
+                )
+                if (
+                    page_type != "archive"
+                    or sequence != lifecycle_sequence + 1
+                    or event_section != section_id
+                    or old_deleted != replayed_deleted_at
+                    or old_updated != prior_time
+                    or number != revision_number
+                    or event_time != occurrence
+                    or (action == "delete") != (replayed_deleted_at is None)
+                ):
+                    raise BackupDatabaseError
+                lifecycle_sequence = sequence
+                replayed_deleted_at = time if action == "delete" else None
+            prior_time = time
+        if (
+            updated_at != prior_time
+            or final_deleted_at != replayed_deleted_at
+            or final_revision != revision_number
+            or final_occurrence != occurrence
+        ):
+            raise BackupDatabaseError
 
 
 def _require_revision_files(connection: sqlite3.Connection, schema_revision: str) -> None:
@@ -790,6 +1065,103 @@ def _require_auth_graph(connection: sqlite3.Connection) -> None:
             cursor = next_row[2]
 
 
+def _require_lifecycle_replay(
+    connection: sqlite3.Connection,
+    *,
+    library_id: str,
+    caller_id: str,
+    method: str,
+    route: str,
+    status: int,
+    parsed: dict[str, object],
+    location: str | None,
+    etag: str,
+    original_request_id: str,
+    original_request_timestamp: str,
+) -> None:
+    action = "delete" if route == DELETE_PAGE_ROUTE_TEMPLATE else "restore"
+    expected_method = "DELETE" if action == "delete" else "POST"
+    if method != expected_method or status != 200:
+        raise BackupDatabaseError
+    try:
+        body = PageLifecycleResponseBody.model_validate(parsed)
+        operation_at = parse_occurrence_time(original_request_timestamp).utc_microseconds
+    except ValueError:
+        raise BackupDatabaseError from None
+    matching = connection.execute(
+        "SELECT p.page_uid, p.page_type, e.action, e.old_deleted_at, "
+        "e.old_updated_at, e.changed_at, e.at_revision_number, "
+        "e.occurred_at_at_event, e.actor_caller_id, r.revision_id "
+        "FROM pages AS p JOIN page_lifecycle_events AS e "
+        "ON e.library_id = p.library_id AND e.page_uid = p.page_uid "
+        "JOIN revisions AS r ON r.library_id = p.library_id "
+        "AND r.page_uid = p.page_uid AND r.revision_number = e.at_revision_number "
+        "WHERE p.library_id = ? AND p.section_id = ? AND p.page_id = ? "
+        "AND e.request_id = ? AND e.changed_at = ? LIMIT 2",
+        (
+            library_id,
+            body.section_id,
+            body.page_id,
+            original_request_id,
+            operation_at,
+        ),
+    ).fetchall()
+    if len(matching) != 1:
+        raise BackupDatabaseError
+    (
+        page_uid,
+        page_type,
+        event_action,
+        old_deleted_at,
+        old_updated_at,
+        changed_at,
+        at_revision,
+        occurred_at,
+        actor,
+        revision_id,
+    ) = matching[0]
+    expected_page_location = f"/api/v1/sections/{body.section_id}/pages/{body.page_id}"
+    expected_citation = f"{expected_page_location}/revisions/{at_revision}"
+    if (
+        type(page_uid) is not bytes
+        or page_type != "archive"
+        or event_action != action
+        or (old_deleted_at is not None and type(old_deleted_at) is not int)
+        or type(old_updated_at) is not int
+        or type(changed_at) is not int
+        or type(at_revision) is not int
+        or type(occurred_at) is not int
+        or actor != caller_id
+        or type(revision_id) is not str
+        or body.state != ("trashed" if action == "delete" else "active")
+        or body.deleted_at != (canonical_utc_wire(changed_at) if action == "delete" else None)
+        or body.updated_at != canonical_utc_wire(changed_at)
+        or body.current_revision_id != revision_id
+        or body.current_revision_number != at_revision
+        or body.citation.href != expected_citation
+        or location != expected_page_location
+        or original_request_timestamp != canonical_utc_wire(changed_at)
+        or etag != page_current_etag(page_uid, revision_id, at_revision, occurred_at, changed_at)
+    ):
+        raise BackupDatabaseError
+    audit = connection.execute(
+        "SELECT count(*) FROM auth_audit_events "
+        "WHERE library_id = ? AND actor_caller_id = ? AND action = ? "
+        "AND resource_type = 'page' AND resource_id = ? "
+        "AND outcome = 'succeeded' AND request_id = ? AND occurred_at = ?",
+        (
+            library_id,
+            caller_id,
+            f"content.archive.{action}",
+            body.page_id,
+            original_request_id,
+            changed_at,
+        ),
+    ).fetchone()
+    if audit != (1,):
+        raise BackupDatabaseError
+
+
 def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: str) -> None:
     def reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
         result: dict[str, object] = {}
@@ -820,7 +1192,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
         if (
             not isinstance(library_id, str)
             or not isinstance(caller_id, str)
-            or method not in {"POST", "PATCH"}
+            or method not in {"POST", "PATCH", "DELETE"}
             or not isinstance(route, str)
             or status not in {200, 201}
             or media_type != "application/json"
@@ -845,7 +1217,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
 
         if method == "PATCH":
             if (
-                schema_revision != SUPPORTED_SCHEMA_REVISION
+                schema_revision not in {OCCURRENCE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}
                 or route != CORRECT_OCCURRENCE_ROUTE_TEMPLATE
                 or status != 200
             ):
@@ -931,6 +1303,24 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
                 raise BackupDatabaseError
             continue
 
+        if route in {DELETE_PAGE_ROUTE_TEMPLATE, RESTORE_PAGE_ROUTE_TEMPLATE}:
+            if schema_revision != SUPPORTED_SCHEMA_REVISION:
+                raise BackupDatabaseError
+            _require_lifecycle_replay(
+                connection,
+                library_id=library_id,
+                caller_id=caller_id,
+                method=method,
+                route=route,
+                status=status,
+                parsed=parsed,
+                location=location,
+                etag=etag,
+                original_request_id=original_request_id,
+                original_request_timestamp=original_request_timestamp,
+            )
+            continue
+
         if status != 201 or route not in {CREATE_ROUTE_TEMPLATE, REVISE_ROUTE_TEMPLATE}:
             raise BackupDatabaseError
         try:
@@ -966,7 +1356,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
         ):
             raise BackupDatabaseError
         response_occurrence = row[4]
-        if schema_revision == SUPPORTED_SCHEMA_REVISION:
+        if schema_revision in {OCCURRENCE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
             corrections = connection.execute(
                 "SELECT old_occurred_at, new_occurred_at, at_revision_number "
                 "FROM page_occurrence_corrections WHERE library_id = ? AND page_uid = ? "
@@ -1071,6 +1461,8 @@ def _validate_connection(
     ):
         raise BackupDatabaseError
     _require_page_graph(connection, schema_revision)
+    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+        _require_lifecycle_graph(connection)
     if schema_revision not in {
         LEGACY_SCHEMA_REVISION,
         PREVIOUS_SCHEMA_REVISION,
