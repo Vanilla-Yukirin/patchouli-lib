@@ -6,7 +6,11 @@ from collections.abc import Callable
 
 from sqlalchemy import Connection
 
-from patchouli_lib.auth.library_policy import LegacySectionPolicy, LibraryAction
+from patchouli_lib.auth.library_policy import (
+    LegacySectionPolicy,
+    LibraryAction,
+    LibraryGrantPolicy,
+)
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
     AuditOutcome,
@@ -48,7 +52,8 @@ class TagService:
     Legacy Agent directory reads include only Tags associated with live Pages
     in Sections where both query and Page-read grants are current. An opted-in
     Agent with a Library READ grant sees all Tag definitions and live Pages in
-    its home Library. Cross-Library requests remain unavailable here.
+    its home Library. An opted-in Agent may also access an explicitly granted
+    target Library; legacy Section grants never cross that boundary.
     """
 
     def __init__(
@@ -225,10 +230,20 @@ class TagService:
                 LAST_USED_COALESCE_MICROSECONDS if self._touch_last_used else -1
             ),
         ).authenticate(token)
-        if caller.caller.library_id != library_id:
-            raise TagNotFoundError
         if caller.caller.kind not in {CallerKind.AGENT, CallerKind.OPERATOR}:
             raise TagAuthorizationError
+        if caller.caller.library_id != library_id:
+            if caller.caller.kind is not CallerKind.AGENT:
+                raise TagNotFoundError
+            policy = self._auth.get_library_policy(
+                credential_id=caller.credential.id,
+                caller_id=caller.caller.id,
+                home_library_id=caller.caller.library_id,
+                target_library_id=library_id,
+                active_at=self._clock(),
+            )
+            if not isinstance(policy, LibraryGrantPolicy) or not (policy.read or policy.write):
+                raise TagNotFoundError
         return caller
 
     def _library_grant_mode(

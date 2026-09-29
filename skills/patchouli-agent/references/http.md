@@ -290,6 +290,6 @@ DELETE /api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/tags
 Tag 列表当作全文检索结果。
 
 本参考列出了开发分支的统一文件集接口，但它尚未合并或部署；目标服务仍须按能力
-响应与实际请求核对。文件集 API 已有显式跨 Library 写入路径；旧 Archive／Tag
-写路径不应据此被认为都能跨库。真实搜索仍未完成。已有 CLI/MCP 若可用，仍能
+响应与实际请求核对。文件集及 Tag API 已支持按精确凭据的目标 Library 授权跨库
+读写；旧 Archive 写路径仍只限归属库。真实搜索仍未完成。已有 CLI/MCP 若可用，仍能
 完成各自已实现的兼容流程，但并非下载本 Skill 或调用 HTTP API 的前提。

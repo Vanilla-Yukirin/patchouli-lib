@@ -171,7 +171,7 @@ def _opt_in(api: TagApi) -> None:
         )
 
 
-def _grant(api: TagApi, action: str) -> None:
+def _grant(api: TagApi, action: str, *, target_library_id: str | None = None) -> None:
     with immediate_transaction(api.engine) as connection:
         connection.execute(
             insert(CredentialLibraryGrant),
@@ -179,21 +179,22 @@ def _grant(api: TagApi, action: str) -> None:
                 "credential_id": AGENT_CREDENTIAL_ID,
                 "caller_id": CALLER_ID,
                 "home_library_id": api.scope.library_id,
-                "target_library_id": api.scope.library_id,
+                "target_library_id": target_library_id or api.scope.library_id,
                 "action": action,
                 "created_at": 1_500_000,
             },
         )
 
 
-def _revoke(api: TagApi, action: str) -> None:
+def _revoke(api: TagApi, action: str, *, target_library_id: str | None = None) -> None:
     with immediate_transaction(api.engine) as connection:
         connection.execute(
             delete(CredentialLibraryGrant).where(
                 CredentialLibraryGrant.credential_id == AGENT_CREDENTIAL_ID,
                 CredentialLibraryGrant.caller_id == CALLER_ID,
                 CredentialLibraryGrant.home_library_id == api.scope.library_id,
-                CredentialLibraryGrant.target_library_id == api.scope.library_id,
+                CredentialLibraryGrant.target_library_id
+                == (target_library_id or api.scope.library_id),
                 CredentialLibraryGrant.action == action,
             )
         )
@@ -562,6 +563,120 @@ def test_opt_in_home_library_tag_counts_do_not_include_foreign_library(tag_api: 
             ).status_code
             == 404
         )
+
+
+def test_cross_library_tag_access_requires_exact_credential_and_target_grants(
+    tag_api: TagApi,
+) -> None:
+    api = tag_api
+    shared_tag_id = "1" * 32
+    _seed_tag(api, tag_id=shared_tag_id, name="Home", page_ids=[api.scope.first_page_id])
+    foreign_library, foreign_section, foreign_book = seed_library_structure(
+        api.engine, prefix="b", label="Foreign"
+    )
+    foreign_page = page_graph_values(
+        library_id=foreign_library,
+        section_id=foreign_section,
+        book_id=foreign_book,
+        page_byte=0x77,
+        revision_hex="88",
+        source_hex="9",
+    )
+    with immediate_transaction(api.engine) as connection:
+        insert_page_graph(connection, foreign_page)
+        foreign_tags = TagRepository(connection)
+        foreign_tags.add_tag(
+            library_id=foreign_library,
+            tag_id=shared_tag_id,
+            name="Foreign",
+            created_at=1_500_000,
+        )
+        foreign_tags.attach_page(
+            library_id=foreign_library,
+            page_uid=foreign_page[0].page_uid,
+            tag_id=shared_tag_id,
+            created_at=1_500_000,
+        )
+    sibling_token = _legacy_sibling_token(api)
+    _opt_in(api)
+    directory = f"/api/v1/libraries/{foreign_library}/tags"
+    page_tags = (
+        f"/api/v1/libraries/{foreign_library}/sections/{foreign_section}"
+        f"/pages/{foreign_page[0].page_id}/tags"
+    )
+    with TestClient(_app(api), raise_server_exceptions=False) as client:
+        assert client.get(directory, headers=_auth(api.agent_token)).status_code == 404
+        _grant(api, "read", target_library_id=foreign_library)
+        listed = client.get(directory, headers=_auth(api.agent_token))
+        assert listed.status_code == 200
+        assert [item["name"] for item in listed.json()["items"]] == ["Foreign"]
+        assert listed.json()["items"][0]["page_count"] == 1
+        tagged = client.get(f"{directory}/{shared_tag_id}/pages", headers=_auth(api.agent_token))
+        assert [item["page_id"] for item in tagged.json()["items"]] == [foreign_page[0].page_id]
+        assert client.get(_path(api, "tags"), headers=_auth(api.agent_token)).status_code == 403
+        assert (
+            client.post(directory, headers=_auth(api.agent_token), json={"name": "New"}).status_code
+            == 403
+        )
+        assert client.get(directory, headers=_auth(sibling_token)).status_code == 404
+        assert client.get(directory, headers=_auth(api.operator_token)).status_code == 404
+
+        _grant(api, "write", target_library_id=foreign_library)
+        created = client.post(directory, headers=_auth(api.agent_token), json={"name": "New"})
+        assert created.status_code == 201
+        attached = client.put(
+            f"{page_tags}/{created.json()['tag_id']}", headers=_auth(api.agent_token)
+        )
+        assert attached.status_code == 200 and attached.json() == {"changed": True}
+        assert [
+            item["name"]
+            for item in client.get(page_tags, headers=_auth(api.agent_token)).json()["items"]
+        ] == ["Foreign", "New"]
+
+        _revoke(api, "read", target_library_id=foreign_library)
+        assert client.get(directory, headers=_auth(api.agent_token)).status_code == 403
+        assert client.get(page_tags, headers=_auth(api.agent_token)).status_code == 403
+        detached = client.delete(
+            f"{page_tags}/{created.json()['tag_id']}", headers=_auth(api.agent_token)
+        )
+        assert detached.status_code == 200 and detached.json() == {"changed": True}
+        assert (
+            client.post(directory, headers=_auth(api.agent_token), json={"name": "New"}).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                directory, headers=_auth(api.agent_token), json={"name": "Second"}
+            ).status_code
+            == 201
+        )
+        _revoke(api, "write", target_library_id=foreign_library)
+        assert client.get(directory, headers=_auth(api.agent_token)).status_code == 404
+        assert (
+            client.post(
+                directory, headers=_auth(api.agent_token), json={"name": "Third"}
+            ).status_code
+            == 404
+        )
+
+    with api.engine.connect() as connection:
+        events = connection.execute(
+            select(
+                AuditEvent.library_id,
+                AuditEvent.actor_home_library_id,
+                AuditEvent.actor_credential_id,
+            ).where(AuditEvent.action.like("tag.%"))
+        ).all()
+        assert [tuple(row) for row in events] == [
+            (foreign_library, api.scope.library_id, AGENT_CREDENTIAL_ID),
+            (foreign_library, api.scope.library_id, AGENT_CREDENTIAL_ID),
+            (foreign_library, api.scope.library_id, AGENT_CREDENTIAL_ID),
+            (foreign_library, api.scope.library_id, AGENT_CREDENTIAL_ID),
+        ]
+        assert connection.exec_driver_sql(
+            "SELECT display_name FROM tags WHERE library_id = ? ORDER BY display_name",
+            (api.scope.library_id,),
+        ).scalars().all() == ["Home"]
 
 
 @pytest.mark.parametrize(
