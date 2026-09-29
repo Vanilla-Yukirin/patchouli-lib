@@ -37,8 +37,14 @@ from patchouli_lib.backup import (
     verify_backup_bundle,
 )
 from patchouli_lib.backup.manifest import (
+    AGENT_TOKEN_VALUES_SCHEMA_REVISION,
+    FILE_SET_SCHEMA_REVISION,
+    INTERMEDIATE_SCHEMA_REVISION,
     LEGACY_SCHEMA_REVISION,
+    LIBRARY_POLICY_SCHEMA_REVISION,
+    LIFECYCLE_SCHEMA_REVISION,
     OCCURRENCE_SCHEMA_REVISION,
+    PREVIOUS_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
     TAG_SCHEMA_REVISION,
 )
@@ -151,8 +157,14 @@ def _add_schema_revision(parser: argparse.ArgumentParser) -> None:
         "--schema-revision",
         choices=(
             SUPPORTED_SCHEMA_REVISION,
+            AGENT_TOKEN_VALUES_SCHEMA_REVISION,
+            LIBRARY_POLICY_SCHEMA_REVISION,
+            FILE_SET_SCHEMA_REVISION,
+            LIFECYCLE_SCHEMA_REVISION,
             OCCURRENCE_SCHEMA_REVISION,
             TAG_SCHEMA_REVISION,
+            INTERMEDIATE_SCHEMA_REVISION,
+            PREVIOUS_SCHEMA_REVISION,
             LEGACY_SCHEMA_REVISION,
         ),
         default=SUPPORTED_SCHEMA_REVISION,
