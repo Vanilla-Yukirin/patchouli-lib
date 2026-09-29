@@ -307,7 +307,8 @@ def test_identity_browser_is_protected_and_shows_metadata_only(
     assert "Reader &lt;device&gt;" in page.text
     assert "Reader <device>" not in page.text
     assert f"/admin/libraries/{library_id}/callers/{caller_id}" in page.text
-    assert "现有凭据无法从校验值还原" in page.text
+    assert "新签发的有效 Agent Token 可以通过主会话再次显示" in page.text
+    assert "旧凭据无法从校验值还原" in page.text
     assert 'aria-current="page"' in page.text
     detail = client.get(f"/admin/libraries/{library_id}/callers/{caller_id}?lang=zh-CN")
     assert detail.status_code == 200

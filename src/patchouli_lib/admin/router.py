@@ -21,6 +21,7 @@ from starlette.concurrency import run_in_threadpool
 
 from patchouli_lib.admin.contracts import (
     BootstrapInput,
+    MasterProvisionAgentInput,
     PageTagFormInput,
     ProvisionAgentInput,
     RecoverOperatorInput,
@@ -94,6 +95,7 @@ _LOCALE_COOKIE_MAX_AGE: Final[int] = 31_536_000
 _TAG_FLASH_MAX_AGE: Final[int] = 60
 _MAX_FORM_BYTES: Final[int] = 16_384
 _MAX_FORM_FIELDS: Final[int] = 32
+_MAX_AGENT_PROVISION_FORM_FIELDS: Final[int] = 256
 _RESTORE_STALE_MESSAGE: Final[str] = (
     "The page changed since this form was opened. Reload the trash detail and try again."
 )
@@ -585,9 +587,97 @@ def create_admin_router(
 
     @router.get("/agents")
     def agents(request: Request) -> Response:
-        return protected_page(
-            request,
-            lambda csrf, locale: callers_page(csrf, read_model.list_callers(), locale=locale),
+        locale = locale_for(request)
+        session = current_session(request)
+        if session is None:
+            redirect_response = redirect("/admin/login")
+            _clear_cookie(redirect_response, secure=secure_cookie(request))
+            remember_requested_locale(redirect_response, request)
+            return redirect_response
+        page_response = html(
+            callers_page(
+                session.csrf_token,
+                read_model.list_callers(),
+                locale=locale,
+                libraries=read_model.list_libraries(),
+                allow_master_actions=isinstance(session, MasterAdminSession),
+            ),
+            locale=locale,
+        )
+        remember_requested_locale(page_response, request)
+        return page_response
+
+    @router.post("/agents/create")
+    async def create_agent_as_master(request: Request) -> Response:
+        locale = locale_for(request)
+        if not _same_origin_submission(request):
+            return forbidden(request)
+        session = current_session(request)
+        if session is None:
+            return html(
+                login_page(locale=locale, message="Sign in again."),
+                locale=locale,
+                status_code=401,
+            )
+        if not isinstance(session, MasterAdminSession):
+            return forbidden(request, "A master session is required.")
+        try:
+            values = await _read_form(
+                request,
+                allowed_fields=frozenset(MasterProvisionAgentInput.model_fields) | {"csrf_token"},
+                repeatable_fields=frozenset({"grants"}),
+                max_fields=_MAX_AGENT_PROVISION_FORM_FIELDS,
+            )
+            _require_csrf(values, session)
+            raw_grants = values.pop("grants", [])
+            if not isinstance(raw_grants, list):
+                raise _FormError(422, "Check the submitted fields and try again.")
+            payload: dict[str, object] = dict(values)
+            payload["grants"] = [
+                {"library_id": item.partition(":")[0], "action": item.partition(":")[2]}
+                for item in raw_grants
+            ]
+            result = await run_in_threadpool(
+                service.provision_agent_as_master,
+                MasterProvisionAgentInput.model_validate(payload),
+                master_session=session,
+            )
+        except _FormError as exc:
+            status, message = exc.status_code, exc.safe_message
+        except (ValidationError, ValueError):
+            status, message = 422, "Check the submitted fields and try again."
+        except AuthenticationError:
+            status, message = 401, "Sign in again."
+        except ResourceNotFoundError:
+            status, message = 404, "The requested local resource was not found."
+        except IntegrityError:
+            status, message = 409, "The action conflicts with current local state."
+        except Exception:
+            status, message = 500, "The action could not be completed."
+        else:
+            return html(
+                credential_page(
+                    session.csrf_token,
+                    heading="Agent credential created",
+                    result=result,
+                    locale=locale,
+                    recoverable=True,
+                ),
+                locale=locale,
+            )
+        if status == 401:
+            return html(login_page(locale=locale, message=message), locale=locale, status_code=401)
+        return html(
+            callers_page(
+                session.csrf_token,
+                read_model.list_callers(),
+                locale=locale,
+                libraries=read_model.list_libraries(),
+                allow_master_actions=True,
+                message=message,
+            ),
+            locale=locale,
+            status_code=status,
         )
 
     @router.post("/libraries")
@@ -1262,6 +1352,7 @@ async def _read_form(
     *,
     allowed_fields: frozenset[str],
     repeatable_fields: frozenset[str] = frozenset(),
+    max_fields: int = _MAX_FORM_FIELDS,
 ) -> FormValues:
     content_type = request.headers.get("content-type", "").partition(";")[0].strip().casefold()
     if content_type != "application/x-www-form-urlencoded":
@@ -1283,7 +1374,7 @@ async def _read_form(
             decoded,
             keep_blank_values=True,
             strict_parsing=True,
-            max_num_fields=_MAX_FORM_FIELDS,
+            max_num_fields=max_fields,
             encoding="utf-8",
             errors="strict",
         )

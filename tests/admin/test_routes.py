@@ -418,7 +418,7 @@ def test_initialized_master_token_login_retires_legacy_web_login_but_not_operato
     assert admin_web.client.get("/admin").status_code == 200
     setup = admin_web.client.get("/admin/setup")
     assert setup.status_code == 200
-    assert "Agent provisioning with a Master Token is not available yet." in setup.text
+    assert "issue Agent Tokens from Identities" in setup.text
     assert 'action="/admin/agents/revoke"' not in setup.text
     assert 'action="/admin/agents/provision"' not in setup.text
     assert admin_web.client.get("/api/v1/auth/whoami").status_code == 401
@@ -1424,6 +1424,221 @@ def test_master_session_revokes_exact_agent_token_with_atomic_audit(
     assert _post(admin_web.client, revoke_path, data=form).status_code == 303
     with admin_web.engine.connect() as connection:
         assert len(connection.execute(select(MasterAuditEvent.id)).all()) == 1
+
+
+def test_master_session_provisions_agent_with_explicit_cross_library_grants(
+    admin_web: AdminWeb,
+) -> None:
+    legacy_csrf = _login(admin_web)
+    assert 'action="/admin/agents/create"' not in admin_web.client.get("/admin/agents").text
+    legacy = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": legacy_csrf,
+            "home_library_id": "f" * 32,
+            "agent_name": "Not created",
+            "credential_ttl_seconds": "3600",
+        },
+    )
+    assert legacy.status_code == 403
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    home = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Synthetic Agent Home"},
+    )
+    target = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Synthetic Agent Target"},
+    )
+    assert home.status_code == target.status_code == 303
+    home_id = home.headers["location"].rsplit("/", 1)[-1]
+    target_id = target.headers["location"].rsplit("/", 1)[-1]
+    page = admin_web.client.get("/admin/agents?lang=zh-CN")
+    assert page.status_code == 200
+    assert 'action="/admin/agents/create"' in page.text
+    assert f'value="{home_id}:read"' in page.text
+    assert f'value="{target_id}:write"' in page.text
+    assert "写入不自动包含读取" in page.text
+    form = {
+        "csrf_token": csrf,
+        "home_library_id": home_id,
+        "agent_name": "Synthetic Cross-Library Agent",
+        "agent_description": "Synthetic device",
+        "credential_ttl_seconds": "3600",
+        "grants": [f"{home_id}:read", f"{target_id}:write"],
+    }
+    for data, origin, status in (
+        (form, "https://other.example.invalid", 403),
+        ({**form, "csrf_token": "wrong"}, _ORIGIN, 403),
+        ({**form, "extra": "x"}, _ORIGIN, 422),
+        ({**form, "grants": [f"{home_id}:read", f"{home_id}:read"]}, _ORIGIN, 422),
+        ({**form, "grants": [f"{'f' * 32}:read"]}, _ORIGIN, 404),
+    ):
+        assert (
+            _post(admin_web.client, "/admin/agents/create", data=data, origin=origin).status_code
+            == status
+        )
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(Caller.id).where(Caller.kind == "agent")).all() == []
+
+    created = _post(admin_web.client, "/admin/agents/create", data=form)
+    assert created.status_code == 200
+    token = _credential_from(created.text)
+    result_home, caller_id, credential_id = _metadata_from(created.text)
+    assert result_home == home_id
+    assert "此值可在 Agent 详情页经主会话再次显示" in created.text
+    assert token not in str(created.request.url)
+    assert token not in (admin_web.client.cookies.get(_SESSION_COOKIE) or "")
+    _assert_security_headers(created)
+    whoami = admin_web.client.get(
+        "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert whoami.status_code == 200
+    payload = whoami.json()
+    assert payload["policy_mode"] == "library_grants"
+    assert payload["grants"] == []
+    assert payload["library_grants"] == sorted(
+        [
+            {"library_id": home_id, "actions": ["read"]},
+            {"library_id": target_id, "actions": ["write"]},
+        ],
+        key=lambda grant: grant["library_id"],
+    )
+    assert admin_web.client.get("/api/v1/auth/whoami").status_code == 401
+    detail_path = f"/admin/libraries/{home_id}/callers/{caller_id}"
+    detail = admin_web.client.get(detail_path)
+    assert detail.status_code == 200
+    assert token not in detail.text
+    revealed = _post(
+        admin_web.client,
+        f"{detail_path}/credentials/{credential_id}/reveal",
+        data={"csrf_token": csrf},
+    )
+    assert revealed.status_code == 200
+    assert revealed.text == token
+
+
+def test_master_agent_provision_accepts_many_explicit_library_grants(
+    admin_web: AdminWeb,
+) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    library_ids: list[str] = []
+    for index in range(14):
+        created = _post(
+            admin_web.client,
+            "/admin/libraries",
+            data={"csrf_token": csrf, "name": f"Synthetic Grant Library {index}"},
+        )
+        assert created.status_code == 303
+        library_ids.append(created.headers["location"].rsplit("/", 1)[-1])
+    grants = [
+        f"{library_id}:{action}" for library_id in library_ids for action in ("read", "write")
+    ]
+    created = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": csrf,
+            "home_library_id": library_ids[0],
+            "agent_name": "Synthetic Many Grants Agent",
+            "agent_description": "Synthetic grant breadth",
+            "credential_ttl_seconds": "3600",
+            "grants": grants,
+        },
+    )
+    assert created.status_code == 200
+    token = _credential_from(created.text)
+    whoami = admin_web.client.get(
+        "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert whoami.status_code == 200
+    assert len(whoami.json()["library_grants"]) == 14
+    assert all(grant["actions"] == ["read", "write"] for grant in whoami.json()["library_grants"])
+
+
+def test_legacy_agent_provision_cannot_race_local_master_setup(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    csrf = _login(admin_web)
+    bootstrapped = _post(admin_web.client, "/admin/bootstrap", data=_bootstrap_data(csrf))
+    assert bootstrapped.status_code == 200
+    operator_token = _credential_from(bootstrapped.text)
+
+    async def initialize_before_action(action: Any, *args: Any, **kwargs: Any) -> Any:
+        _initialize_master(admin_web)
+        return await starlette_run_in_threadpool(action, *args, **kwargs)
+
+    monkeypatch.setattr(admin_router, "run_in_threadpool", initialize_before_action)
+    rejected = _post(
+        admin_web.client,
+        "/admin/agents/provision",
+        data={
+            "csrf_token": csrf,
+            "operator_token": operator_token,
+            "library_name": "Synthetic Web Library",
+            "section_name": "Synthetic Web Section",
+            "agent_name": "Synthetic Rejected Legacy Agent",
+            "credential_ttl_seconds": "3600",
+            "grants": ["section:query"],
+        },
+    )
+    assert rejected.status_code == 403
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(Caller.id).where(Caller.kind == "agent")).all() == []
+        assert connection.execute(select(AgentTokenValue.credential_id)).all() == []
+
+
+def test_master_agent_provision_rechecks_rotation_before_writing(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    library = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Synthetic Provision Race Library"},
+    )
+    assert library.status_code == 303
+    library_id = library.headers["location"].rsplit("/", 1)[-1]
+
+    async def rotate_before_action(action: Any, *args: Any, **kwargs: Any) -> Any:
+        with immediate_transaction(admin_web.engine) as connection:
+            assert (
+                MasterTokenRepository(connection).rotate(
+                    _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
+                )
+                is not None
+            )
+        return await starlette_run_in_threadpool(action, *args, **kwargs)
+
+    monkeypatch.setattr(admin_router, "run_in_threadpool", rotate_before_action)
+    rejected = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": csrf,
+            "home_library_id": library_id,
+            "agent_name": "Synthetic Rejected Agent",
+            "credential_ttl_seconds": "3600",
+            "grants": [f"{library_id}:read"],
+        },
+    )
+    assert rejected.status_code == 401
+    assert "Synthetic Rejected Agent" not in rejected.text
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(Caller.id).where(Caller.kind == "agent")).all() == []
+        assert connection.execute(select(AgentTokenValue.credential_id)).all() == []
+        assert (
+            connection.execute(
+                select(MasterAuditEvent.id).where(MasterAuditEvent.action == "auth.agent.provision")
+            ).all()
+            == []
+        )
 
 
 def test_master_revoke_confirmation_identifies_each_of_multiple_credentials(

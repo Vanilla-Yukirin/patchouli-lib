@@ -538,14 +538,14 @@ def operations_page(
     if master_mode:
         explanation = (
             "旧版初始化、管理员恢复及 Agent 签发／撤销表单不适用于主 Token 登录。"
-            "目前可在知识库页面创建结构，并在 Agent 详情页查看或撤销指定 Token；"
-            "主 Token 下的 Agent 签发尚未接通。"
+            "请在知识库页面创建结构，并在身份页面签发 Agent Token；"
+            "Agent 详情页可再次显示或撤销指定 Token。"
             if locale == "zh-CN"
             else (
                 "The legacy setup, operator recovery, and Agent provision/revoke forms "
                 "do not apply to Master Token sign-in. You can create structure from "
-                "Libraries and reveal or revoke a specific Token from Agent details. "
-                "Agent provisioning with a Master Token is not available yet."
+                "Libraries, issue Agent Tokens from Identities, and reveal or revoke a "
+                "specific Token from Agent details."
             )
         )
         content = f"""
@@ -980,7 +980,13 @@ def caller_page(
 
 
 def callers_page(
-    csrf_token: str, callers: tuple[CallerItem, ...], *, locale: AdminLocale = "en"
+    csrf_token: str,
+    callers: tuple[CallerItem, ...],
+    *,
+    locale: AdminLocale = "en",
+    libraries: tuple[LibraryItem, ...] = (),
+    allow_master_actions: bool = False,
+    message: str | None = None,
 ) -> str:
     entries = ""
     for item in callers:
@@ -1000,13 +1006,73 @@ def callers_page(
         if entries
         else f"<p>{localize(locale, 'No identities yet.')}</p>"
     )
+    master_form = ""
+    if allow_master_actions:
+        options = "".join(
+            f'<option value="{escape(library_item.id, quote=True)}">'
+            f"{escape(library_item.name)}</option>"
+            for library_item in libraries
+        )
+        grant_fields = []
+        for library_item in libraries:
+            library_id = escape(library_item.id, quote=True)
+            read_label = "读取" if locale == "zh-CN" else "Read"
+            write_label = "写入" if locale == "zh-CN" else "Write"
+            grant_fields.append(
+                "<fieldset>"
+                f"<legend>{escape(library_item.name)}</legend>"
+                f'<label><input type="checkbox" name="grants" value="{library_id}:read"> '
+                f"{read_label}</label>"
+                f'<label><input type="checkbox" name="grants" value="{library_id}:write"> '
+                f"{write_label}</label>"
+                "</fieldset>"
+            )
+        grants = "".join(grant_fields)
+        guidance = (
+            "先选择 Agent 的归属知识库，再明确勾选每个知识库的读取和写入权限；"
+            "未勾选即无权限，写入不自动包含读取。新 Token 默认有效一年，可在详情页再次显示。"
+            if locale == "zh-CN"
+            else (
+                "Choose the Agent's home Library, then explicitly select read and write "
+                "for each Library. Unchecked means no access; write does not imply read. "
+                "The new Token lasts one year by default and can be revealed again in details."
+            )
+        )
+        ttl_field = _number(
+            "credential_ttl_seconds", "Credential lifetime in seconds", 31_536_000, locale
+        )
+        submit_label = "创建 Agent 和 Token" if locale == "zh-CN" else "Create Agent and Token"
+        master_form = (
+            '<section class="card">'
+            f"<h2>{'创建 Agent' if locale == 'zh-CN' else 'Create Agent'}</h2>"
+            f'<p class="section-help">{guidance}</p>'
+            '<form method="post" action="/admin/agents/create" autocomplete="off">'
+            f"{_csrf(escape(csrf_token, quote=True))}"
+            f"<label>{'归属知识库' if locale == 'zh-CN' else 'Home Library'}"
+            f'<select name="home_library_id" required>{options}</select></label>'
+            f"{_text('agent_name', 'Agent name', locale)}"
+            f"{_textarea('agent_description', 'Agent description', locale)}"
+            f"{ttl_field}"
+            f"{grants}"
+            f'<button type="submit">{submit_label}</button>'
+            "</form></section>"
+        )
+    credential_notice = (
+        "新签发的有效 Agent Token 可以通过主会话再次显示；旧凭据无法从校验值还原。"
+        if locale == "zh-CN"
+        else (
+            "New active Agent Tokens can be revealed with a master session; "
+            "old values cannot be recovered."
+        )
+    )
+    notice = "" if message is None else _notice(localize(locale, message), error=True)
     content = (
         f"{_header(escape(csrf_token, quote=True), locale, switch_path='/admin/agents')}"
         '<div class="admin-shell">'
         f"{_sidebar(locale, current='agents')}"
         f"<main><h1>{localize(locale, 'Identities')}</h1>"
-        f'<p class="section-help">{localize(locale, "Credentials cannot be recovered.")}</p>'
-        f"{body}</main></div>"
+        f'<p class="section-help">{credential_notice}</p>'
+        f"{notice}{master_form}{body}</main></div>"
     )
     return _document(localize(locale, "Identities"), content, locale)
 
@@ -1017,16 +1083,33 @@ def credential_page(
     heading: str,
     result: DeliveredCredential,
     locale: AdminLocale = "en",
+    recoverable: bool = False,
 ) -> str:
     csrf = escape(csrf_token, quote=True)
     localized_heading = localize(locale, heading)
     credential_notice = (
-        "此值仅在本次响应中显示。离开本页前，请将它存入认可的秘密存储。"
-        if locale == "zh-CN"
+        (
+            "此值可在 Agent 详情页经主会话再次显示。请勿把它放入网址、截图、日志或聊天。"
+            if locale == "zh-CN"
+            else "This value can be revealed again from Agent details with a master session. "
+            "Keep it out of URLs, screenshots, logs, and chat."
+        )
+        if recoverable
         else (
-            "This value is shown only in this response. Store it in an approved secret "
+            "此值仅在本次响应中显示。离开本页前，请将它存入认可的秘密存储。"
+            if locale == "zh-CN"
+            else "This value is shown only in this response. Store it in an approved secret "
             "store before leaving this page."
         )
+    )
+    return_path = (
+        f"/admin/libraries/{escape(result.library_id, quote=True)}/callers/"
+        f"{escape(result.caller_id, quote=True)}"
+        if recoverable
+        else "/admin/setup"
+    )
+    return_label = localize(
+        locale, "Return to administration" if recoverable else "Return to setup"
     )
     content = f"""
 {_header(csrf, locale, switch_path=None)}
@@ -1040,7 +1123,7 @@ def credential_page(
       <dt>{localize(locale, "Caller ID")}</dt><dd>{escape(result.caller_id)}</dd>
       <dt>{localize(locale, "Credential ID")}</dt><dd>{escape(result.credential_id)}</dd>
     </dl>
-    <p><a href="/admin/setup">{localize(locale, "Return to setup")}</a></p>
+    <p><a href="{return_path}">{return_label}</a></p>
   </section>
 </main>
 """

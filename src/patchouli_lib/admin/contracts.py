@@ -4,6 +4,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
+from patchouli_lib.auth.library_policy import LibraryAction
 from patchouli_lib.auth.schemas import (
     MAX_RFC3339_TIMESTAMP_MICROSECONDS,
     SectionAction,
@@ -61,6 +62,26 @@ class ProvisionAgentInput(AdminActionInput):
     def require_distinct_grants(self) -> Self:
         if len(set(self.grants)) != len(self.grants):
             raise ValueError("Agent grants must be distinct.")
+        return self
+
+
+class MasterLibraryGrantInput(AdminActionInput):
+    library_id: OpaqueId
+    action: LibraryAction
+
+
+class MasterProvisionAgentInput(AdminActionInput):
+    home_library_id: OpaqueId
+    agent_name: ResourceName
+    agent_description: BoundedText = ""
+    credential_ttl_seconds: CredentialTtlSeconds
+    grants: tuple[MasterLibraryGrantInput, ...] = ()
+
+    @model_validator(mode="after")
+    def require_distinct_grants(self) -> Self:
+        pairs = {(grant.library_id, grant.action) for grant in self.grants}
+        if len(pairs) != len(self.grants):
+            raise ValueError("Library grants must be distinct.")
         return self
 
 

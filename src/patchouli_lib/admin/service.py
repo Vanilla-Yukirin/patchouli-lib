@@ -9,6 +9,7 @@ from sqlalchemy import Connection, Engine, insert, select
 
 from patchouli_lib.admin.contracts import (
     BootstrapInput,
+    MasterProvisionAgentInput,
     PageTagFormInput,
     ProvisionAgentInput,
     RecoverOperatorInput,
@@ -19,15 +20,26 @@ from patchouli_lib.admin.contracts import (
 from patchouli_lib.admin.master_audit import MasterAuditRepository
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.session import MasterAdminSession
-from patchouli_lib.auth.models import AdminStructureAuditEvent
+from patchouli_lib.auth.models import (
+    AdminStructureAuditEvent,
+    CredentialLibraryGrant,
+    CredentialLibraryPolicy,
+)
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
     MAX_RFC3339_TIMESTAMP_MICROSECONDS,
     CallerKind,
     LocalOperatorRecovery,
+    NewCaller,
     OperatorBootstrap,
 )
-from patchouli_lib.auth.service import AuthenticationError, AuthenticationService, utc_microseconds
+from patchouli_lib.auth.service import (
+    AuthenticationError,
+    AuthenticationService,
+    CredentialIssuer,
+    new_opaque_id,
+    utc_microseconds,
+)
 from patchouli_lib.content.models import Page
 from patchouli_lib.content.schemas import ArchiveIdempotencyKey, PageLifecycleCommand
 from patchouli_lib.content.service import ArchiveService
@@ -303,6 +315,9 @@ class AdminActionService:
         actor_token = request.operator_token.get_secret_value()
         now = self._clock()
         with immediate_transaction(self._engine) as connection:
+            # The legacy web form must not finish after local master setup wins a race.
+            if MasterTokenRepository(connection).has_identity():
+                raise AuthenticationError
             library_repository = LibraryRepository(connection)
             library_id = _require_library(library_repository, request.library_name)
             section = library_repository.find_section_by_name(
@@ -341,6 +356,73 @@ class AdminActionService:
         return DeliveredCredential(
             value=issued.value,
             library_id=library_id,
+            caller_id=caller.id,
+            credential_id=issued.credential.id,
+        )
+
+    def provision_agent_as_master(
+        self, request: MasterProvisionAgentInput, *, master_session: MasterAdminSession
+    ) -> DeliveredCredential:
+        """Issue one Agent credential with an explicit, default-deny Library policy."""
+        now = self._clock()
+        with immediate_transaction(self._engine) as connection:
+            self._require_current_admin_session(
+                connection, master_session, master_session.audit_fingerprint()
+            )
+            repository = AuthRepository(connection)
+            if not repository.library_exists(request.home_library_id):
+                raise ResourceNotFoundError
+            if any(not repository.library_exists(grant.library_id) for grant in request.grants):
+                raise ResourceNotFoundError
+            caller = repository.add_caller(
+                NewCaller(
+                    id=new_opaque_id(),
+                    library_id=request.home_library_id,
+                    kind=CallerKind.AGENT,
+                    name=request.agent_name,
+                    description=request.agent_description,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            issued = CredentialIssuer(repository, clock=lambda: now).issue(
+                caller, expires_at=_expires_at(now, request.credential_ttl_seconds)
+            )
+            connection.execute(
+                insert(CredentialLibraryPolicy),
+                {
+                    "credential_id": issued.credential.id,
+                    "caller_id": caller.id,
+                    "home_library_id": caller.library_id,
+                    "mode": "library_grants",
+                    "created_at": now,
+                },
+            )
+            for grant in request.grants:
+                connection.execute(
+                    insert(CredentialLibraryGrant),
+                    {
+                        "credential_id": issued.credential.id,
+                        "caller_id": caller.id,
+                        "home_library_id": caller.library_id,
+                        "target_library_id": grant.library_id,
+                        "action": grant.action.value,
+                        "created_at": now,
+                    },
+                )
+            MasterAuditRepository(connection).add_success(
+                identity_id=master_session.identity_id,
+                session_generation=master_session.session_generation,
+                session_fingerprint=master_session.audit_fingerprint(),
+                action="auth.agent.provision",
+                target_type="caller",
+                target_id=caller.id,
+                occurred_at=now,
+                event_id=uuid4().hex,
+            )
+        return DeliveredCredential(
+            value=issued.value,
+            library_id=caller.library_id,
             caller_id=caller.id,
             credential_id=issued.credential.id,
         )
