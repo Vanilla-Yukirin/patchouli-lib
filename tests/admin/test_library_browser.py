@@ -672,6 +672,13 @@ def test_browser_reads_historical_revision_without_crossing_page_scope(
     assert "Version history" in current.text
     assert sha256(updated_markdown).hexdigest() in current.text
     assert f'href="{history_path}"' in current.text
+    assert '<ul class="item-list revision-files">' in current.text
+    assert '<ul class="item-list revision-history">' in current.text
+    assert (
+        f'aria-current="true"><a href="{page_path}/revisions/2">'
+        'Version 2</a> <span class="selected-marker">(Viewing)</span>'
+    ) in current.text
+    assert current.text.count('aria-current="true"') == 1
     historical = client.get(history_path)
     assert historical.status_code == 200
     assert "# Original" in historical.text
@@ -679,6 +686,11 @@ def test_browser_reads_historical_revision_without_crossing_page_scope(
     assert sha256(updated_markdown).hexdigest() not in historical.text
     assert "# Updated" not in historical.text
     assert "Back to current version" in historical.text
+    assert (
+        f'aria-current="true"><a href="{history_path}">'
+        'Version 1</a> <span class="selected-marker">(Viewing)</span>'
+    ) in historical.text
+    assert historical.text.count('aria-current="true"') == 1
     assert historical.headers["cache-control"] == "no-store, max-age=0"
     second = client.get(f"{page_path}/revisions/2")
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in second.text
@@ -694,6 +706,7 @@ def test_browser_reads_historical_revision_without_crossing_page_scope(
     chinese = client.get(f"{history_path}?lang=zh-CN")
     assert "版本历史" in chinese.text
     assert "返回当前版本" in chinese.text
+    assert "(正在查看)" in chinese.text
 
 
 def test_home_shows_only_scoped_successful_content_activity(

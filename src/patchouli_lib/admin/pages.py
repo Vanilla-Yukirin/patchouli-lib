@@ -150,6 +150,9 @@ small { color: #526259; }
 .library-grid li { min-height: 8rem; }
 .meta { color: #526259; font-size: .9rem; }
 .markdown-preview { white-space: pre-wrap; overflow-wrap: anywhere; }
+.revision-files code { overflow-wrap: anywhere; }
+.revision-history [aria-current="true"] { border-color: #2f6845; }
+.revision-history .selected-marker { color: #355f43; font-weight: 700; }
 .interface-list code { overflow-wrap: anywhere; }
 details.card { margin-top: 1rem; }
 details summary { cursor: pointer; font-weight: 700; }
@@ -298,6 +301,7 @@ _ZH_CN: dict[str, str] = {
     "Markdown body": "Markdown 正文",
     "Version history": "版本历史",
     "Version": "版本",
+    "Viewing": "正在查看",
     "Recorded": "记录时间",
     "Back to current version": "返回当前版本",
     "No libraries yet.": "暂无知识库。",
@@ -1354,9 +1358,16 @@ def page_preview_page(
     book_path = f"{section_path}/books/{escape(view.book.id, quote=True)}"
     base = f"{book_path}/pages/{escape(view.page.id, quote=True)}"
     history = "".join(
-        f'<li><a href="{base}/revisions/{item.number}">'
+        "<li"
+        + (' aria-current="true"' if item.number == view.selected_revision_number else "")
+        + f'><a href="{base}/revisions/{item.number}">'
         f"{localize(locale, 'Version')} {item.number}</a>"
-        f'<p class="meta">{localize(locale, "Recorded")}: {_time(item.created_at)}</p></li>'
+        + (
+            f' <span class="selected-marker">({localize(locale, "Viewing")})</span>'
+            if item.number == view.selected_revision_number
+            else ""
+        )
+        + f'<p class="meta">{localize(locale, "Recorded")}: {_time(item.created_at)}</p></li>'
         for item in view.revisions
     )
     files = "".join(
@@ -1382,9 +1393,9 @@ def page_preview_page(
         + f"<h2>{localize(locale, heading)}</h2>"
         f'<pre class="markdown-preview">{escape(view.markdown)}</pre>'
         f"<h2>{localize(locale, 'Files in this version')}</h2>"
-        f'<ul class="item-list">{files}</ul>'
+        f'<ul class="item-list revision-files">{files}</ul>'
         f"<h2>{localize(locale, 'Version history')}</h2>"
-        f'<ul class="item-list">{history}</ul>'
+        f'<ul class="item-list revision-history">{history}</ul>'
     )
     tag_path = f"{library_path}/tags"
     tag_choices = "".join(
