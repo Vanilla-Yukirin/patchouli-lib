@@ -440,6 +440,60 @@ class AdminStructureAuditEvent(Base):
     occurred_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
+class MasterAuditEvent(Base):
+    """Immutable, non-secret record of a successful master-session action."""
+
+    __tablename__ = "admin_master_audit_events"
+    __table_args__ = (
+        CheckConstraint(
+            "length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'",
+            name="ck_admin_master_audit_id",
+        ),
+        CheckConstraint(
+            "length(identity_id) = 32 AND identity_id NOT GLOB '*[^0-9a-f]*'",
+            name="ck_admin_master_audit_identity",
+        ),
+        CheckConstraint(
+            "session_generation >= 1 AND occurred_at >= 0",
+            name="ck_admin_master_audit_clock",
+        ),
+        CheckConstraint(
+            "typeof(session_fingerprint) = 'blob' AND length(session_fingerprint) = 32",
+            name="ck_admin_master_audit_session_fingerprint",
+        ),
+        CheckConstraint(
+            "length(action) BETWEEN 1 AND 100 AND action = trim(action) "
+            "AND action NOT GLOB '*[^!-~]*'",
+            name="ck_admin_master_audit_action",
+        ),
+        CheckConstraint(
+            "length(target_type) BETWEEN 1 AND 100 AND target_type = trim(target_type) "
+            "AND target_type NOT GLOB '*[^a-z_]*'",
+            name="ck_admin_master_audit_target_type",
+        ),
+        CheckConstraint(
+            "length(target_id) BETWEEN 1 AND 200 AND target_id = trim(target_id) "
+            "AND target_id NOT GLOB '*[^!-~]*'",
+            name="ck_admin_master_audit_target_id",
+        ),
+        CheckConstraint(
+            "action != 'auth.agent_token.reveal' OR "
+            "(target_type = 'credential' AND length(target_id) = 32 "
+            "AND target_id NOT GLOB '*[^0-9a-f]*')",
+            name="ck_admin_master_audit_reveal_target",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    identity_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+    session_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    session_fingerprint: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    action: Mapped[str] = mapped_column(String(ACTION_MAX_LENGTH), nullable=False)
+    target_type: Mapped[str] = mapped_column(String(ACTION_MAX_LENGTH), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(RESOURCE_ID_MAX_LENGTH), nullable=False)
+    occurred_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
 class MasterIdentity(Base):
     """The one human administrator, separate from operator bearer callers."""
 
@@ -517,6 +571,7 @@ class BootstrapMarker(Base):
 __all__ = [
     "AgentTokenValue",
     "AdminStructureAuditEvent",
+    "MasterAuditEvent",
     "AuditEvent",
     "BootstrapMarker",
     "Caller",

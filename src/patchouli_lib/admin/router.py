@@ -28,8 +28,10 @@ from patchouli_lib.admin.contracts import (
     RevokeAgentCredentialInput,
     TagFormInput,
 )
+from patchouli_lib.admin.master_audit import MasterAuditRepository
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.pages import (
+    REVEAL_SCRIPT,
     STYLESHEET,
     AdminLocale,
     action_result_page,
@@ -57,13 +59,15 @@ from patchouli_lib.admin.read_model import AdminReadModel
 from patchouli_lib.admin.service import AdminActionService, DeliveredCredential
 from patchouli_lib.admin.session import AdminSession, AdminSessionCodec, MasterAdminSession
 from patchouli_lib.api.agent_skill_routes import SkillBundle
-from patchouli_lib.auth.service import AuthenticationError, AuthorizationError
+from patchouli_lib.auth.repository import AuthRepository
+from patchouli_lib.auth.service import AuthenticationError, AuthorizationError, utc_microseconds
 from patchouli_lib.config import Settings
 from patchouli_lib.content.service import (
     ArchiveLifecycleUnchangedError,
     ArchiveNotFoundError,
     ArchivePreconditionFailedError,
 )
+from patchouli_lib.database import immediate_transaction
 from patchouli_lib.idempotency.service import IdempotencyConflictError
 from patchouli_lib.library.schemas import CreateBookInput, CreateLibraryInput, CreateSectionInput
 from patchouli_lib.library.service import (
@@ -195,11 +199,15 @@ def create_admin_router(
         *,
         locale: AdminLocale,
         status_code: int = 200,
+        allow_self_script: bool = False,
     ) -> HTMLResponse:
+        headers = {**_SECURITY_HEADERS, "Content-Language": locale}
+        if allow_self_script:
+            headers["Content-Security-Policy"] += "; script-src 'self'; connect-src 'self'"
         return HTMLResponse(
             content,
             status_code=status_code,
-            headers={**_SECURITY_HEADERS, "Content-Language": locale},
+            headers=headers,
         )
 
     def redirect(location: str) -> RedirectResponse:
@@ -246,6 +254,8 @@ def create_admin_router(
     def protected_page(
         request: Request,
         render: Callable[[str, AdminLocale], str | None],
+        *,
+        allow_self_script: bool = False,
     ) -> Response:
         locale = locale_for(request)
         session = current_session(request)
@@ -261,6 +271,7 @@ def create_admin_router(
             else browser_not_found_page(session.csrf_token, locale=locale),
             locale=locale,
             status_code=200 if rendered is not None else 404,
+            allow_self_script=allow_self_script,
         )
         remember_requested_locale(page_response, request)
         return page_response
@@ -687,9 +698,83 @@ def create_admin_router(
     def caller_detail(request: Request, library_id: str, caller_id: str) -> Response:
         def render(csrf: str, locale: AdminLocale) -> str | None:
             view = read_model.get_caller(library_id, caller_id)
-            return None if view is None else caller_page(csrf, view, locale=locale)
+            return (
+                None
+                if view is None
+                else caller_page(
+                    csrf,
+                    view,
+                    locale=locale,
+                    allow_reveal=isinstance(current_session(request), MasterAdminSession),
+                )
+            )
 
-        return protected_page(request, render)
+        return protected_page(request, render, allow_self_script=True)
+
+    @router.post("/libraries/{library_id}/callers/{caller_id}/credentials/{credential_id}/reveal")
+    async def reveal_agent_token(
+        request: Request, library_id: str, caller_id: str, credential_id: str
+    ) -> Response:
+        def safe_text(message: str, status_code: int) -> PlainTextResponse:
+            return PlainTextResponse(message, status_code=status_code, headers=_SECURITY_HEADERS)
+
+        if not _same_origin_submission(request):
+            return safe_text("Request origin was rejected.", 403)
+        session = current_session(request)
+        if session is None:
+            return safe_text("Sign in again.", 401)
+        if not isinstance(session, MasterAdminSession):
+            return safe_text("A master session is required.", 403)
+        try:
+            values = await _read_form(request, allowed_fields=frozenset({"csrf_token"}))
+            _require_csrf(values, session)
+        except _FormError as exc:
+            return safe_text(exc.safe_message, exc.status_code)
+
+        def current_value() -> tuple[int, str]:
+            # Serialize this sensitive read with rotation, revocation and master
+            # session invalidation so all checks describe one current state.
+            with immediate_transaction(engine) as connection:
+                if not MasterTokenRepository(connection).is_session_generation_current(
+                    session.identity_id, session.session_generation
+                ):
+                    return 401, "Sign in again."
+                repository = AuthRepository(connection)
+                caller = repository.get_caller(library_id, caller_id)
+                credential = repository.get_credential(library_id, caller_id, credential_id)
+                if caller is None or caller.kind.value != "agent" or credential is None:
+                    return 404, "The Agent credential was not found."
+                now = utc_microseconds()
+                if (
+                    caller.disabled_at is not None
+                    or credential.created_at > now
+                    or credential.expires_at <= now
+                    or credential.revoked_at is not None
+                    or credential.rotated_at is not None
+                ):
+                    return 410, "The Agent credential is no longer active."
+                value = repository.get_active_agent_token_value(
+                    library_id, caller_id, credential_id, active_at=now
+                )
+                if value is None:
+                    return 410, "The Agent Token cannot be recovered."
+                # A reveal is committed only with its non-secret audit record.
+                # If the audit write fails, the transaction aborts before the
+                # plaintext can be sent to the browser.
+                MasterAuditRepository(connection).add_success(
+                    identity_id=session.identity_id,
+                    session_generation=session.session_generation,
+                    session_fingerprint=session.audit_fingerprint(),
+                    action="auth.agent_token.reveal",
+                    target_type="credential",
+                    target_id=credential_id,
+                    occurred_at=now,
+                    event_id=uuid4().hex,
+                )
+                return 200, value
+
+        status, value = await run_in_threadpool(current_value)
+        return safe_text(value, status)
 
     @router.get("/libraries/{library_id}/sections/{section_id}")
     def section_detail(request: Request, library_id: str, section_id: str) -> Response:
@@ -1053,6 +1138,14 @@ def create_admin_router(
         return PlainTextResponse(
             STYLESHEET,
             media_type="text/css",
+            headers=_SECURITY_HEADERS,
+        )
+
+    @router.get("/reveal.js")
+    def reveal_script() -> Response:
+        return PlainTextResponse(
+            REVEAL_SCRIPT,
+            media_type="application/javascript",
             headers=_SECURITY_HEADERS,
         )
 

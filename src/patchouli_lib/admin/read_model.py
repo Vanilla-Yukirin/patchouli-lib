@@ -5,13 +5,14 @@ from __future__ import annotations
 from contextlib import suppress
 from dataclasses import dataclass
 from hashlib import sha256
+from time import time_ns
 from typing import Any
 
 from sqlalchemy import Connection, Engine, and_, func, or_, select
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.sql import Select
 
-from patchouli_lib.auth.models import AuditEvent, Caller, Credential, SectionGrant
+from patchouli_lib.auth.models import AgentTokenValue, AuditEvent, Caller, Credential, SectionGrant
 from patchouli_lib.content.models import Page, Revision, RevisionFile
 from patchouli_lib.content.service import page_current_etag
 from patchouli_lib.library.models import Book, Library, Section
@@ -203,6 +204,7 @@ class CredentialItem:
     last_used_at: int | None
     revoked_at: int | None
     rotated_at: int | None
+    token_tail: str | None
 
 
 @dataclass(frozen=True)
@@ -469,6 +471,7 @@ class AdminReadModel:
 
     def get_caller(self, library_id: str, caller_id: str) -> CallerView | None:
         with self._engine.connect() as connection:
+            now = time_ns() // 1_000
             row = (
                 connection.execute(
                     select(
@@ -494,6 +497,17 @@ class AdminReadModel:
                         Credential.last_used_at,
                         Credential.revoked_at,
                         Credential.rotated_at,
+                        func.substr(AgentTokenValue.token_value, -4, 4).label("token_tail"),
+                    )
+                    .outerjoin(
+                        AgentTokenValue,
+                        and_(
+                            AgentTokenValue.credential_id == Credential.id,
+                            Credential.created_at <= now,
+                            Credential.expires_at > now,
+                            Credential.revoked_at.is_(None),
+                            Credential.rotated_at.is_(None),
+                        ),
                     )
                     .where(Credential.library_id == library_id, Credential.caller_id == caller_id)
                     .order_by(Credential.created_at.desc(), Credential.id.desc())

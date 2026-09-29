@@ -303,11 +303,11 @@ def test_0014_policy_grant_survives_0015_verified_backup_restore(
             artifact_identity=artifact,
             app_version="0.0.0-test",
         )
-        assert result.manifest.schema_revision == "20260929_0017"
+        assert result.manifest.schema_revision == "20260929_0018"
         assert verify_backup_bundle(bundle, app_version="0.0.0-test") == result.manifest
         restored = tmp_path / "policy-restored.db"
         restore_backup(bundle, restored, app_version="0.0.0-test")
-        assert validate_database(restored).schema_revision == "20260929_0017"
+        assert validate_database(restored).schema_revision == "20260929_0018"
         restored_engine = build_engine(f"sqlite:///{restored.as_posix()}")
         try:
             with restored_engine.connect() as connection:

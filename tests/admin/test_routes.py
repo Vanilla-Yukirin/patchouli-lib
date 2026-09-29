@@ -4,23 +4,31 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from time import time_ns
 from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, delete, select
+from sqlalchemy import Engine, delete, select, update
 from starlette.concurrency import run_in_threadpool as starlette_run_in_threadpool
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 import patchouli_lib.admin.router as admin_router
+from patchouli_lib.admin.master_audit import MasterAuditRepository
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.passwords import hash_password
 from patchouli_lib.admin.session import AdminSessionCodec
 from patchouli_lib.app import create_app
-from patchouli_lib.auth.models import Caller, MasterIdentity
+from patchouli_lib.auth.models import (
+    AgentTokenValue,
+    Caller,
+    Credential,
+    MasterAuditEvent,
+    MasterIdentity,
+)
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import CallerKind
-from patchouli_lib.auth.service import AuthenticationError, AuthenticationService
+from patchouli_lib.auth.service import AuthenticationError, AuthenticationService, CredentialIssuer
 from patchouli_lib.config import Settings
 from patchouli_lib.database import immediate_transaction
 
@@ -159,6 +167,30 @@ def _metadata_from(response_text: str) -> tuple[str, str, str]:
     values = re.findall(r"<dd>([^<]+)</dd>", response_text)
     assert len(values) == 3
     return values[0], values[1], values[2]
+
+
+def _issue_web_agent(web: AdminWeb) -> tuple[str, str, str, str]:
+    csrf = _login(web)
+    bootstrapped = _post(web.client, "/admin/bootstrap", data=_bootstrap_data(csrf))
+    assert bootstrapped.status_code == 200
+    operator_token = _credential_from(bootstrapped.text)
+    provisioned = _post(
+        web.client,
+        "/admin/agents/provision",
+        data={
+            "csrf_token": csrf,
+            "operator_token": operator_token,
+            "library_name": "Synthetic Web Library",
+            "section_name": "Synthetic Web Section",
+            "agent_name": "Synthetic Web Agent",
+            "agent_description": "Synthetic Agent",
+            "credential_ttl_seconds": "3600",
+            "grants": ["section:query", "page:read"],
+        },
+    )
+    assert provisioned.status_code == 200
+    library_id, caller_id, credential_id = _metadata_from(provisioned.text)
+    return _credential_from(provisioned.text), library_id, caller_id, credential_id
 
 
 def test_production_private_http_preserves_login_csrf_and_token_boundaries(tmp_path: Path) -> None:
@@ -1065,6 +1097,180 @@ def test_bootstrap_recovery_provision_and_revoke_without_secret_retention(
 
     with admin_web.engine.connect() as connection, pytest.raises(AuthenticationError):
         AuthenticationService(AuthRepository(connection)).authenticate(agent_token)
+
+
+def test_agent_token_reveal_requires_current_master_session_origin_and_csrf(
+    admin_web: AdminWeb,
+) -> None:
+    token, library_id, caller_id, credential_id = _issue_web_agent(admin_web)
+    detail_path = f"/admin/libraries/{library_id}/callers/{caller_id}"
+    reveal_path = f"{detail_path}/credentials/{credential_id}/reveal"
+    legacy_page = admin_web.client.get(detail_path)
+    assert legacy_page.status_code == 200
+    assert token not in legacy_page.text
+    assert "token-reveal" not in legacy_page.text
+    legacy_post = _post(admin_web.client, reveal_path, data={"csrf_token": "wrong"})
+    assert legacy_post.status_code == 403
+    assert token not in legacy_post.text
+    admin_web.client.cookies.clear()
+    unsigned = _post(admin_web.client, reveal_path, data={"csrf_token": "wrong"})
+    assert unsigned.status_code == 401
+    assert token not in unsigned.text
+
+    _initialize_master(admin_web)
+    encoded, csrf = _login_master(admin_web)
+    detail = admin_web.client.get(detail_path)
+    assert detail.status_code == 200
+    assert token not in detail.text
+    assert f"plb1…{token[-4:]}" in detail.text
+    assert f'action="{reveal_path}"' in detail.text
+    assert 'src="/admin/reveal.js"' in detail.text
+    assert "script-src 'self'" in detail.headers["content-security-policy"]
+    assert "connect-src 'self'" in detail.headers["content-security-policy"]
+    assert "'unsafe-inline'" not in detail.headers["content-security-policy"]
+    assert "Clipboard unavailable. Select the displayed Token to copy it manually." in detail.text
+    chinese_detail = admin_web.client.get(f"{detail_path}?lang=zh-CN")
+    assert "剪贴板不可用。请选中显示的 Token 手动复制。" in chinese_detail.text
+    dashboard = admin_web.client.get("/admin")
+    assert "connect-src 'self'" not in dashboard.headers["content-security-policy"]
+    script = admin_web.client.get("/admin/reveal.js")
+    assert script.status_code == 200
+    assert "navigator.clipboard.writeText" in script.text
+    assert "form.dataset.manualCopyLabel" in script.text
+    assert token not in script.text
+    _assert_security_headers(script)
+    assert admin_web.client.get(reveal_path).status_code == 405
+
+    for data, origin, status in (
+        ({"csrf_token": csrf}, "https://other.example.invalid", 403),
+        ({"csrf_token": "wrong"}, _ORIGIN, 403),
+        ({"csrf_token": csrf, "extra": "x"}, _ORIGIN, 422),
+    ):
+        rejected = _post(admin_web.client, reveal_path, data=data, origin=origin)
+        assert rejected.status_code == status
+        assert token not in rejected.text
+        _assert_security_headers(rejected)
+
+    for wrong_path in (
+        f"{detail_path}/credentials/{'f' * 32}/reveal",
+        f"/admin/libraries/{'f' * 32}/callers/{caller_id}/credentials/{credential_id}/reveal",
+        f"/admin/libraries/{library_id}/callers/{'f' * 32}/credentials/{credential_id}/reveal",
+    ):
+        rejected = _post(admin_web.client, wrong_path, data={"csrf_token": csrf})
+        assert rejected.status_code == 404
+        assert token not in rejected.text
+
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(MasterAuditEvent.id)).all() == []
+
+    revealed = _post(admin_web.client, reveal_path, data={"csrf_token": csrf})
+    assert revealed.status_code == 200
+    assert revealed.text == token
+    assert revealed.headers["content-type"].startswith("text/plain")
+    assert token not in str(revealed.request.url)
+    assert token not in (admin_web.client.cookies.get(_SESSION_COOKIE) or "")
+    _assert_security_headers(revealed)
+    assert _post(admin_web.client, reveal_path, data={"csrf_token": csrf}).text == token
+    with admin_web.engine.connect() as connection:
+        events = connection.execute(
+            select(
+                MasterAuditEvent.identity_id,
+                MasterAuditEvent.session_generation,
+                MasterAuditEvent.session_fingerprint,
+                MasterAuditEvent.action,
+                MasterAuditEvent.target_type,
+                MasterAuditEvent.target_id,
+            )
+        ).all()
+    assert len(events) == 2
+    for event in events:
+        assert event.identity_id == "a" * 32
+        assert event.session_generation == 1
+        assert len(event.session_fingerprint) == 32
+        assert event.action == "auth.agent_token.reveal"
+        assert event.target_type == "credential"
+        assert event.target_id == credential_id
+        assert token.encode() not in bytes(event.session_fingerprint)
+
+    with immediate_transaction(admin_web.engine) as connection:
+        assert (
+            MasterTokenRepository(connection).rotate(
+                _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
+            )
+            is not None
+        )
+    rotated = admin_web.client.post(
+        reveal_path,
+        data={"csrf_token": csrf},
+        headers={"Origin": _ORIGIN, "Cookie": f"{_SESSION_COOKIE}={encoded}"},
+    )
+    assert rotated.status_code == 401
+    assert token not in rotated.text
+
+
+@pytest.mark.parametrize("state", ["revoked", "rotated", "expired", "disabled", "legacy"])
+def test_agent_token_reveal_rejects_inactive_or_unrecoverable_values(
+    admin_web: AdminWeb, state: str
+) -> None:
+    token, library_id, caller_id, credential_id = _issue_web_agent(admin_web)
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    path = f"/admin/libraries/{library_id}/callers/{caller_id}/credentials/{credential_id}/reveal"
+    with immediate_transaction(admin_web.engine) as connection:
+        repository = AuthRepository(connection)
+        credential = repository.get_credential(library_id, caller_id, credential_id)
+        assert credential is not None
+        now = time_ns() // 1_000
+        if state == "revoked":
+            repository.revoke_credential(credential, revoked_at=now)
+        elif state == "rotated":
+            caller = repository.get_caller(library_id, caller_id)
+            assert caller is not None
+            replacement = CredentialIssuer(repository).issue(caller, expires_at=now + 3_600_000_000)
+            repository.mark_credential_rotated(
+                credential, replacement.credential.id, rotated_at=now
+            )
+        elif state == "expired":
+            connection.execute(
+                update(Credential).where(Credential.id == credential_id).values(expires_at=now - 1)
+            )
+        elif state == "disabled":
+            repository.disable_caller(library_id, caller_id, disabled_at=now)
+        else:
+            connection.execute(
+                delete(AgentTokenValue).where(AgentTokenValue.credential_id == credential_id)
+            )
+
+    response = _post(admin_web.client, path, data={"csrf_token": csrf})
+    assert response.status_code == 410
+    assert token not in response.text
+    assert (
+        token not in admin_web.client.get(f"/admin/libraries/{library_id}/callers/{caller_id}").text
+    )
+    if state == "legacy":
+        with admin_web.engine.connect() as connection:
+            assert AuthenticationService(AuthRepository(connection)).authenticate(token)
+    _assert_security_headers(response)
+
+
+def test_agent_token_reveal_fails_closed_when_audit_cannot_commit(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token, library_id, caller_id, credential_id = _issue_web_agent(admin_web)
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+
+    def reject_audit(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("synthetic audit write failure")
+
+    monkeypatch.setattr(MasterAuditRepository, "add_success", reject_audit)
+    path = f"/admin/libraries/{library_id}/callers/{caller_id}/credentials/{credential_id}/reveal"
+    failed = _post(admin_web.client, path, data={"csrf_token": csrf})
+    assert failed.status_code == 500
+    assert token not in failed.text
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(MasterAuditEvent.id)).all() == []
+    assert token not in str(admin_web.client.cookies)
 
 
 def test_action_errors_are_redacted_and_do_not_echo_operator_token(

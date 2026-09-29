@@ -17,6 +17,7 @@ from patchouli_lib.admin.passwords import parse_password_hash
 from patchouli_lib.auth.tokens import InvalidTokenError, parse_token, verify_token
 from patchouli_lib.backup.errors import BackupDatabaseError
 from patchouli_lib.backup.manifest import (
+    ACTOR_HOME_SCHEMA_REVISION,
     AGENT_TOKEN_VALUES_SCHEMA_REVISION,
     FILE_SET_SCHEMA_REVISION,
     INTERMEDIATE_SCHEMA_REVISION,
@@ -427,6 +428,18 @@ _EXPECTED_SQL_HASHES_0017: Final = _EXPECTED_SQL_HASHES_0016 | {
         "962cda0022818ec6e82522445303e067c0441d4d9ed690177f275ca108cbe3eb"
     ),
 }
+_EXPECTED_SQL_HASHES_0018: Final = _EXPECTED_SQL_HASHES_0017 | {
+    # Generated from an empty Alembic 0018 database with _canonical_schema_sql.
+    ("table", "admin_master_audit_events"): (
+        "62d21703e6a71e85a2c3791a40767d2d3cc0fd2d766f076487b0516eea1405f9"
+    ),
+    ("trigger", "trg_admin_master_audit_no_update"): (
+        "f057a928459fb39c4b2456c2b048cb6d1e685a3b47026375c007838e49650b9d"
+    ),
+    ("trigger", "trg_admin_master_audit_no_delete"): (
+        "287d1c6b1766e5f682fdc182052dd24fb6755b1deff8b36621c6ccb62857acbc"
+    ),
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
     PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
@@ -438,7 +451,8 @@ _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LIBRARY_POLICY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0014,
     AGENT_TOKEN_VALUES_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0015,
     MASTER_IDENTITY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0016,
-    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0017,
+    ACTOR_HOME_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0017,
+    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0018,
 }
 _FILE_SET_REVISIONS: Final = frozenset(
     {
@@ -446,6 +460,7 @@ _FILE_SET_REVISIONS: Final = frozenset(
         LIBRARY_POLICY_SCHEMA_REVISION,
         AGENT_TOKEN_VALUES_SCHEMA_REVISION,
         MASTER_IDENTITY_SCHEMA_REVISION,
+        ACTOR_HOME_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }
 )
@@ -1314,6 +1329,55 @@ def _require_master_identity(connection: sqlite3.Connection) -> None:
         raise BackupDatabaseError from None
 
 
+def _require_master_audit(connection: sqlite3.Connection) -> None:
+    """Validate immutable master action metadata without reading any secrets."""
+
+    rows = connection.execute(
+        "SELECT id, identity_id, session_generation, session_fingerprint, "
+        "action, target_type, target_id, occurred_at FROM admin_master_audit_events"
+    )
+    for (
+        event_id,
+        identity_id,
+        generation,
+        fingerprint,
+        action,
+        target_type,
+        target_id,
+        occurred_at,
+    ) in rows:
+        if (
+            not isinstance(event_id, str)
+            or len(event_id) != 32
+            or any(character not in "0123456789abcdef" for character in event_id)
+            or not isinstance(identity_id, str)
+            or len(identity_id) != 32
+            or any(character not in "0123456789abcdef" for character in identity_id)
+            or type(generation) is not int
+            or generation < 1
+            or not isinstance(fingerprint, bytes)
+            or len(fingerprint) != 32
+            or not isinstance(action, str)
+            or not 1 <= len(action) <= 100
+            or any(not 33 <= ord(character) <= 126 for character in action)
+            or not isinstance(target_type, str)
+            or not 1 <= len(target_type) <= 100
+            or any(character not in "abcdefghijklmnopqrstuvwxyz_" for character in target_type)
+            or not isinstance(target_id, str)
+            or not 1 <= len(target_id) <= 200
+            or any(not 33 <= ord(character) <= 126 for character in target_id)
+            or type(occurred_at) is not int
+            or occurred_at < 0
+        ):
+            raise BackupDatabaseError
+        if action == "auth.agent_token.reveal" and (
+            target_type != "credential"
+            or len(target_id) != 32
+            or any(character not in "0123456789abcdef" for character in target_id)
+        ):
+            raise BackupDatabaseError
+
+
 def _require_actor_home_graph(connection: sqlite3.Connection) -> None:
     """Keep each history row's content target separate from its actor identity.
 
@@ -1380,6 +1444,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         LIBRARY_POLICY_SCHEMA_REVISION,
         AGENT_TOKEN_VALUES_SCHEMA_REVISION,
         MASTER_IDENTITY_SCHEMA_REVISION,
+        ACTOR_HOME_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         invalid_library_policies = _one_integer(
@@ -1397,15 +1462,23 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
     if schema_revision in {
         AGENT_TOKEN_VALUES_SCHEMA_REVISION,
         MASTER_IDENTITY_SCHEMA_REVISION,
+        ACTOR_HOME_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_agent_token_values(connection)
 
-    if schema_revision in {MASTER_IDENTITY_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
+    if schema_revision in {
+        MASTER_IDENTITY_SCHEMA_REVISION,
+        ACTOR_HOME_SCHEMA_REVISION,
+        SUPPORTED_SCHEMA_REVISION,
+    }:
         _require_master_identity(connection)
 
-    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+    if schema_revision in {ACTOR_HOME_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
         _require_actor_home_graph(connection)
+
+    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+        _require_master_audit(connection)
 
     rotations: dict[str, tuple[str, str, str | None, int | None, int | None, int]] = {}
     for (

@@ -35,7 +35,89 @@ _GRANT_SCOPE_HELP = (
     "These are existing single-Library, Section-level grants; "
     "they are not cross-Library permissions."
 )
-_CREDENTIAL_META_HELP = "Token values cannot be shown again; this page contains metadata only."
+_CREDENTIAL_META_HELP = (
+    "Only a master session can reveal a newly issued, active Agent Token. "
+    "Older values cannot be recovered."
+)
+
+REVEAL_SCRIPT = """
+document.querySelectorAll('.token-reveal').forEach((form) => {
+  const output = form.querySelector('.token-output');
+  const status = form.querySelector('[role="status"]');
+  const show = form.querySelector('.token-show');
+  const copy = form.querySelector('.token-copy');
+  let visible = false;
+
+  window.addEventListener('pagehide', () => {
+    output.textContent = '';
+    output.hidden = true;
+    visible = false;
+  });
+
+  async function loadCurrentValue() {
+    const response = await fetch(form.action, {
+      method: 'POST',
+      body: new URLSearchParams(new FormData(form)),
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    });
+    if (!response.ok) throw new Error('reveal rejected');
+    return response.text();
+  }
+
+  show.addEventListener('click', async () => {
+    if (visible) {
+      output.textContent = '';
+      output.hidden = true;
+      visible = false;
+      show.textContent = form.dataset.showLabel;
+      status.textContent = '';
+      return;
+    }
+    try {
+      const value = await loadCurrentValue();
+      output.textContent = value;
+      output.hidden = false;
+      visible = true;
+      show.textContent = form.dataset.hideLabel;
+      status.textContent = '';
+    } catch {
+      output.textContent = '';
+      output.hidden = true;
+      visible = false;
+      status.textContent = form.dataset.errorLabel;
+    }
+  });
+
+  copy.addEventListener('click', async () => {
+    let value;
+    try {
+      // Recheck authorization and credential activity even if a value was shown earlier.
+      value = await loadCurrentValue();
+    } catch {
+      output.textContent = '';
+      output.hidden = true;
+      visible = false;
+      show.textContent = form.dataset.showLabel;
+      status.textContent = form.dataset.errorLabel;
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(value);
+      status.textContent = form.dataset.copiedLabel;
+    } catch {
+      // Plain HTTP and some browsers cannot write to the clipboard. The
+      // protected POST did succeed: keep the value available for manual copy.
+      output.textContent = value;
+      output.hidden = false;
+      visible = true;
+      show.textContent = form.dataset.hideLabel;
+      status.textContent = form.dataset.manualCopyLabel;
+    }
+  });
+});
+""".strip()
 
 STYLESHEET = """
 :root {
@@ -107,6 +189,7 @@ button {
   color: #dff6e6;
   user-select: all;
 }
+.token-output[hidden] { display: none; }
 pre { overflow-x: auto; background: #17231c; color: #dff6e6; padding: 1rem; }
 dt { font-weight: 700; }
 dd { margin: 0 0 .7rem; overflow-wrap: anywhere; }
@@ -300,7 +383,18 @@ _ZH_CN: dict[str, str] = {
     "Current Section grants": "当前分区授权",
     "No Section grants for this identity.": "此身份暂无分区授权。",
     _GRANT_SCOPE_HELP: ("这里展示的是现有的单知识库、分区级授权，不是跨知识库权限。"),
-    _CREDENTIAL_META_HELP: ("这里仅展示元数据；现有 Token 明文无法再次显示。"),
+    _CREDENTIAL_META_HELP: ("只有主 Token 会话可查看新签发且仍有效的 Agent Token；旧值无法还原。"),
+    "Show Token": "显示 Token",
+    "Hide Token": "隐藏 Token",
+    "Copy Token": "复制 Token",
+    "Token copied.": "Token 已复制。",
+    "Clipboard unavailable. Select the displayed Token to copy it manually.": (
+        "剪贴板不可用。请选中显示的 Token 手动复制。"
+    ),
+    "Token could not be revealed. Refresh this page and check its status.": (
+        "无法显示 Token。请刷新页面并检查凭据状态。"
+    ),
+    "This old Token cannot be recovered.": "此旧 Token 无法还原。",
     "Status": "状态",
     "Back to activity": "返回近况",
     "Occurred": "发生时间",
@@ -685,7 +779,13 @@ def _content_activity_timeline(
     return f'<section class="card"><h2>{localize(locale, "Content activity")}</h2>{body}</section>'
 
 
-def caller_page(csrf_token: str, view: CallerView, *, locale: AdminLocale = "en") -> str:
+def caller_page(
+    csrf_token: str,
+    view: CallerView,
+    *,
+    locale: AdminLocale = "en",
+    allow_reveal: bool = False,
+) -> str:
     status = "Identity disabled" if view.disabled_at is not None else "Identity active"
     now_micros = int(datetime.now(UTC).timestamp() * 1_000_000)
     credentials = []
@@ -717,6 +817,45 @@ def caller_page(csrf_token: str, view: CallerView, *, locale: AdminLocale = "en"
             if item.rotated_at is not None
             else localize(locale, "Not rotated")
         )
+        reveal = ""
+        if view.kind == "agent" and allow_reveal and credential_status == "Credential active":
+            if item.token_tail is None:
+                reveal = (
+                    f'<p class="meta">{localize(locale, "This old Token cannot be recovered.")}</p>'
+                )
+            else:
+                path = (
+                    f"/admin/libraries/{view.library_id}/callers/{view.id}"
+                    f"/credentials/{item.id}/reveal"
+                )
+                attributes = " ".join(
+                    f'data-{key}-label="{escape(localize(locale, label), quote=True)}"'
+                    for key, label in (
+                        ("show", "Show Token"),
+                        ("hide", "Hide Token"),
+                        (
+                            "error",
+                            "Token could not be revealed. Refresh this page and check its status.",
+                        ),
+                        ("copied", "Token copied."),
+                        (
+                            "manual-copy",
+                            "Clipboard unavailable. Select the displayed Token "
+                            "to copy it manually.",
+                        ),
+                    )
+                )
+                reveal = (
+                    f'<form class="token-reveal" method="post" action="{escape(path, quote=True)}" '
+                    f"{attributes}>{_csrf(escape(csrf_token, quote=True))}"
+                    f"<code>plb1…{escape(item.token_tail)}</code> "
+                    '<button class="token-show" type="button">'
+                    f"{localize(locale, 'Show Token')}</button> "
+                    '<button class="token-copy" type="button">'
+                    f"{localize(locale, 'Copy Token')}</button>"
+                    '<code class="secret token-output" hidden></code>'
+                    '<span role="status" aria-live="polite"></span></form>'
+                )
         credentials.append(
             '<li class="credential-item">'
             '<p class="credential-summary">'
@@ -733,7 +872,7 @@ def caller_page(csrf_token: str, view: CallerView, *, locale: AdminLocale = "en"
             f"<dd>{revoked}</dd>"
             f"<dt>{localize(locale, 'Rotated')}</dt>"
             f"<dd>{rotated}</dd>"
-            "</dl></details></li>"
+            f"</dl></details>{reveal}</li>"
         )
     credential_list = (
         f'<ul class="item-list">{"".join(credentials)}</ul>'
@@ -775,6 +914,7 @@ def caller_page(csrf_token: str, view: CallerView, *, locale: AdminLocale = "en"
         f"{escape(view.id, quote=True)}",
         body,
         crumbs=((localize(locale, "Libraries"), "/admin/libraries"),),
+        script_src="/admin/reveal.js" if allow_reveal and view.kind == "agent" else None,
     )
 
 
@@ -1483,6 +1623,7 @@ def _browser_document(
     body: str,
     *,
     crumbs: tuple[tuple[str, str], ...] = (),
+    script_src: str | None = None,
 ) -> str:
     links = "".join(
         f'<a href="{escape(href, quote=True)}">{escape(label)}</a><span aria-hidden="true">/</span>'
@@ -1497,7 +1638,7 @@ def _browser_document(
         f'{links}<span aria-current="page">{heading}</span></nav>'
         f"<h1>{heading}</h1>{body}</main></div>"
     )
-    return _document(title, content, locale)
+    return _document(title, content, locale, script_src=script_src)
 
 
 def _sidebar(locale: AdminLocale, *, current: str) -> str:
@@ -1595,7 +1736,14 @@ def _language_switch(locale: AdminLocale, path: str) -> str:
     )
 
 
-def _document(title: str, content: str, locale: AdminLocale) -> str:
+def _document(
+    title: str, content: str, locale: AdminLocale, *, script_src: str | None = None
+) -> str:
+    script = (
+        ""
+        if script_src is None
+        else f'<script src="{escape(script_src, quote=True)}" defer></script>'
+    )
     return f"""<!doctype html>
 <html lang="{locale}">
 <head>
@@ -1604,7 +1752,7 @@ def _document(title: str, content: str, locale: AdminLocale) -> str:
   <title>{escape(title)} · PatchouliLib</title>
   <link rel="stylesheet" href="/admin/style.css">
 </head>
-<body>{content}</body>
+<body>{content}{script}</body>
 </html>
 """
 
