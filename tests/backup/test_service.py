@@ -34,6 +34,7 @@ from patchouli_lib.backup import (
 )
 from patchouli_lib.backup import service as backup_service
 from patchouli_lib.backup.manifest import (
+    FILE_SET_SCHEMA_REVISION,
     LEGACY_SCHEMA_REVISION,
     LIFECYCLE_SCHEMA_REVISION,
     MAX_MANIFEST_BYTES,
@@ -347,7 +348,7 @@ def test_0012_bundle_remains_explicitly_verifiable_and_restorable(
     validate_database(restored, schema_revision=LIFECYCLE_SCHEMA_REVISION)
 
 
-def test_0013_backup_restores_exact_binary_file_set(
+def test_0014_backup_restores_exact_binary_file_set(
     complete_engine: Engine,
     tmp_path: Path,
 ) -> None:
@@ -395,7 +396,70 @@ def test_0013_backup_restores_exact_binary_file_set(
         ).fetchone() == (1,)
 
 
-def test_0013_bundle_rejects_forged_snapshot_digest_even_with_rehashed_outer_manifest(
+def test_0013_binary_file_set_bundle_remains_verifiable_and_restorable(
+    complete_engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_database = complete_engine.url.database
+    assert source_database is not None
+    source_path = Path(source_database)
+    command.downgrade(_config(source_path, monkeypatch), FILE_SET_SCHEMA_REVISION)
+    revision_id, files = _append_binary_file_set(complete_engine)
+
+    bundle = tmp_path / "historical-file-set-bundle"
+    bundle.mkdir()
+    database = bundle / BACKUP_FILENAME
+    with closing(sqlite3.connect(source_path)) as source:
+        journal_mode = source.execute("PRAGMA journal_mode").fetchone()[0]
+        with closing(sqlite3.connect(database)) as destination:
+            source.backup(destination)
+            destination.execute("PRAGMA journal_mode = DELETE")
+            destination.commit()
+    data = database.read_bytes()
+    artifact = identity()
+    manifest = BackupManifestV1(
+        schema_version=1,
+        backup_filename=BACKUP_FILENAME,
+        byte_size=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        created_at="2026-08-13T12:34:56.123456Z",
+        app_version=APP_VERSION,
+        schema_revision=FILE_SET_SCHEMA_REVISION,
+        sqlite_version=sqlite3.sqlite_version,
+        source_journal_mode=journal_mode,
+        artifact_identity=artifact.identity,
+        artifact_digest=artifact.digest,
+    )
+    (bundle / MANIFEST_FILENAME).write_bytes(manifest.canonical_bytes())
+
+    with pytest.raises(BackupManifestError):
+        verify_backup_bundle(bundle, app_version=APP_VERSION)
+    assert (
+        verify_backup_bundle(
+            bundle, app_version=APP_VERSION, schema_revision=FILE_SET_SCHEMA_REVISION
+        )
+        == manifest
+    )
+    restored = tmp_path / "historical-file-set-restored.sqlite"
+    restore_backup(
+        bundle, restored, app_version=APP_VERSION, schema_revision=FILE_SET_SCHEMA_REVISION
+    )
+    assert validate_database(
+        restored, schema_revision=FILE_SET_SCHEMA_REVISION
+    ).schema_revision == (FILE_SET_SCHEMA_REVISION)
+    with closing(sqlite3.connect(restored)) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            FILE_SET_SCHEMA_REVISION,
+        )
+        restored_files = connection.execute(
+            "SELECT filename, content_bytes FROM revision_files WHERE revision_id = ?",
+            (revision_id,),
+        ).fetchall()
+        assert sorted(restored_files) == sorted(files)
+
+
+def test_0014_bundle_rejects_forged_snapshot_digest_even_with_rehashed_outer_manifest(
     complete_engine: Engine,
     tmp_path: Path,
 ) -> None:

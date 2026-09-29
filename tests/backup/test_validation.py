@@ -17,6 +17,7 @@ from patchouli_lib.auth.tokens import generate_token
 from patchouli_lib.backup import BACKUP_FILENAME, BackupDatabaseError, validate_database
 from patchouli_lib.backup import validation as backup_validation
 from patchouli_lib.backup.manifest import (
+    FILE_SET_SCHEMA_REVISION,
     INTERMEDIATE_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
@@ -708,7 +709,12 @@ def test_0008_validation_rejects_missing_seal_or_guard(
 
 @pytest.mark.parametrize(
     "schema_revision",
-    [PREVIOUS_SCHEMA_REVISION, INTERMEDIATE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION],
+    [
+        PREVIOUS_SCHEMA_REVISION,
+        INTERMEDIATE_SCHEMA_REVISION,
+        FILE_SET_SCHEMA_REVISION,
+        SUPPORTED_SCHEMA_REVISION,
+    ],
 )
 def test_sealed_validation_rejects_extra_file_even_if_write_triggers_were_bypassed(
     complete_engine: Engine,

@@ -195,6 +195,74 @@ class SectionGrant(Base):
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
+class CredentialLibraryPolicy(Base):
+    """Explicit opt-in to Library grants; absence retains legacy Section policy."""
+
+    __tablename__ = "auth_credential_library_policies"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["credential_id", "caller_id", "home_library_id"],
+            ["auth_credentials.id", "auth_credentials.caller_id", "auth_credentials.library_id"],
+            name="fk_auth_credential_library_policies_exact_credential",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("mode = 'library_grants'", name="ck_auth_credential_library_policies_mode"),
+        CheckConstraint(
+            "typeof(created_at) = 'integer' AND created_at >= 0",
+            name="ck_auth_credential_library_policies_created_at",
+        ),
+    )
+
+    credential_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    caller_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    home_library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class CredentialLibraryGrant(Base):
+    """Read and write are independent per target Library and exact credential."""
+
+    __tablename__ = "auth_credential_library_grants"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["credential_id", "caller_id", "home_library_id"],
+            [
+                "auth_credential_library_policies.credential_id",
+                "auth_credential_library_policies.caller_id",
+                "auth_credential_library_policies.home_library_id",
+            ],
+            name="fk_auth_credential_library_grants_exact_policy",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["target_library_id"],
+            ["libraries.id"],
+            name="fk_auth_credential_library_grants_target_library",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "action IN ('read', 'write')", name="ck_auth_credential_library_grants_action"
+        ),
+        CheckConstraint(
+            "typeof(created_at) = 'integer' AND created_at >= 0",
+            name="ck_auth_credential_library_grants_created_at",
+        ),
+        Index(
+            "ix_auth_credential_library_grants_target_action",
+            "target_library_id",
+            "action",
+        ),
+    )
+
+    credential_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    caller_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    home_library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    target_library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    action: Mapped[str] = mapped_column(String(5), primary_key=True)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
 class AuditEvent(Base):
     __tablename__ = "auth_audit_events"
     __table_args__ = (

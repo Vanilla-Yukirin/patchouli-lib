@@ -15,6 +15,7 @@ from pydantic import Field
 
 from patchouli_lib.backup.errors import BackupDatabaseError
 from patchouli_lib.backup.manifest import (
+    FILE_SET_SCHEMA_REVISION,
     INTERMEDIATE_SCHEMA_REVISION,
     LEGACY_SCHEMA_REVISION,
     LIFECYCLE_SCHEMA_REVISION,
@@ -337,6 +338,27 @@ _EXPECTED_SQL_HASHES_0013: Final = _EXPECTED_SQL_HASHES_0012 | {
         "e44829a4bfd0ea7342a066c9f711bdb3fdac9c458be58b4829b24adf861fce36"
     ),
 }
+_EXPECTED_SQL_HASHES_0014: Final = _EXPECTED_SQL_HASHES_0013 | {
+    # Generated from an empty Alembic 0014 database with _canonical_schema_sql.
+    ("index", "ix_auth_credential_library_grants_target_action"): (
+        "150e3351cc94c75358369213a016a2b3828501093677a22dfc0b2280a5bc0dd1"
+    ),
+    ("table", "auth_credential_library_grants"): (
+        "ee902f27eaeeafd61f4b1aab7ae464fe9f157ce0e3e965d1f8b8f7cc0b2c5b55"
+    ),
+    ("table", "auth_credential_library_policies"): (
+        "7de28d8ea6fdc62a429f2e323ddfa96e3ccf17575460551a818111de2798b2b8"
+    ),
+    ("trigger", "trg_auth_credential_library_policies_agent_only"): (
+        "013036af08830d969d800144e401545efbedb5475bb9f93bff90e45d0b596649"
+    ),
+    ("trigger", "trg_auth_credential_library_policies_immutable_delete"): (
+        "13c3660c0a9ae4599dab04576256a97dda49a2ac147a6308568cbdec7c50841b"
+    ),
+    ("trigger", "trg_auth_credential_library_policies_immutable_update"): (
+        "4e565589ff5232218294b3b5a8242a9b99d04fe242a78b4cedb0e1297ffb32d5"
+    ),
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
     PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
@@ -344,8 +366,12 @@ _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     TAG_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0010,
     OCCURRENCE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0011,
     LIFECYCLE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0012,
-    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0013,
+    FILE_SET_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0013,
+    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0014,
 }
+_FILE_SET_REVISIONS: Final = frozenset({FILE_SET_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION})
+_LIFECYCLE_REVISIONS: Final = _FILE_SET_REVISIONS | {LIFECYCLE_SCHEMA_REVISION}
+_OCCURRENCE_REVISIONS: Final = _LIFECYCLE_REVISIONS | {OCCURRENCE_SCHEMA_REVISION}
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,7 +495,7 @@ def _require_page_graph(connection: sqlite3.Connection, schema_revision: str) ->
     for content, size, digest in connection.execute(
         "SELECT content_md, content_size_bytes, content_sha256 FROM revisions"
     ):
-        if schema_revision == SUPPORTED_SCHEMA_REVISION and (content, size, digest) == (
+        if schema_revision in _FILE_SET_REVISIONS and (content, size, digest) == (
             None,
             None,
             None,
@@ -600,11 +626,7 @@ def _require_occurrence_graph(
 ) -> dict[tuple[str, bytes], int]:
     """Validate the complete correction chain and return each Page's ID time."""
 
-    if schema_revision not in {
-        OCCURRENCE_SCHEMA_REVISION,
-        LIFECYCLE_SCHEMA_REVISION,
-        SUPPORTED_SCHEMA_REVISION,
-    }:
+    if schema_revision not in _OCCURRENCE_REVISIONS:
         return {}
     if _one_integer(connection, "SELECT count(*) FROM page_occurrence_correction_guards"):
         raise BackupDatabaseError
@@ -937,7 +959,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection) -> None:
 def _require_revision_files(connection: sqlite3.Connection, schema_revision: str) -> None:
     """Check every file and the revision-specific complete snapshot policy."""
 
-    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+    if schema_revision in _FILE_SET_REVISIONS:
         _require_manifested_revision_files(connection)
         return
 
@@ -1132,7 +1154,7 @@ def _require_revision_seals(connection: sqlite3.Connection) -> None:
         raise BackupDatabaseError
 
 
-def _require_auth_graph(connection: sqlite3.Connection) -> None:
+def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) -> None:
     invalid_bootstrap = _one_integer(
         connection,
         "SELECT count(*) FROM operator_bootstrap_markers AS m "
@@ -1153,6 +1175,19 @@ def _require_auth_graph(connection: sqlite3.Connection) -> None:
     )
     if invalid_grants:
         raise BackupDatabaseError
+
+    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+        invalid_library_policies = _one_integer(
+            connection,
+            "SELECT count(*) FROM auth_credential_library_policies AS p "
+            "LEFT JOIN auth_credentials AS k ON k.id = p.credential_id "
+            "AND k.caller_id = p.caller_id AND k.library_id = p.home_library_id "
+            "LEFT JOIN auth_callers AS c ON c.id = p.caller_id "
+            "AND c.library_id = p.home_library_id "
+            "WHERE k.id IS NULL OR c.id IS NULL OR c.kind != 'agent'",
+        )
+        if invalid_library_policies:
+            raise BackupDatabaseError
 
     rotations: dict[str, tuple[str, str, str | None, int | None, int | None, int]] = {}
     for (
@@ -1637,12 +1672,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
 
         if method == "PATCH":
             if (
-                schema_revision
-                not in {
-                    OCCURRENCE_SCHEMA_REVISION,
-                    LIFECYCLE_SCHEMA_REVISION,
-                    SUPPORTED_SCHEMA_REVISION,
-                }
+                schema_revision not in _OCCURRENCE_REVISIONS
                 or route != CORRECT_OCCURRENCE_ROUTE_TEMPLATE
                 or status != 200
             ):
@@ -1729,7 +1759,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
             continue
 
         if route in {DELETE_PAGE_ROUTE_TEMPLATE, RESTORE_PAGE_ROUTE_TEMPLATE}:
-            if schema_revision not in {LIFECYCLE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
+            if schema_revision not in _LIFECYCLE_REVISIONS:
                 raise BackupDatabaseError
             _require_lifecycle_replay(
                 connection,
@@ -1747,7 +1777,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
             continue
 
         if route in {FILE_SET_CREATE_ROUTE_TEMPLATE, FILE_SET_APPEND_ROUTE_TEMPLATE}:
-            if schema_revision != SUPPORTED_SCHEMA_REVISION:
+            if schema_revision not in _FILE_SET_REVISIONS:
                 raise BackupDatabaseError
             _require_file_set_replay(
                 connection,
@@ -1799,11 +1829,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
         ):
             raise BackupDatabaseError
         response_occurrence = row[4]
-        if schema_revision in {
-            OCCURRENCE_SCHEMA_REVISION,
-            LIFECYCLE_SCHEMA_REVISION,
-            SUPPORTED_SCHEMA_REVISION,
-        }:
+        if schema_revision in _OCCURRENCE_REVISIONS:
             corrections = connection.execute(
                 "SELECT old_occurred_at, new_occurred_at, at_revision_number "
                 "FROM page_occurrence_corrections WHERE library_id = ? AND page_uid = ? "
@@ -1908,7 +1934,7 @@ def _validate_connection(
     ):
         raise BackupDatabaseError
     _require_page_graph(connection, schema_revision)
-    if schema_revision in {LIFECYCLE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
+    if schema_revision in _LIFECYCLE_REVISIONS:
         _require_lifecycle_graph(connection)
     if schema_revision not in {
         LEGACY_SCHEMA_REVISION,
@@ -1916,7 +1942,7 @@ def _validate_connection(
         INTERMEDIATE_SCHEMA_REVISION,
     }:
         _require_tag_graph(connection)
-    _require_auth_graph(connection)
+    _require_auth_graph(connection, schema_revision)
     _require_idempotency_graph(connection, schema_revision)
     return DatabaseValidationReport(
         schema_revision=schema_revision,

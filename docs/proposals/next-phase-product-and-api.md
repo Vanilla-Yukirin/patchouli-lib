@@ -217,6 +217,10 @@ HttpOnly、SameSite 会话 Cookie、同源检查和 CSRF 防护，不把管理 T
 在结果返回时过滤。当前单 Library＋Section grant 的旧 Token 不得在迁移时悄然扩大
 为所有 Library 可读写；需要保留旧语义直到轮换，或由管理员显式重新签发。
 
+开发分支已增加 0014 的逐凭据 Library 策略与授权表作为**未激活底座**，并让备份
+校验识别 0013 和 0014。现有认证服务和路由仍执行旧的 Section 授权；管理界面尚无
+Library 开关，不能据此认为跨 Library Token 已可用或已经部署。
+
 已有 `/api/v1/auth/whoami` 可验证 Token，并已增补用于人类识别的调用方名称和说明；
 它当前仍返回 Section 授权。下一阶段目标是在不暴露 Token 的前提下返回设备／Agent
 身份、凭据状态与有效的 Library 权限。`capabilities` 仍用于识别服务功能；调用方

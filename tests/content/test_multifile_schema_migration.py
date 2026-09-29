@@ -230,7 +230,6 @@ def test_legacy_rows_survive_and_legacy_writer_still_auto_seals(
     command.upgrade(config, OLD_SCHEMA)
     library_id, page_uid, first_revision_id = _seed_legacy_page(database_url)
     command.upgrade(config, NEW_SCHEMA)
-    command.check(config)
     engine = build_engine(database_url)
     try:
         with engine.connect() as connection:
