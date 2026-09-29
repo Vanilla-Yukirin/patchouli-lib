@@ -7,6 +7,8 @@ from sqlalchemy import Connection, Engine, create_engine, event, text
 from sqlalchemy.engine import make_url
 
 SQLITE_BUSY_TIMEOUT_MS = 5_000
+# Keep this in sync with Alembic's single head. tests/test_database.py verifies it.
+CURRENT_SCHEMA_REVISION = "20260929_0014"
 
 
 class DatabaseNotReadyError(RuntimeError):
@@ -67,10 +69,15 @@ def check_database(engine: Engine) -> None:
                 "SELECT sqlite_compileoption_used('ENABLE_FTS5')"
             ).scalar_one()
             foreign_keys_enabled = connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one()
+            schema_revision = connection.exec_driver_sql(
+                "SELECT version_num FROM alembic_version"
+            ).scalar_one()
     except Exception as exc:
-        raise DatabaseNotReadyError("Database connectivity check failed.") from exc
+        raise DatabaseNotReadyError("Database readiness check failed.") from exc
 
     if not fts5_enabled:
         raise DatabaseNotReadyError("SQLite was built without FTS5 support.")
     if foreign_keys_enabled != 1:
         raise DatabaseNotReadyError("SQLite foreign-key enforcement is disabled.")
+    if schema_revision != CURRENT_SCHEMA_REVISION:
+        raise DatabaseNotReadyError("Database schema revision is not current.")

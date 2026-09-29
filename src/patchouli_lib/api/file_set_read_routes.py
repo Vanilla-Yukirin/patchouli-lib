@@ -1,7 +1,6 @@
-"""Draft protected routes for current and exact historical Page file-set reads.
+"""Protected routes for current and exact historical Page file-set reads.
 
-This router is not registered by the application until the unified file-set
-HTTP contract and its migration gates are reviewed. It has no write routes.
+These routes expose only verified file snapshots and never mutate Page content.
 """
 
 from __future__ import annotations

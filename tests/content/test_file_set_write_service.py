@@ -127,7 +127,14 @@ def test_multi_file_append_replay_and_identical_noop(
         assert result.audit_event is not None
         assert result.page.current_revision_id == FIRST_REVISION
         body = json.loads(result.response.response_body)
-        assert [entry["name"] for entry in body["files"]] == ["content.md", "figure.png"]
+        assert body["files"] == [
+            {
+                "filename": entry.name,
+                "size_bytes": entry.content_size_bytes,
+                "content_sha256": entry.content_sha256.hex(),
+            }
+            for entry in result.manifest.files
+        ]
         assert body["snapshot_sha256"] == result.manifest.snapshot_sha256.hex()
         assert archive_scope.token.value.encode() not in result.response.response_body
         assert _counts(connection) == (2, 2, 1, 1)
@@ -156,6 +163,7 @@ def test_multi_file_append_replay_and_identical_noop(
         assert noop.audit_event is None
         assert noop.response.response_etag == result.response.response_etag
         assert json.loads(noop.response.response_body)["changed"] is False
+        assert json.loads(noop.response.response_body)["files"] == body["files"]
         assert _counts(connection) == (2, 2, 1, 2)
 
     with content_engine.connect() as connection:

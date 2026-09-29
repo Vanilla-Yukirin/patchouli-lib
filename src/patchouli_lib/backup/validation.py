@@ -1350,9 +1350,9 @@ def _require_lifecycle_replay(
 
 
 class _FileSetReplayFile(ContentSchema):
-    name: str
+    filename: str
     size_bytes: int = Field(ge=0)
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class _FileSetCreateReplayBody(ContentSchema):
@@ -1522,7 +1522,9 @@ def _require_file_set_replay(
         or (format_ == "legacy_markdown" and snapshot is not None)
     ):
         raise BackupDatabaseError
-    response_files = [(entry.name, entry.size_bytes, entry.sha256) for entry in body.files]
+    response_files = [
+        (entry.filename, entry.size_bytes, entry.content_sha256) for entry in body.files
+    ]
     if response_files != [
         (name, size, digest.hex() if type(digest) is bytes else None)
         for name, _content, size, digest in actual_files

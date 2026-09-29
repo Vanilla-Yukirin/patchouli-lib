@@ -123,9 +123,9 @@ class FileSetCreateCommand(ContentSchema):
 
 
 class _FileSummary(ContentSchema):
-    name: str
+    filename: str
     size_bytes: int = Field(ge=0)
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class _CreateBody(ContentSchema):
@@ -400,9 +400,9 @@ class FileSetCreateService:
             snapshot_sha256=manifest.snapshot_sha256.hex(),
             files=tuple(
                 _FileSummary(
-                    name=entry.name,
+                    filename=entry.name,
                     size_bytes=entry.content_size_bytes,
-                    sha256=entry.content_sha256.hex(),
+                    content_sha256=entry.content_sha256.hex(),
                 )
                 for entry in manifest.files
             ),

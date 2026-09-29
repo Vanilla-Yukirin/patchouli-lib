@@ -5,11 +5,14 @@ from time import monotonic
 from typing import cast
 
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import Engine, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 import patchouli_lib.database as database_module
 from patchouli_lib.database import (
+    CURRENT_SCHEMA_REVISION,
     SQLITE_BUSY_TIMEOUT_MS,
     DatabaseNotReadyError,
     build_engine,
@@ -64,10 +67,17 @@ class SimulatedCancellation(BaseException):
     pass
 
 
-def test_in_memory_engine_is_ready() -> None:
+def test_runtime_schema_revision_matches_alembic_head() -> None:
+    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+
+    assert ScriptDirectory.from_config(config).get_heads() == [CURRENT_SCHEMA_REVISION]
+
+
+def test_in_memory_engine_without_migrations_is_not_ready() -> None:
     engine = build_engine("sqlite:///:memory:")
     try:
-        check_database(engine)
+        with pytest.raises(DatabaseNotReadyError, match="readiness check failed"):
+            check_database(engine)
     finally:
         engine.dispose()
 
@@ -75,7 +85,7 @@ def test_in_memory_engine_is_ready() -> None:
 def test_database_failure_is_wrapped() -> None:
     engine = cast(Engine, BrokenConnectable())
 
-    with pytest.raises(DatabaseNotReadyError, match="connectivity check failed"):
+    with pytest.raises(DatabaseNotReadyError, match="readiness check failed"):
         check_database(engine)
 
 

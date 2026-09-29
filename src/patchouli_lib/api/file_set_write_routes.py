@@ -1,7 +1,8 @@
-"""Draft unified file-set upload routes; not registered by the application.
+"""Unified file-set upload routes registered by the development application.
 
 One Markdown file and a flat group of files share the same multipart wire shape.
 The existing single-Markdown Archive routes remain compatibility endpoints.
+This proposed API has not been merged or deployed.
 """
 
 from __future__ import annotations
@@ -10,11 +11,12 @@ import json
 import re
 from collections.abc import Callable, Sequence
 from functools import partial
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import anyio
-from fastapi import APIRouter, Request
-from pydantic import TypeAdapter, ValidationError
+from fastapi import APIRouter, Request, Security
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from sqlalchemy import Connection, Engine
 from starlette.responses import Response
 
@@ -58,10 +60,16 @@ from patchouli_lib.content.file_set_write_service import (
 from patchouli_lib.content.schemas import (
     ArchiveIdempotencyKey,
     ArchiveSourceInput,
+    PageId,
+    RevisionId,
     StrongPageETag,
 )
 from patchouli_lib.database import immediate_transaction
-from patchouli_lib.idempotency import IdempotencyConflictError, digest_idempotency_key
+from patchouli_lib.idempotency import (
+    MAX_IDEMPOTENCY_KEY_BYTES,
+    IdempotencyConflictError,
+    digest_idempotency_key,
+)
 from patchouli_lib.idempotency.schemas import OriginalResponse, ReplayResponse
 from patchouli_lib.identifiers import InvalidPageIdError, parse_occurrence_time
 from patchouli_lib.library.schemas import OpaqueId
@@ -72,6 +80,159 @@ _PAGE_ETAG_PATTERN = re.compile(rb'^"page-v[12]-[0-9a-f]{64}"$', re.ASCII)
 
 type CreateServiceFactory = Callable[[Connection], FileSetCreateService]
 type WriteServiceFactory = Callable[[Connection], FileSetWriteService]
+
+
+class _DocumentedBearer(HTTPBearer):
+    """Declare the scheme while leaving strict authentication to the route."""
+
+    async def __call__(self, request: Request) -> HTTPAuthorizationCredentials | None:
+        # FastAPI's HTTPBearer parser would collapse duplicate Authorization
+        # headers before the existing strict parser can reject them.
+        return None
+
+
+_DOCUMENTED_BEARER = _DocumentedBearer(scheme_name="BearerAuth", auto_error=False)
+
+
+class _FileSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str
+    size_bytes: int = Field(ge=0)
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class _CreateSuccessResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    section_id: OpaqueId
+    book_id: OpaqueId
+    page_id: PageId
+    revision_id: RevisionId
+    revision_number: Literal[1]
+    occurred_at: str = Field(json_schema_extra={"format": "date-time"})
+    occurrence_defaulted: bool
+    snapshot_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    files: list[_FileSummaryResponse] = Field(min_length=1)
+
+
+class _ReviseSuccessResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    changed: bool
+    section_id: OpaqueId
+    page_id: PageId
+    revision_id: RevisionId
+    revision_number: int = Field(ge=1)
+    snapshot_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    files: list[_FileSummaryResponse] = Field(min_length=1)
+
+
+_COMMON_SUCCESS_HEADERS: dict[str, Any] = {
+    "ETag": {
+        "required": True,
+        "description": "Strong Page ETag; a replayed response may contain a historical value.",
+        "schema": {"type": "string", "pattern": r'^"page-v[12]-[0-9a-f]{64}"$'},
+    },
+    REQUEST_ID_HEADER: {"required": True, "schema": {"type": "string"}},
+    "Cache-Control": {
+        "required": True,
+        "schema": {"type": "string", "const": PROTECTED_CACHE_CONTROL},
+    },
+    "Idempotency-Replayed": {
+        "description": "Present only when a successful request is replayed.",
+        "schema": {"type": "string", "const": "true"},
+    },
+}
+
+_IDEMPOTENCY_PARAMETER: dict[str, Any] = {
+    "name": "Idempotency-Key",
+    "in": "header",
+    "required": True,
+    "description": "Exactly one bounded, visible-ASCII key is required.",
+    "schema": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": MAX_IDEMPOTENCY_KEY_BYTES,
+        "pattern": r"^[!-~]+$",
+    },
+}
+_IF_MATCH_PARAMETER: dict[str, Any] = {
+    "name": "If-Match",
+    "in": "header",
+    "required": True,
+    "description": "The current strong Page ETag; required for revision writes.",
+    "schema": {"type": "string", "pattern": r'^"page-v[12]-[0-9a-f]{64}"$'},
+}
+
+_SOURCE_METADATA_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "kind": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "description": "Non-empty source kind without leading or trailing whitespace.",
+        },
+        "locator": {"type": ["string", "null"], "minLength": 1},
+        "captured_at": {"type": ["integer", "null"], "description": "UTC microseconds."},
+    },
+    "required": ["kind"],
+    "additionalProperties": False,
+}
+
+
+def _multipart_request_body(
+    metadata_properties: dict[str, Any], required: list[str]
+) -> dict[str, Any]:
+    """Describe the wire format without invoking FastAPI's form parser."""
+
+    return {
+        "requestBody": {
+            "required": True,
+            "description": (
+                "The first part must be metadata containing UTF-8 JSON (without a filename), "
+                "followed by one or more repeated file parts with UTF-8 flat filenames "
+                "and raw bytes."
+            ),
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "metadata": {
+                                "type": "object",
+                                "properties": metadata_properties,
+                                "required": required,
+                                "additionalProperties": False,
+                            },
+                            "file": {
+                                "type": "array",
+                                "items": {"type": "string", "format": "binary"},
+                                "minItems": 1,
+                            },
+                        },
+                        "required": ["metadata", "file"],
+                        "additionalProperties": False,
+                    },
+                    "encoding": {"metadata": {"contentType": "application/json"}},
+                }
+            },
+        }
+    }
+
+
+_CREATE_MULTIPART_OPENAPI = _multipart_request_body(
+    {
+        "title": {"type": "string", "minLength": 1},
+        "source": _SOURCE_METADATA_SCHEMA,
+        "occurred_at": {"type": "string", "format": "date-time"},
+    },
+    ["title", "source"],
+)
+_REVISE_MULTIPART_OPENAPI = _multipart_request_body({"source": _SOURCE_METADATA_SCHEMA}, ["source"])
+_CREATE_MULTIPART_OPENAPI["parameters"] = [_IDEMPOTENCY_PARAMETER]
+_REVISE_MULTIPART_OPENAPI["parameters"] = [_IDEMPOTENCY_PARAMETER, _IF_MATCH_PARAMETER]
 
 
 class _DuplicateMetadataKey(ValueError):
@@ -311,6 +472,21 @@ def create_file_set_write_router(
     @router.post(
         "/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages",
         status_code=201,
+        dependencies=[Security(_DOCUMENTED_BEARER)],
+        response_model=_CreateSuccessResponse,
+        responses={
+            201: {
+                "headers": {
+                    **_COMMON_SUCCESS_HEADERS,
+                    "Location": {
+                        "required": True,
+                        "description": "Exact manifest URL for the created Revision.",
+                        "schema": {"type": "string"},
+                    },
+                }
+            }
+        },
+        openapi_extra=_CREATE_MULTIPART_OPENAPI,
     )
     async def create_page(
         library_id: str,
@@ -365,6 +541,10 @@ def create_file_set_write_router(
     @router.post(
         "/libraries/{library_id}/sections/{section_id}/pages/{page_id}/file-revisions",
         status_code=200,
+        dependencies=[Security(_DOCUMENTED_BEARER)],
+        response_model=_ReviseSuccessResponse,
+        responses={200: {"headers": _COMMON_SUCCESS_HEADERS}},
+        openapi_extra=_REVISE_MULTIPART_OPENAPI,
     )
     async def revise_page(
         library_id: str,

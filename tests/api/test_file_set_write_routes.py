@@ -251,6 +251,142 @@ def _counts(scope: FileSetHttp) -> tuple[int, ...]:
         )
 
 
+def test_write_routes_describe_distinct_json_metadata_and_repeated_binary_files(
+    file_set_http: FileSetHttp,
+) -> None:
+    openapi = _app(file_set_http).openapi()
+    paths = openapi["paths"]
+    assert openapi["components"]["securitySchemes"]["BearerAuth"] == {
+        "type": "http",
+        "scheme": "bearer",
+    }
+    create_path = "/api/v1/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages"
+    revise_path = (
+        "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/file-revisions"
+    )
+    for path, required_metadata, metadata_fields in (
+        (create_path, {"title", "source"}, {"title", "source", "occurred_at"}),
+        (revise_path, {"source"}, {"source"}),
+    ):
+        body = paths[path]["post"]["requestBody"]
+        assert body["required"] is True
+        assert "first part" in body["description"]
+        assert set(body["content"]) == {"multipart/form-data"}
+        multipart = body["content"]["multipart/form-data"]
+        assert multipart["encoding"]["metadata"]["contentType"] == "application/json"
+        schema = multipart["schema"]
+        assert set(schema["required"]) == {"metadata", "file"}
+        assert schema["additionalProperties"] is False
+        assert set(schema["properties"]) == {"metadata", "file"}
+        metadata = schema["properties"]["metadata"]
+        assert set(metadata["required"]) == required_metadata
+        assert set(metadata["properties"]) == metadata_fields
+        assert metadata["additionalProperties"] is False
+        source = metadata["properties"]["source"]
+        assert source["required"] == ["kind"]
+        assert set(source["properties"]) == {"kind", "locator", "captured_at"}
+        assert source["properties"]["captured_at"]["type"] == ["integer", "null"]
+        assert source["additionalProperties"] is False
+        files = schema["properties"]["file"]
+        assert files["type"] == "array"
+        assert files["minItems"] == 1
+        assert files["items"] == {"type": "string", "format": "binary"}
+        operation = paths[path]["post"]
+        assert operation["security"] == [{"BearerAuth": []}]
+        headers = {
+            parameter["name"]: parameter
+            for parameter in operation["parameters"]
+            if parameter["in"] == "header"
+        }
+        assert set(headers) == (
+            {"Idempotency-Key", "If-Match"} if path == revise_path else {"Idempotency-Key"}
+        )
+        assert all(parameter["required"] is True for parameter in headers.values())
+        assert headers["Idempotency-Key"]["schema"]["maxLength"] == 256
+        if path == revise_path:
+            assert "page-v" in headers["If-Match"]["schema"]["pattern"]
+        status = "200" if path == revise_path else "201"
+        success = operation["responses"][status]
+        assert set(success["content"]) == {"application/json"}
+        response_ref = success["content"]["application/json"]["schema"]["$ref"]
+        response_schema = openapi["components"]["schemas"][response_ref.rsplit("/", 1)[-1]]
+        expected_fields = (
+            {
+                "changed",
+                "section_id",
+                "page_id",
+                "revision_id",
+                "revision_number",
+                "snapshot_sha256",
+                "files",
+            }
+            if path == revise_path
+            else {
+                "section_id",
+                "book_id",
+                "page_id",
+                "revision_id",
+                "revision_number",
+                "occurred_at",
+                "occurrence_defaulted",
+                "snapshot_sha256",
+                "files",
+            }
+        )
+        assert set(response_schema["required"]) == expected_fields
+        assert set(response_schema["properties"]) == expected_fields
+        response_headers = success["headers"]
+        assert {"ETag", "Cache-Control", "X-Request-ID", "Idempotency-Replayed"} <= set(
+            response_headers
+        )
+        assert all(
+            response_headers[name]["required"] for name in ("ETag", "Cache-Control", "X-Request-ID")
+        )
+        assert response_headers["Idempotency-Replayed"].get("required") is not True
+        if path == create_path:
+            assert response_headers["Location"]["required"] is True
+        else:
+            assert "Location" not in response_headers
+    assert paths[create_path]["post"]["requestBody"] != paths[revise_path]["post"]["requestBody"]
+
+
+def test_openapi_security_declaration_does_not_replace_strict_runtime_headers(
+    file_set_http: FileSetHttp,
+) -> None:
+    media, body = _multipart(
+        {"title": "Synthetic Page", "source": SOURCE}, (("content.md", b"# Synthetic\n"),)
+    )
+    path = _create_path(file_set_http)
+    with TestClient(_app(file_set_http), raise_server_exceptions=False) as client:
+        missing_auth = client.post(
+            path,
+            headers=[("Idempotency-Key", "missing-auth"), ("Content-Type", media)],
+            content=body,
+        )
+        _problem(missing_auth, 401, "authentication_required")
+        duplicate_auth = client.post(
+            path,
+            headers=[
+                ("Authorization", f"Bearer {file_set_http.writer}"),
+                ("Authorization", f"Bearer {file_set_http.writer}"),
+                ("Idempotency-Key", "duplicate-auth"),
+                ("Content-Type", media),
+            ],
+            content=body,
+        )
+        _problem(duplicate_auth, 401, "invalid_token")
+        missing_key = client.post(
+            path,
+            headers=[
+                ("Authorization", f"Bearer {file_set_http.writer}"),
+                ("Content-Type", media),
+            ],
+            content=body,
+        )
+        _problem(missing_key, 422, "request_validation_failed")
+    assert _counts(file_set_http) == (0, 0, 0, 0, 0, 0)
+
+
 @pytest.mark.parametrize(
     "files",
     [
@@ -270,8 +406,13 @@ def test_all_file_shapes_use_the_same_create_read_download_and_backup_path(
         body = created.json()
         assert body["revision_number"] == 1
         assert body["snapshot_sha256"] == manifest.snapshot_sha256.hex()
-        assert [entry["name"] for entry in body["files"]] == [
-            entry.name for entry in manifest.files
+        assert body["files"] == [
+            {
+                "filename": entry.name,
+                "size_bytes": entry.content_size_bytes,
+                "content_sha256": entry.content_sha256.hex(),
+            }
+            for entry in manifest.files
         ]
         assert created.headers["ETag"].startswith('"page-v2-')
         assert created.headers["Location"].endswith(
@@ -283,9 +424,7 @@ def test_all_file_shapes_use_the_same_create_read_download_and_backup_path(
         )
         assert read.status_code == 200, read.text
         assert read.json()["snapshot_sha256"] == manifest.snapshot_sha256.hex()
-        assert [entry["filename"] for entry in read.json()["files"]] == [
-            entry.name for entry in manifest.files
-        ]
+        assert read.json()["files"] == body["files"]
         for name, content in files:
             download = client.get(
                 f"{created.headers['Location']}/{name}",
@@ -331,6 +470,13 @@ def test_revisions_replay_noop_and_historical_reads_are_exact(
         assert revised.status_code == 200, revised.text
         assert revised.json()["changed"] is True
         assert revised.json()["revision_number"] == 2
+        assert revised.json()["files"] == [
+            {
+                "filename": "content.md",
+                "size_bytes": len(next_files[0][1]),
+                "content_sha256": hashlib.sha256(next_files[0][1]).hexdigest(),
+            }
+        ]
         assert revised.headers["ETag"] != first.headers["ETag"]
         changed_counts = _counts(file_set_http)
         exact_replay = _revise(
@@ -356,6 +502,7 @@ def test_revisions_replay_noop_and_historical_reads_are_exact(
         assert no_change.status_code == 200, no_change.text
         assert no_change.json()["changed"] is False
         assert no_change.json()["revision_number"] == 2
+        assert no_change.json()["files"] == revised.json()["files"]
         assert no_change.headers["ETag"] == revised.headers["ETag"]
         assert _counts(file_set_http) == (
             changed_counts[0],
@@ -379,6 +526,7 @@ def test_revisions_replay_noop_and_historical_reads_are_exact(
             "figure.png",
         ]
         assert [entry["filename"] for entry in new.json()["files"]] == ["content.md"]
+        assert new.json()["files"] == revised.json()["files"]
         assert (
             new.json()["files"][0]["content_sha256"] == hashlib.sha256(next_files[0][1]).hexdigest()
         )

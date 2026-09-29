@@ -39,6 +39,25 @@ from patchouli_lib.identifiers import parse_occurrence_time
 from .test_service import _append_binary_file_set, _create, _legacy_bundle_with_binary_file
 
 
+@pytest.mark.parametrize(
+    "file_entry",
+    [
+        {"name": "content.md", "size_bytes": 1, "sha256": "a" * 64},
+        {
+            "filename": "content.md",
+            "size_bytes": 1,
+            "content_sha256": "a" * 64,
+            "name": "content.md",
+        },
+    ],
+)
+def test_file_set_replay_requires_exact_read_manifest_field_names(
+    file_entry: dict[str, str | int],
+) -> None:
+    with pytest.raises(ValueError):
+        backup_validation._FileSetReplayFile.model_validate(file_entry)
+
+
 def _replace_trigger(
     connection: sqlite3.Connection,
     name: str,

@@ -17,6 +17,7 @@ from sqlalchemy import Engine, event, select
 from patchouli_lib.api import auth_routes as auth_routes_module
 from patchouli_lib.api.auth_contracts import (
     DEFAULT_CAPABILITY_CONFIGURATION,
+    FILE_SET_FEATURE,
     CapabilitiesResponse,
     CapabilityConfiguration,
     WhoAmIResponse,
@@ -371,6 +372,7 @@ def test_router_inventory_and_default_capabilities_match_client_schema(
             "default_page_size": 20,
             "max_page_size": 100,
             "max_query_bytes": 4096,
+            "file_set": None,
         },
         "idempotency": {
             "content_mutations": False,
@@ -400,12 +402,38 @@ def test_integrator_capability_configuration_is_explicit_and_immutable(
 
     parsed = CapabilitiesResponse.model_validate(response.json())
     assert parsed.features == ("archive", "search")
+    assert parsed.limits.file_set is None
     assert parsed.idempotency.content_mutations is True
     assert parsed.idempotency.successful_replay_retention == "indefinite-alpha"
     with pytest.raises(ValidationError):
         configuration.__setattr__("features", ("search",))
     with pytest.raises(ValidationError):
         CapabilityConfiguration(features=("search", "archive"))
+
+
+def test_file_set_limits_are_advertised_only_with_explicit_feature(
+    auth_api: AuthApiFixture,
+) -> None:
+    configuration = CapabilityConfiguration(features=("archive", FILE_SET_FEATURE))
+    with TestClient(_build_app(auth_api, configuration=configuration)) as client:
+        response = client.get(
+            "/api/v1/capabilities",
+            headers=_authorization(auth_api.agent_token),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["features"] == ["archive", FILE_SET_FEATURE]
+    assert response.json()["limits"] == {
+        "max_content_bytes": 2 * 1024 * 1024,
+        "default_page_size": 20,
+        "max_page_size": 100,
+        "max_query_bytes": 4096,
+        "file_set": {
+            "max_file_bytes": 16 * 1024 * 1024,
+            "max_page_bytes": 64 * 1024 * 1024,
+            "max_files_per_page": 64,
+        },
+    }
 
 
 def test_agent_whoami_is_minimal_deterministic_and_client_parseable(

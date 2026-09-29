@@ -14,10 +14,12 @@ from patchouli_lib.api.contracts import (
     WireModel,
 )
 from patchouli_lib.auth.schemas import CallerKind, SectionAction
+from patchouli_lib.content.file_manifest import MAX_FILE_BYTES, MAX_FILES_PER_PAGE, MAX_PAGE_BYTES
 from patchouli_lib.library.schemas import BoundedText, ResourceName
 
 MAX_CONTENT_BYTES = 2 * 1024 * 1024
 MAX_QUERY_BYTES = 4_096
+FILE_SET_FEATURE = "file-sets"
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 CapabilityName = Annotated[
@@ -52,11 +54,21 @@ class CapabilityConfiguration(BaseModel):
 DEFAULT_CAPABILITY_CONFIGURATION = CapabilityConfiguration()
 
 
+class FileSetLimits(WireModel):
+    """File-set content bounds; multipart framing has a separate internal ceiling."""
+
+    max_file_bytes: Annotated[int, Field(ge=1)] = MAX_FILE_BYTES
+    max_page_bytes: Annotated[int, Field(ge=1)] = MAX_PAGE_BYTES
+    max_files_per_page: Annotated[int, Field(ge=1)] = MAX_FILES_PER_PAGE
+
+
 class ApiLimits(WireModel):
+    # Legacy single-Markdown content limit; file-set uploads have separate bounds.
     max_content_bytes: Annotated[int, Field(ge=1)] = MAX_CONTENT_BYTES
     default_page_size: Annotated[int, Field(ge=1)] = DEFAULT_PAGE_LIMIT
     max_page_size: Annotated[int, Field(ge=1)] = MAX_PAGE_LIMIT
     max_query_bytes: Annotated[int, Field(ge=1)] = MAX_QUERY_BYTES
+    file_set: FileSetLimits | None = None
 
 
 class IdempotencySupport(WireModel):
@@ -91,7 +103,9 @@ def capabilities_response(configuration: CapabilityConfiguration) -> Capabilitie
     return CapabilitiesResponse(
         api_versions=configuration.api_versions,
         features=configuration.features,
-        limits=ApiLimits(),
+        limits=ApiLimits(
+            file_set=FileSetLimits() if FILE_SET_FEATURE in configuration.features else None
+        ),
         idempotency=IdempotencySupport(
             content_mutations=configuration.content_mutation_idempotency,
             successful_replay_retention=configuration.successful_replay_retention,
@@ -135,12 +149,14 @@ def whoami_response(context: AuthenticatedRequestContext) -> WhoAmIResponse:
 
 __all__ = [
     "DEFAULT_CAPABILITY_CONFIGURATION",
+    "FILE_SET_FEATURE",
     "MAX_CONTENT_BYTES",
     "MAX_QUERY_BYTES",
     "ApiLimits",
     "CapabilitiesResponse",
     "CapabilityConfiguration",
     "EffectiveSectionGrant",
+    "FileSetLimits",
     "IdempotencySupport",
     "WhoAmIResponse",
     "capabilities_response",

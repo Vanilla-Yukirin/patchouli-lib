@@ -1,8 +1,7 @@
-"""Bounded parser for the proposed, unified Page file-set upload format.
+"""Bounded parser for the unified Page file-set upload format.
 
-This helper is not registered as a public route. One Markdown file and several
-mixed files use the same multipart shape; uploaded MIME labels are never trusted
-as evidence of a file's contents.
+One Markdown file and several mixed files use the same multipart shape;
+uploaded MIME labels are never trusted as evidence of a file's contents.
 """
 
 from __future__ import annotations

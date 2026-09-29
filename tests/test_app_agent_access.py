@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from time import time_ns
 
@@ -134,6 +135,32 @@ def _agent_headers(token: str, key: str, content_type: str) -> dict[str, str]:
     }
 
 
+def _file_set_multipart(
+    metadata: object,
+    files: Sequence[tuple[str, bytes]],
+) -> tuple[str, bytes]:
+    boundary = "synthetic-integrated-file-set"
+    chunks = [
+        f"--{boundary}\r\n".encode(),
+        b'Content-Disposition: form-data; name="metadata"\r\n',
+        b"Content-Type: application/json\r\n\r\n",
+        json.dumps(metadata, separators=(",", ":")).encode(),
+        b"\r\n",
+    ]
+    for filename, content in files:
+        chunks.extend(
+            (
+                f"--{boundary}\r\n".encode(),
+                f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode(),
+                b"Content-Type: application/octet-stream\r\n\r\n",
+                content,
+                b"\r\n",
+            )
+        )
+    chunks.append(f"--{boundary}--\r\n".encode())
+    return f"multipart/form-data; boundary={boundary}", b"".join(chunks)
+
+
 def test_application_registers_exact_agent_access_routes(tmp_path: Path) -> None:
     application = create_app(_settings(tmp_path))
     try:
@@ -148,6 +175,29 @@ def test_application_registers_exact_agent_access_routes(tmp_path: Path) -> None
             ("/api/v1/auth/whoami", "GET"),
             ("/api/v1/agent/skill/manifest", "GET"),
             ("/api/v1/agent/skill/files/{resource_path}", "GET"),
+            (
+                "/api/v1/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages",
+                "POST",
+            ),
+            (
+                "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}",
+                "GET",
+            ),
+            (
+                "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}"
+                "/file-revisions",
+                "POST",
+            ),
+            (
+                "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}"
+                "/revisions/{revision_id}/files",
+                "GET",
+            ),
+            (
+                "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}"
+                "/revisions/{revision_id}/files/{file_name}",
+                "GET",
+            ),
             ("/api/v1/libraries/{library_id}/tags", "GET"),
             ("/api/v1/libraries/{library_id}/tags", "POST"),
             ("/api/v1/libraries/{library_id}/tags/{tag_id}/pages", "GET"),
@@ -201,6 +251,116 @@ def test_application_registers_exact_agent_access_routes(tmp_path: Path) -> None
         application.state.engine.dispose()
 
 
+def test_registered_file_set_routes_share_one_shape_for_markdown_and_multiple_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+    monkeypatch.setenv("PATCHOULI_DATABASE_URL", settings.database_url)
+    monkeypatch.setenv("PATCHOULI_ENVIRONMENT", "test")
+    command.upgrade(Config(str(Path(__file__).resolve().parents[1] / "alembic.ini")), "head")
+    application = create_app(settings)
+    try:
+        section_id, book_id, token = _seed_agent(application.state.engine)
+        library_id = "1" * 32
+        create_path = f"/api/v1/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages"
+        headers = {"Authorization": f"Bearer {token}"}
+        source = {"kind": "synthetic", "locator": "urn:synthetic:integrated-file-set"}
+        initial_file = ("content.md", b"# Single Markdown\n")
+        media, body = _file_set_multipart(
+            {"title": "Synthetic File Set", "source": source}, (initial_file,)
+        )
+        with TestClient(application, raise_server_exceptions=False) as client:
+            capabilities = client.get("/api/v1/capabilities", headers=headers)
+            assert capabilities.status_code == 200
+            assert "file-sets" in capabilities.json()["features"]
+            assert capabilities.json()["limits"]["file_set"] == {
+                "max_file_bytes": 16 * 1024 * 1024,
+                "max_page_bytes": 64 * 1024 * 1024,
+                "max_files_per_page": 64,
+            }
+            created = client.post(
+                create_path,
+                headers={
+                    **headers,
+                    "Idempotency-Key": "integrated-create",
+                    "Content-Type": media,
+                },
+                content=body,
+            )
+            assert created.status_code == 201, created.text
+            first = created.json()
+            page_path = (
+                f"/api/v1/libraries/{library_id}/sections/{section_id}/pages/{first['page_id']}"
+            )
+            current = client.get(page_path, headers=headers)
+            assert current.status_code == 200
+            assert current.headers["ETag"] == created.headers["ETag"]
+            assert current.json()["files"] == first["files"]
+            historical = client.get(created.headers["Location"], headers=headers)
+            assert historical.status_code == 200
+            assert historical.json()["files"] == first["files"]
+            downloaded = client.get(f"{created.headers['Location']}/content.md", headers=headers)
+            assert downloaded.status_code == 200
+            assert downloaded.content == initial_file[1]
+            assert downloaded.headers["Content-Disposition"].startswith("attachment;")
+            assert downloaded.headers["X-Content-Type-Options"] == "nosniff"
+
+            media, body = _file_set_multipart(
+                {"source": source},
+                (("content.md", b"# Mixed Page\n"), ("figure.png", b"\x89PNG\x00\xff")),
+            )
+            revised = client.post(
+                f"{page_path}/file-revisions",
+                headers={
+                    **headers,
+                    "Idempotency-Key": "integrated-revision",
+                    "If-Match": current.headers["ETag"],
+                    "Content-Type": media,
+                },
+                content=body,
+            )
+            assert revised.status_code == 200, revised.text
+            assert revised.json()["changed"] is True
+            latest = client.get(page_path, headers=headers)
+            assert latest.status_code == 200
+            assert latest.headers["ETag"] == revised.headers["ETag"]
+            assert latest.json()["files"] == revised.json()["files"]
+            assert [entry["filename"] for entry in latest.json()["files"]] == [
+                "content.md",
+                "figure.png",
+            ]
+            old_revision = client.get(created.headers["Location"], headers=headers)
+            assert old_revision.status_code == 200
+            assert old_revision.json()["files"] == first["files"]
+            legacy_revision = client.get(
+                f"/api/v1/sections/{section_id}/pages/{first['page_id']}/revisions/2",
+                headers=headers,
+            )
+            assert legacy_revision.status_code == 409
+            assert legacy_revision.json()["code"] == "revision_format_unsupported"
+            legacy_media, legacy_body = _multipart(
+                {"source": source},
+                b"# A legacy client must not overwrite a file set\n",
+                boundary="legacy-on-file-set",
+            )
+            legacy_write = client.post(
+                f"/api/v1/sections/{section_id}/pages/{first['page_id']}/revisions",
+                headers={
+                    **headers,
+                    "Idempotency-Key": "legacy-on-file-set",
+                    "If-Match": latest.headers["ETag"],
+                    "Content-Type": legacy_media,
+                },
+                content=legacy_body,
+            )
+            assert legacy_write.status_code == 409
+            assert legacy_write.json()["code"] == "revision_format_unsupported"
+            assert client.get(page_path, headers=headers).headers["ETag"] == latest.headers["ETag"]
+    finally:
+        application.state.engine.dispose()
+
+
 def test_application_does_not_register_retrieval_without_cursor_secret(tmp_path: Path) -> None:
     application = create_app(
         Settings.model_validate(
@@ -224,7 +384,7 @@ def test_application_does_not_register_retrieval_without_cursor_secret(tmp_path:
                 headers={"Authorization": f"Bearer {token}"},
             )
             assert capabilities.status_code == 200
-            assert capabilities.json()["features"] == ["archive", "tags"]
+            assert capabilities.json()["features"] == ["archive", "file-sets", "tags"]
             assert (
                 client.get(
                     "/api/v1/sections",
@@ -271,7 +431,7 @@ def test_integrated_archive_create_replay_and_revise(
             headers={"Authorization": f"Bearer {token}"},
         )
         assert capabilities.status_code == 200
-        assert capabilities.json()["features"] == ["archive", "retrieval", "tags"]
+        assert capabilities.json()["features"] == ["archive", "file-sets", "retrieval", "tags"]
         assert capabilities.json()["idempotency"] == {
             "content_mutations": True,
             "successful_replay_retention": "indefinite-alpha",

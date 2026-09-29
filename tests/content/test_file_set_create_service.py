@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterator
 from pathlib import Path
@@ -127,7 +128,15 @@ def test_single_markdown_and_multi_file_share_initial_snapshot_path(
         assert single.page.current_revision_number == 1
         assert single.page.occurred_at == OCCURRED_AT
         assert single.audit_event.resource_id == single.page.page_id
-        assert json.loads(single.response.response_body)["occurrence_defaulted"] is False
+        single_body = json.loads(single.response.response_body)
+        assert single_body["occurrence_defaulted"] is False
+        assert single_body["files"] == [
+            {
+                "filename": "content.md",
+                "size_bytes": len(markdown),
+                "content_sha256": hashlib.sha256(markdown).hexdigest(),
+            }
+        ]
         assert _counts(connection) == (1, 1, 1, 1, 1, 1, 1, 1, 1)
         stored = connection.execute(
             select(Revision.content_md, RevisionFileSet.storage_format).join(
@@ -163,7 +172,14 @@ def test_single_markdown_and_multi_file_share_initial_snapshot_path(
         assert multi.page.occurred_at == OPERATION_TIME
         body = json.loads(multi.response.response_body)
         assert body["occurrence_defaulted"] is True
-        assert [item["name"] for item in body["files"]] == ["image.png", "notes.md"]
+        assert body["files"] == [
+            {
+                "filename": entry.name,
+                "size_bytes": entry.content_size_bytes,
+                "content_sha256": entry.content_sha256.hex(),
+            }
+            for entry in multi.manifest.files
+        ]
         assert body["snapshot_sha256"] == multi.manifest.snapshot_sha256.hex()
         assert _counts(connection) == (2, 2, 2, 3, 2, 2, 2, 2, 2)
 

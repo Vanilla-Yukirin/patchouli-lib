@@ -10,9 +10,11 @@ from patchouli_lib import __version__
 from patchouli_lib.admin.router import create_admin_router
 from patchouli_lib.api.agent_skill_routes import create_agent_skill_router
 from patchouli_lib.api.archive_routes import create_archive_router
-from patchouli_lib.api.auth_contracts import CapabilityConfiguration
+from patchouli_lib.api.auth_contracts import FILE_SET_FEATURE, CapabilityConfiguration
 from patchouli_lib.api.auth_routes import create_auth_router
 from patchouli_lib.api.errors import install_api_exception_handlers
+from patchouli_lib.api.file_set_read_routes import create_file_set_read_router
+from patchouli_lib.api.file_set_write_routes import create_file_set_write_router
 from patchouli_lib.api.request_ids import RequestIDMiddleware
 from patchouli_lib.api.retrieval_routes import create_retrieval_router
 from patchouli_lib.api.search_routes import create_search_router
@@ -42,9 +44,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else None
     )
     capabilities = CapabilityConfiguration(
-        features=("archive", "retrieval", "tags")
+        features=("archive", FILE_SET_FEATURE, "retrieval", "tags")
         if cursor_secret is not None
-        else ("archive", "tags"),
+        else ("archive", FILE_SET_FEATURE, "tags"),
         content_mutation_idempotency=True,
         successful_replay_retention="indefinite-alpha",
     )
@@ -72,6 +74,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
     )
     application.include_router(create_archive_router(engine, cursor_codec=cursor_codec))
+    application.include_router(create_file_set_read_router(engine))
+    application.include_router(create_file_set_write_router(engine))
     application.include_router(create_tag_router(engine))
     application.include_router(create_search_router(engine))
     application.include_router(create_agent_skill_router(engine))
