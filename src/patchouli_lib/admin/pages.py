@@ -156,6 +156,15 @@ small { color: #526259; }
 .interface-list code { overflow-wrap: anywhere; }
 details.card { margin-top: 1rem; }
 details summary { cursor: pointer; font-weight: 700; }
+.credential-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: .3rem 1rem;
+  margin: 0 0 .6rem;
+}
+.credential-summary .meta, .credential-item code { overflow-wrap: anywhere; }
+.credential-metadata { margin: .8rem 0 0; }
 @media (max-width: 40rem) {
   .nav-actions { width: 100%; margin-left: 0; justify-content: space-between; }
   .admin-shell { display: block; }
@@ -273,6 +282,7 @@ _ZH_CN: dict[str, str] = {
     "Identity disabled": "身份已停用",
     "Identity active": "身份有效",
     "Existing credentials": "现有凭据",
+    "Credential metadata": "查看凭据元数据",
     "Credential active": "凭据有效",
     "Credential not yet active": "凭据尚未生效",
     "Credential expired": "凭据已过期",
@@ -705,18 +715,22 @@ def caller_page(csrf_token: str, view: CallerView, *, locale: AdminLocale = "en"
             else localize(locale, "Not rotated")
         )
         credentials.append(
-            "<li><dl>"
+            '<li class="credential-item">'
+            '<p class="credential-summary">'
+            f"<strong>{localize(locale, credential_status)}</strong>"
+            f'<span class="meta">{localize(locale, "Expires")} {_time(item.expires_at)}</span>'
+            "</p>"
+            f"<details><summary>{localize(locale, 'Credential metadata')}</summary>"
+            '<dl class="credential-metadata">'
             f"<dt>{localize(locale, 'Credential ID')}</dt><dd><code>{escape(item.id)}</code></dd>"
-            f"<dt>{localize(locale, 'Status')}</dt><dd>{localize(locale, credential_status)}</dd>"
             f"<dt>{localize(locale, 'Created')}</dt><dd>{_time(item.created_at)}</dd>"
-            f"<dt>{localize(locale, 'Expires')}</dt><dd>{_time(item.expires_at)}</dd>"
             f"<dt>{localize(locale, 'Last used')}</dt>"
             f"<dd>{last_used}</dd>"
             f"<dt>{localize(locale, 'Revoked')}</dt>"
             f"<dd>{revoked}</dd>"
             f"<dt>{localize(locale, 'Rotated')}</dt>"
             f"<dd>{rotated}</dd>"
-            "</dl></li>"
+            "</dl></details></li>"
         )
     credential_list = (
         f'<ul class="item-list">{"".join(credentials)}</ul>'

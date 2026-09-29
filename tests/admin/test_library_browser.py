@@ -378,11 +378,28 @@ def test_caller_detail_scopes_safe_credential_metadata_and_existing_grants(
     assert "single-Library, Section-level grants" in english.text
     for credential_id in credential_ids:
         assert credential_id in english.text
+    credential_cards = [
+        card.split("</li>", 1)[0] for card in english.text.split('<li class="credential-item">')[1:]
+    ]
+    assert len(credential_cards) == len(credential_ids)
+    for card in credential_cards:
+        summary, metadata = card.split("<details>", 1)
+        assert 'class="credential-summary"' in summary
+        assert "Expires <time datetime=" in summary
+        assert "<code>" not in summary
+        assert "<summary>Credential metadata</summary>" in metadata
+        assert '<dl class="credential-metadata">' in metadata
+        assert "Credential ID" in metadata
+        assert "Created" in metadata
+        assert "Last used" in metadata
+        assert "Revoked" in metadata
+        assert "Rotated" in metadata
+        assert metadata.endswith("</dl></details>")
     assert "Credential active" in english.text
     assert "Credential not yet active" in english.text
-    future_credential = english.text.split(f"<code>{credential_ids[4]}</code>", 1)[1].split(
-        "</li>", 1
-    )[0]
+    future_credential = next(
+        card for card in credential_cards if f"<code>{credential_ids[4]}</code>" in card
+    )
     assert "Credential not yet active" in future_credential
     assert "Credential active" not in future_credential
     assert "Credential expired" in english.text
@@ -423,6 +440,8 @@ def test_caller_detail_scopes_safe_credential_metadata_and_existing_grants(
     assert "凭据已撤销" in chinese.text
     assert "凭据已轮转" in chinese.text
     assert "最后使用时间" in chinese.text
+    assert chinese.text.count("<summary>查看凭据元数据</summary>") == len(credential_ids)
+    assert chinese.text.count('class="credential-summary"') == len(credential_ids)
     assert "单知识库、分区级授权" in chinese.text
     assert chinese.headers["cache-control"] == "no-store, max-age=0"
 
