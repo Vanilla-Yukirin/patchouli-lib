@@ -146,7 +146,7 @@ class TagService:
         created = self._repository.add_tag(
             library_id=library_id, tag_id=self._id_factory(), name=name, created_at=now
         )
-        self._audit(caller, "tag.create", "tag", created.id, request_id, now)
+        self._audit(caller, library_id, "tag.create", "tag", created.id, request_id, now)
         return created, True
 
     def list_page_tags(
@@ -208,6 +208,7 @@ class TagService:
                 raise RuntimeError("Expected Tag association disappeared inside transaction.")
         self._audit(
             caller,
+            library_id,
             "tag.page.attach" if attach else "tag.page.detach",
             "page_tag",
             f"{page_id}:{tag_id}",
@@ -275,6 +276,7 @@ class TagService:
     def _audit(
         self,
         caller: AuthenticatedCaller,
+        library_id: str,
         action: str,
         resource_type: str,
         resource_id: str,
@@ -284,7 +286,8 @@ class TagService:
         self._auth.add_audit_event(
             NewAuditEvent(
                 id=self._id_factory(),
-                library_id=caller.caller.library_id,
+                library_id=library_id,
+                actor_home_library_id=caller.caller.library_id,
                 actor_caller_id=caller.caller.id,
                 actor_credential_id=caller.credential.id,
                 action=action,

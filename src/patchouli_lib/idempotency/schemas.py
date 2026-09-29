@@ -109,6 +109,7 @@ class TransactionValidatedCaller(IdempotencySchema):
     """Stable caller identity revalidated by the caller's current write transaction."""
 
     library_id: OpaqueId
+    actor_home_library_id: OpaqueId
     caller_id: OpaqueId
 
 
@@ -184,6 +185,7 @@ class OriginalResponse(IdempotencySchema):
 
 class NewIdempotencyRecord(IdempotencyRequest, OriginalResponse):
     library_id: OpaqueId
+    actor_home_library_id: OpaqueId
     caller_id: OpaqueId
 
 

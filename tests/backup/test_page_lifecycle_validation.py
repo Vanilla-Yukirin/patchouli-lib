@@ -12,7 +12,6 @@ import pytest
 from alembic import command
 from sqlalchemy import Engine
 
-from patchouli_lib.auth.library_policy import LegacySectionPolicy
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import NewCredential
 from patchouli_lib.auth.tokens import generate_token
@@ -278,34 +277,28 @@ def test_old_0011_correction_bundle_requires_explicit_revision(
     source_database = complete_engine.url.database
     assert source_database is not None
     source_path = Path(source_database)
-    command.downgrade(_config(source_path, monkeypatch), OCCURRENCE_SCHEMA_REVISION)
     token = _credential(complete_engine)
     page_id, revision_id, number, _kind, occurrence, page_uid = _page(complete_engine)
-    # The historical 0011 database predates Library policies. Only this
-    # historical write fixture bypasses policy resolution; production startup
-    # refuses to serve a schema that is not at the current revision.
-    with monkeypatch.context() as historical_schema:
-        historical_schema.setattr(
-            AuthRepository,
-            "get_library_policy",
-            lambda *_args, **_kwargs: LegacySectionPolicy(),
-        )
-        with immediate_transaction(complete_engine) as connection:
-            corrected = ArchiveService(connection, clock=lambda: _TIME).correct_occurrence(
-                token,
-                CorrectArchiveOccurrenceCommand(
-                    library_id=_LIBRARY_ID,
-                    section_id=_SECTION_ID,
-                    page_id=page_id,
-                    expected_etag=page_current_etag(
-                        page_uid, revision_id, number, occurrence, 2_000_000
-                    ),
-                    occurred_at=occurrence + 1_000_000,
-                    request_id="req_" + "f" * 32,
+    # The current service cannot write an old schema after 0017 added the
+    # actor-home column. Create a same-home event first, then downgrade the
+    # populated database; production startup still refuses an old revision.
+    with immediate_transaction(complete_engine) as connection:
+        corrected = ArchiveService(connection, clock=lambda: _TIME).correct_occurrence(
+            token,
+            CorrectArchiveOccurrenceCommand(
+                library_id=_LIBRARY_ID,
+                section_id=_SECTION_ID,
+                page_id=page_id,
+                expected_etag=page_current_etag(
+                    page_uid, revision_id, number, occurrence, 2_000_000
                 ),
-                ArchiveIdempotencyKey(key_digest=digest_idempotency_key("old-correction")),
-            )
-            assert corrected.response_status == 200
+                occurred_at=occurrence + 1_000_000,
+                request_id="req_" + "f" * 32,
+            ),
+            ArchiveIdempotencyKey(key_digest=digest_idempotency_key("old-correction")),
+        )
+        assert corrected.response_status == 200
+    command.downgrade(_config(source_path, monkeypatch), OCCURRENCE_SCHEMA_REVISION)
 
     bundle = tmp_path / "old-0011-bundle"
     bundle.mkdir()

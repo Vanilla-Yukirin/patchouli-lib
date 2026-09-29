@@ -73,6 +73,7 @@ def _correct(
                 old_occurred_at=old,
                 new_occurred_at=new,
                 actor_caller_id=scope.caller_id,
+                actor_home_library_id=scope.library_id,
                 corrected_at=at,
             ),
         )
@@ -598,6 +599,7 @@ def test_initial_identity_is_still_checked_but_stored_correction_can_diverge() -
             old_occurred_at=0,
             new_occurred_at=0,
             actor_caller_id="2" * 32,
+            actor_home_library_id="1" * 32,
             corrected_at=1,
         )
 

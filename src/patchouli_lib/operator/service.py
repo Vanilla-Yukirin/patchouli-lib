@@ -125,6 +125,7 @@ class OperatorBootstrapService:
             NewAuditEvent(
                 id=self._id_factory(),
                 library_id=request.library_id,
+                actor_home_library_id=caller.library_id,
                 actor_caller_id=caller.id,
                 actor_credential_id=credential.credential.id,
                 action="operator.bootstrap",
@@ -204,6 +205,7 @@ class LocalOperatorRecoveryService:
                 NewAuditEvent(
                     id=self._id_factory(),
                     library_id=request.library_id,
+                    actor_home_library_id=caller.library_id,
                     actor_caller_id=caller.id,
                     actor_credential_id=credential.credential.id,
                     action="auth.operator.recovery",
@@ -553,6 +555,7 @@ class OperatorService:
             NewAuditEvent(
                 id=self._id_factory(),
                 library_id=actor.caller.library_id,
+                actor_home_library_id=actor.caller.library_id,
                 actor_caller_id=actor.caller.id,
                 actor_credential_id=actor.credential.id,
                 target_caller_id=target_caller_id,

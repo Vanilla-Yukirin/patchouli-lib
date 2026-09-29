@@ -325,6 +325,7 @@ def test_deleted_page_rejected_before_writing(
             stored_page,
             action="delete",
             actor_caller_id=archive_scope.caller_id,
+            actor_home_library_id=archive_scope.library_id,
             request_id="req_" + "a" * 32,
             changed_at=3_000_000,
         )

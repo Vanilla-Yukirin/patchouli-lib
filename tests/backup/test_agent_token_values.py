@@ -23,6 +23,7 @@ from patchouli_lib.backup.manifest import (
     AGENT_TOKEN_VALUES_SCHEMA_REVISION,
     LIBRARY_POLICY_SCHEMA_REVISION,
     MANIFEST_FILENAME,
+    MASTER_IDENTITY_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
     BackupManifestV1,
 )
@@ -111,7 +112,12 @@ def test_expired_value_does_not_invalidate_historical_backup(
 
 
 @pytest.mark.parametrize(
-    "schema_revision", (LIBRARY_POLICY_SCHEMA_REVISION, AGENT_TOKEN_VALUES_SCHEMA_REVISION)
+    "schema_revision",
+    (
+        LIBRARY_POLICY_SCHEMA_REVISION,
+        AGENT_TOKEN_VALUES_SCHEMA_REVISION,
+        MASTER_IDENTITY_SCHEMA_REVISION,
+    ),
 )
 def test_prior_bundle_remains_explicitly_verifiable_and_restorable(
     complete_engine: Engine,

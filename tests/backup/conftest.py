@@ -229,10 +229,11 @@ def seed_complete_database(path: Path, monkeypatch: pytest.MonkeyPatch) -> Engin
         connection.execute(
             text(
                 "INSERT INTO auth_audit_events "
-                "(id, library_id, actor_caller_id, actor_credential_id, target_caller_id, "
+                "(id, library_id, actor_home_library_id, actor_caller_id, "
+                "actor_credential_id, target_caller_id, "
                 "section_id, section_action, action, resource_type, resource_id, outcome, "
                 "request_id, policy_version_before, policy_version_after, occurred_at) "
-                "VALUES (:id, :library, :actor, :credential, NULL, NULL, NULL, "
+                "VALUES (:id, :library, :library, :actor, :credential, NULL, NULL, NULL, "
                 "'auth.credential.rotate', 'credential', :resource, 'succeeded', "
                 "'req_synthetic_backup', NULL, NULL, 20)"
             ),
@@ -276,11 +277,12 @@ def seed_complete_database(path: Path, monkeypatch: pytest.MonkeyPatch) -> Engin
         connection.execute(
             text(
                 "INSERT INTO idempotency_records "
-                "(library_id, caller_id, method, route_template, key_digest, "
+                "(library_id, actor_home_library_id, caller_id, method, route_template, "
+                "key_digest, "
                 "request_fingerprint, response_status, response_media_type, response_body, "
                 "response_location, response_etag, original_request_id, "
                 "original_request_timestamp) VALUES "
-                "(:library, :caller, 'POST', :route, :key, :fingerprint, 201, "
+                "(:library, :library, :caller, 'POST', :route, :key, :fingerprint, 201, "
                 "'application/json', :body, :location, :etag, :request_id, :timestamp)"
             ),
             {

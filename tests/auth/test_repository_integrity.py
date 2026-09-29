@@ -232,6 +232,7 @@ def test_audit_actor_credential_scope_is_enforced(
             NewAuditEvent(
                 id="a" * 32,
                 library_id=second_library,
+                actor_home_library_id=second_library,
                 actor_caller_id="8" * 32,
                 actor_credential_id="9" * 32,
                 action="auth.synthetic",
@@ -255,6 +256,7 @@ def test_audit_actor_credential_scope_is_enforced(
                 NewAuditEvent(
                     id="b" * 32,
                     library_id=first_library,
+                    actor_home_library_id=first_library,
                     actor_caller_id="7" * 32,
                     actor_credential_id="9" * 32,
                     target_caller_id=target_caller_id,
@@ -297,6 +299,7 @@ def test_auth_parents_and_credentials_use_restrict_deletes(
             NewAuditEvent(
                 id="9" * 32,
                 library_id=library_id,
+                actor_home_library_id=library_id,
                 actor_caller_id="7" * 32,
                 actor_credential_id="8" * 32,
                 action="auth.synthetic",

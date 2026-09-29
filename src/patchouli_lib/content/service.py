@@ -256,6 +256,7 @@ class ArchiveService:
         )
         caller = TransactionValidatedCaller(
             library_id=command.library_id,
+            actor_home_library_id=authenticated.caller.library_id,
             caller_id=authenticated.caller.id,
         )
         request = IdempotencyRequest(
@@ -336,6 +337,7 @@ class ArchiveService:
                 NewAuditEvent(
                     id=self._id_factory(),
                     library_id=command.library_id,
+                    actor_home_library_id=authenticated.caller.library_id,
                     actor_caller_id=authenticated.caller.id,
                     actor_credential_id=authenticated.credential.id,
                     action="content.archive.create",
@@ -375,6 +377,7 @@ class ArchiveService:
         )
         caller = TransactionValidatedCaller(
             library_id=command.library_id,
+            actor_home_library_id=authenticated.caller.library_id,
             caller_id=authenticated.caller.id,
         )
         request = IdempotencyRequest(
@@ -451,6 +454,7 @@ class ArchiveService:
                 NewAuditEvent(
                     id=self._id_factory(),
                     library_id=command.library_id,
+                    actor_home_library_id=authenticated.caller.library_id,
                     actor_caller_id=authenticated.caller.id,
                     actor_credential_id=authenticated.credential.id,
                     action="content.archive.revise",
@@ -490,6 +494,7 @@ class ArchiveService:
         )
         caller = TransactionValidatedCaller(
             library_id=command.library_id,
+            actor_home_library_id=authenticated.caller.library_id,
             caller_id=authenticated.caller.id,
         )
         request = IdempotencyRequest(
@@ -532,6 +537,7 @@ class ArchiveService:
                     old_occurred_at=page.occurred_at,
                     new_occurred_at=command.occurred_at,
                     actor_caller_id=authenticated.caller.id,
+                    actor_home_library_id=authenticated.caller.library_id,
                     corrected_at=operation_at,
                 ),
             )
@@ -578,6 +584,7 @@ class ArchiveService:
                 NewAuditEvent(
                     id=self._id_factory(),
                     library_id=page.library_id,
+                    actor_home_library_id=authenticated.caller.library_id,
                     actor_caller_id=authenticated.caller.id,
                     actor_credential_id=authenticated.credential.id,
                     action="content.archive.correct_occurrence",
@@ -654,6 +661,7 @@ class ArchiveService:
     ) -> OriginalResponse | ReplayResponse:
         caller = TransactionValidatedCaller(
             library_id=command.library_id,
+            actor_home_library_id=authenticated.caller.library_id,
             caller_id=authenticated.caller.id,
         )
         route = DELETE_PAGE_ROUTE_TEMPLATE if action == "delete" else RESTORE_PAGE_ROUTE_TEMPLATE
@@ -691,6 +699,7 @@ class ArchiveService:
                 page,
                 action=action,
                 actor_caller_id=authenticated.caller.id,
+                actor_home_library_id=authenticated.caller.library_id,
                 request_id=command.request_id,
                 changed_at=operation_at,
             )
@@ -742,6 +751,7 @@ class ArchiveService:
                 NewAuditEvent(
                     id=self._id_factory(),
                     library_id=page.library_id,
+                    actor_home_library_id=authenticated.caller.library_id,
                     actor_caller_id=authenticated.caller.id,
                     actor_credential_id=authenticated.credential.id,
                     action=f"content.archive.{action}",

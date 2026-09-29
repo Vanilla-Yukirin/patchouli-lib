@@ -23,6 +23,7 @@ from patchouli_lib.backup.manifest import (
     LEGACY_SCHEMA_REVISION,
     LIBRARY_POLICY_SCHEMA_REVISION,
     LIFECYCLE_SCHEMA_REVISION,
+    MASTER_IDENTITY_SCHEMA_REVISION,
     OCCURRENCE_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
@@ -387,6 +388,45 @@ _EXPECTED_SQL_HASHES_0016: Final = _EXPECTED_SQL_HASHES_0015 | {
         "b71ede2b5ef3092872e5e652ca1e0995ae05d8d9770c134d97c6874e053ae50f"
     ),
 }
+_EXPECTED_SQL_HASHES_0017: Final = _EXPECTED_SQL_HASHES_0016 | {
+    # Generated from an empty Alembic 0017 database with _canonical_schema_sql.
+    ("table", "auth_audit_events"): (
+        "d8f627b4fe2abd9b943032cd343d5dbe8e241d3b6f9e33770ae417683d15fac1"
+    ),
+    ("table", "idempotency_records"): (
+        "29ee0c3087f9a7245a18ec37ac61c8d58d814a572d11a065629c7563a34f1bd6"
+    ),
+    ("table", "page_lifecycle_events"): (
+        "e28206284603352ab3049dd2ee185f6a3d197a28f66b5b28b964e2635b1c1bdb"
+    ),
+    ("table", "page_lifecycle_guards"): (
+        "975cdf9fbafb9a93b2fb1039375ebdbf6395223be615bd0bb357011b9f990317"
+    ),
+    ("table", "page_occurrence_correction_guards"): (
+        "b4927d6b7d02a7e85fcfbdb5894349d298b8361510554eaaf57d8dec69b4bb00"
+    ),
+    ("table", "page_occurrence_corrections"): (
+        "71dbfb918b79aa5c02281cb43e2a5e066f48aeaf78ea6066e804c6635e4ebe93"
+    ),
+    ("trigger", "trg_page_lifecycle_events_validate_insert"): (
+        "5f5a4b9fcb94f63b6d1a26575b9ff716ef72a0a03ee688431331662b65e68f28"
+    ),
+    ("trigger", "trg_page_lifecycle_guards_safe_delete"): (
+        "72f86075147169aeeaafa2d5546f314daa964a0e3536ed599f672f69a7ed70b9"
+    ),
+    ("trigger", "trg_page_occurrence_corrections_validate_insert"): (
+        "a1fad9cab97d36483f667252940055906462bce69f8e378932aa013fd261031f"
+    ),
+    ("trigger", "trg_page_occurrence_guards_safe_delete"): (
+        "06a8344ab825176a6a4bd1be17b210861a5ab3a97ca406f3660243d32eb977f1"
+    ),
+    ("trigger", "trg_pages_lifecycle_record"): (
+        "ff98fe1910ed7d5b1522aabd8478e644e929358516fc14cdc382ca1507288178"
+    ),
+    ("trigger", "trg_pages_occurrence_record"): (
+        "962cda0022818ec6e82522445303e067c0441d4d9ed690177f275ca108cbe3eb"
+    ),
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
     PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
@@ -397,13 +437,15 @@ _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     FILE_SET_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0013,
     LIBRARY_POLICY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0014,
     AGENT_TOKEN_VALUES_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0015,
-    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0016,
+    MASTER_IDENTITY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0016,
+    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0017,
 }
 _FILE_SET_REVISIONS: Final = frozenset(
     {
         FILE_SET_SCHEMA_REVISION,
         LIBRARY_POLICY_SCHEMA_REVISION,
         AGENT_TOKEN_VALUES_SCHEMA_REVISION,
+        MASTER_IDENTITY_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }
 )
@@ -1272,6 +1314,46 @@ def _require_master_identity(connection: sqlite3.Connection) -> None:
         raise BackupDatabaseError from None
 
 
+def _require_actor_home_graph(connection: sqlite3.Connection) -> None:
+    """Keep each history row's content target separate from its actor identity.
+
+    SQLite's foreign-key check proves the declared relationships. These joins
+    also pin the domain meaning of the new home field and reject history whose
+    target Library or acting caller cannot be resolved independently.
+    """
+
+    for table, actor_column in (
+        ("auth_audit_events", "actor_caller_id"),
+        ("idempotency_records", "caller_id"),
+        ("page_occurrence_corrections", "actor_caller_id"),
+        ("page_occurrence_correction_guards", "actor_caller_id"),
+        ("page_lifecycle_events", "actor_caller_id"),
+        ("page_lifecycle_guards", "actor_caller_id"),
+    ):
+        invalid = _one_integer(
+            connection,
+            f"SELECT count(*) FROM {table} AS history "
+            "LEFT JOIN libraries AS target ON target.id = history.library_id "
+            f"LEFT JOIN auth_callers AS actor ON actor.id = history.{actor_column} "
+            "AND actor.library_id = history.actor_home_library_id "
+            "WHERE target.id IS NULL OR actor.id IS NULL",
+        )
+        if invalid:
+            raise BackupDatabaseError
+
+    invalid_audit_credentials = _one_integer(
+        connection,
+        "SELECT count(*) FROM auth_audit_events AS event "
+        "LEFT JOIN auth_credentials AS credential "
+        "ON credential.id = event.actor_credential_id "
+        "AND credential.caller_id = event.actor_caller_id "
+        "AND credential.library_id = event.actor_home_library_id "
+        "WHERE credential.id IS NULL",
+    )
+    if invalid_audit_credentials:
+        raise BackupDatabaseError
+
+
 def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) -> None:
     invalid_bootstrap = _one_integer(
         connection,
@@ -1297,6 +1379,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
     if schema_revision in {
         LIBRARY_POLICY_SCHEMA_REVISION,
         AGENT_TOKEN_VALUES_SCHEMA_REVISION,
+        MASTER_IDENTITY_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         invalid_library_policies = _one_integer(
@@ -1311,11 +1394,18 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         if invalid_library_policies:
             raise BackupDatabaseError
 
-    if schema_revision in {AGENT_TOKEN_VALUES_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
+    if schema_revision in {
+        AGENT_TOKEN_VALUES_SCHEMA_REVISION,
+        MASTER_IDENTITY_SCHEMA_REVISION,
+        SUPPORTED_SCHEMA_REVISION,
+    }:
         _require_agent_token_values(connection)
 
-    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+    if schema_revision in {MASTER_IDENTITY_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
         _require_master_identity(connection)
+
+    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+        _require_actor_home_graph(connection)
 
     rotations: dict[str, tuple[str, str, str | None, int | None, int | None, int]] = {}
     for (

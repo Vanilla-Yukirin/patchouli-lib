@@ -1628,6 +1628,7 @@ def test_deleted_page_rejects_fresh_revision_but_replays_prior_success_without_m
                 page,
                 action="delete",
                 actor_caller_id=archive_api.writer_id,
+                actor_home_library_id=archive_api.library_id,
                 request_id=REQUEST_ID,
                 changed_at=OPERATION_TIME + 1,
             )

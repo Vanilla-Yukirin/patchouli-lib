@@ -224,6 +224,7 @@ def _revise(
     files: Sequence[tuple[str, bytes]],
     token: str | None = None,
     metadata: object | None = None,
+    path: str | None = None,
 ) -> Any:
     media, body = _multipart(metadata if metadata is not None else {"source": SOURCE}, files)
     headers = [
@@ -234,7 +235,7 @@ def _revise(
     if etag is not None:
         headers.append(("If-Match", etag))
     return client.post(
-        f"{_page_path(scope, page_id)}/file-revisions", headers=headers, content=body
+        path or f"{_page_path(scope, page_id)}/file-revisions", headers=headers, content=body
     )
 
 
@@ -689,6 +690,104 @@ def test_library_policy_write_precheck_does_not_fall_back_to_old_section_grant(
             files=(("content.md", b"# Changed\n"),),
         )
         _problem(revoked, 403, "insufficient_scope")
+
+
+def test_explicit_cross_library_write_keeps_target_and_actor_home_distinct(
+    file_set_http: FileSetHttp,
+) -> None:
+    with immediate_transaction(file_set_http.engine) as connection:
+        ids = iter(("4" * 32, "5" * 32, "6" * 32))
+        target = LibrarySeedService(
+            LibraryRepository(connection),
+            id_factory=lambda: next(ids),
+            clock=lambda: NOW - 1_000_000,
+        ).seed(
+            LibraryStructureSeed(
+                library_name="Synthetic target Library",
+                section_name="Synthetic target Section",
+                book_name="Synthetic target Book",
+            )
+        )
+        connection.execute(
+            insert(CredentialLibraryPolicy),
+            {
+                "credential_id": "b" * 32,
+                "caller_id": "a" * 32,
+                "home_library_id": file_set_http.library_id,
+                "mode": "library_grants",
+                "created_at": NOW - 1,
+            },
+        )
+    target_path = (
+        f"/api/v1/libraries/{target.library.id}/sections/{target.section.id}"
+        f"/books/{target.book.id}/pages"
+    )
+    files = (("content.md", b"# Cross-Library synthetic content\n"),)
+    with TestClient(_app(file_set_http), raise_server_exceptions=False) as client:
+        denied = _create(
+            client, file_set_http, key="cross-library-denied", files=files, path=target_path
+        )
+        _problem(denied, 403, "insufficient_scope")
+        with immediate_transaction(file_set_http.engine) as connection:
+            connection.execute(
+                insert(CredentialLibraryGrant),
+                {
+                    "credential_id": "b" * 32,
+                    "caller_id": "a" * 32,
+                    "home_library_id": file_set_http.library_id,
+                    "target_library_id": target.library.id,
+                    "action": "write",
+                    "created_at": NOW - 1,
+                },
+            )
+        created = _create(
+            client, file_set_http, key="cross-library-create", files=files, path=target_path
+        )
+        assert created.status_code == 201, created.text
+        page_id = created.json()["page_id"]
+        revision_path = (
+            f"/api/v1/libraries/{target.library.id}/sections/{target.section.id}"
+            f"/pages/{page_id}/file-revisions"
+        )
+        revised = _revise(
+            client,
+            file_set_http,
+            page_id,
+            key="cross-library-revise",
+            etag=created.headers["ETag"],
+            files=(("content.md", b"# Revised cross-Library content\n"),),
+            path=revision_path,
+        )
+        assert revised.status_code == 200, revised.text
+        with file_set_http.engine.connect() as connection:
+            audit = connection.execute(
+                select(AuditEvent.library_id, AuditEvent.actor_home_library_id).where(
+                    AuditEvent.library_id == target.library.id
+                )
+            ).all()
+            replay_rows = connection.execute(
+                select(
+                    IdempotencyRecord.library_id,
+                    IdempotencyRecord.actor_home_library_id,
+                ).where(IdempotencyRecord.library_id == target.library.id)
+            ).all()
+        assert audit and all(row == (target.library.id, file_set_http.library_id) for row in audit)
+        assert replay_rows and all(
+            row == (target.library.id, file_set_http.library_id) for row in replay_rows
+        )
+        with immediate_transaction(file_set_http.engine) as connection:
+            connection.execute(
+                delete(CredentialLibraryGrant).where(
+                    CredentialLibraryGrant.credential_id == "b" * 32,
+                    CredentialLibraryGrant.target_library_id == target.library.id,
+                    CredentialLibraryGrant.action == "write",
+                )
+            )
+        replay_denied = _create(
+            client, file_set_http, key="cross-library-create", files=files, path=target_path
+        )
+        _problem(replay_denied, 403, "insufficient_scope")
+    validate_database(file_set_http.database_path)
 
 
 def test_legacy_file_set_precheck_uses_current_grants_not_captured_context(

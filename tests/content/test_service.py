@@ -689,6 +689,7 @@ def test_deleted_page_rejects_fresh_revision_but_replays_prior_success_without_m
             page,
             action="delete",
             actor_caller_id=archive_scope.caller_id,
+            actor_home_library_id=archive_scope.library_id,
             request_id="req_" + "f" * 32,
             changed_at=OPERATION_TIME + 1,
         )

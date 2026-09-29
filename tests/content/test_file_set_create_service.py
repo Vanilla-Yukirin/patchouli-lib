@@ -8,10 +8,10 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from sqlalchemy import Connection, Engine, func, select, text
+from sqlalchemy import Connection, Engine, delete, func, insert, select, text
 from sqlalchemy.exc import OperationalError
 
-from patchouli_lib.auth.models import AuditEvent
+from patchouli_lib.auth.models import AuditEvent, CredentialLibraryGrant, CredentialLibraryPolicy
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.service import AuthenticationError, AuthorizationError
 from patchouli_lib.backup.errors import BackupDatabaseError
@@ -43,6 +43,7 @@ from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import NewSection
 
 from .conftest import OPERATION_TIME, ArchiveScope
+from .helpers import seed_library_structure
 
 INITIAL_REVISION = f"rev_{'a' * 32}"
 NEXT_REVISION = f"rev_{'b' * 32}"
@@ -379,3 +380,67 @@ def test_deferred_caller_acquires_writer_lock_before_authorized_reads(
         first.rollback()
     with content_engine.connect() as connection:
         assert _counts(connection) == (0,) * 9
+
+
+def test_cross_library_write_records_actor_home_and_rechecks_replay_grant(
+    content_engine: Engine, archive_scope: ArchiveScope
+) -> None:
+    target_library, target_section, target_book = seed_library_structure(
+        content_engine, prefix="a", label="Target"
+    )
+    target_scope = ArchiveScope(
+        library_id=target_library,
+        section_id=target_section,
+        book_id=target_book,
+        caller_id=archive_scope.caller_id,
+        credential_id=archive_scope.credential_id,
+        token=archive_scope.token,
+    )
+    with immediate_transaction(content_engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryPolicy),
+            {
+                "credential_id": archive_scope.credential_id,
+                "caller_id": archive_scope.caller_id,
+                "home_library_id": archive_scope.library_id,
+                "mode": "library_grants",
+                "created_at": OPERATION_TIME - 1,
+            },
+        )
+        connection.execute(
+            insert(CredentialLibraryGrant),
+            {
+                "credential_id": archive_scope.credential_id,
+                "caller_id": archive_scope.caller_id,
+                "home_library_id": archive_scope.library_id,
+                "target_library_id": target_library,
+                "action": "write",
+                "created_at": OPERATION_TIME - 1,
+            },
+        )
+
+    command = _command(target_scope, files=(("content.md", b"cross-library"),))
+    key = _key("cross-library")
+    with immediate_transaction(content_engine) as connection:
+        created = _service(connection).create_page(archive_scope.token.value, command, key)
+        assert isinstance(created, FileSetCreateSuccess)
+        assert created.audit_event.library_id == target_library
+        assert created.audit_event.actor_home_library_id == archive_scope.library_id
+        row = connection.execute(select(IdempotencyRecord.__table__)).mappings().one()
+        assert row["library_id"] == target_library
+        assert row["actor_home_library_id"] == archive_scope.library_id
+        replay = _service(connection, ids=iter(()), revisions=iter(()), uids=iter(())).create_page(
+            archive_scope.token.value, command, key
+        )
+        assert isinstance(replay, FileSetCreateReplay)
+        connection.execute(
+            delete(CredentialLibraryGrant).where(
+                CredentialLibraryGrant.credential_id == archive_scope.credential_id,
+                CredentialLibraryGrant.target_library_id == target_library,
+                CredentialLibraryGrant.action == "write",
+            )
+        )
+        with pytest.raises(AuthorizationError):
+            _service(connection, ids=iter(()), revisions=iter(()), uids=iter(())).create_page(
+                archive_scope.token.value, command, key
+            )

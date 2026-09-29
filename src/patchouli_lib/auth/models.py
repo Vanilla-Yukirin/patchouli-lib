@@ -295,13 +295,19 @@ class AuditEvent(Base):
     __tablename__ = "auth_audit_events"
     __table_args__ = (
         ForeignKeyConstraint(
-            ["actor_credential_id", "actor_caller_id", "library_id"],
+            ["actor_credential_id", "actor_caller_id", "actor_home_library_id"],
             [
                 "auth_credentials.id",
                 "auth_credentials.caller_id",
                 "auth_credentials.library_id",
             ],
             name="fk_auth_audit_actor_credential_caller_library_credentials",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["library_id"],
+            ["libraries.id"],
+            name="fk_auth_audit_events_target_library",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
@@ -360,6 +366,7 @@ class AuditEvent(Base):
 
     id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
     library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+    actor_home_library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
     actor_caller_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
     actor_credential_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
     target_caller_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))

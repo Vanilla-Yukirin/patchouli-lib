@@ -353,8 +353,6 @@ def _authorize_scope(
     *,
     clock: Clock,
 ) -> None:
-    if context.authenticated.caller.library_id != library_id:
-        raise resource_not_found()
     if context.authenticated.caller.kind is not CallerKind.AGENT:
         raise insufficient_scope()
     with immediate_transaction(engine) as connection:
@@ -368,6 +366,8 @@ def _authorize_scope(
         if policy is None:
             raise invalid_token()
         if isinstance(policy, LegacySectionPolicy):
+            if context.authenticated.caller.library_id != library_id:
+                raise resource_not_found()
             current_grants = AuthRepository(connection).list_grants(
                 library_id, context.authenticated.caller.id
             )

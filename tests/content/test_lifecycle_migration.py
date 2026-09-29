@@ -26,7 +26,9 @@ def test_upgrade_and_empty_downgrade_match_model_schema(
         inspector = inspect(engine)
         for model in (PageLifecycleEvent, PageLifecycleGuard):
             actual = {column["name"] for column in inspector.get_columns(model.__tablename__)}
-            assert actual == set(model.__table__.columns.keys())
+            # This test intentionally inspects 0012; actor home was added in 0017.
+            expected_0012 = set(model.__table__.columns.keys()) - {"actor_home_library_id"}
+            assert actual == expected_0012
         with engine.connect() as connection:
             trigger_names = {
                 row[0]
@@ -89,6 +91,7 @@ def test_downgrade_refuses_to_discard_lifecycle_events(
             page,
             action="delete",
             actor_caller_id=archive_scope.caller_id,
+            actor_home_library_id=archive_scope.library_id,
             request_id="req_" + "a" * 32,
             changed_at=OPERATION_TIME,
         )

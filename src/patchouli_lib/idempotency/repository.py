@@ -24,6 +24,7 @@ class IdempotencyRepository:
     ) -> StoredIdempotencyRecord | None:
         statement = select(IdempotencyRecord.__table__).where(
             IdempotencyRecord.library_id == caller.library_id,
+            IdempotencyRecord.actor_home_library_id == caller.actor_home_library_id,
             IdempotencyRecord.caller_id == caller.caller_id,
             IdempotencyRecord.method == request.method,
             IdempotencyRecord.route_template == request.route_template,

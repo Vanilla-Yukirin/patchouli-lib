@@ -48,6 +48,7 @@ def test_delete_restore_are_guarded_and_preserve_revision_source_graph(
             before,
             action="delete",
             actor_caller_id=archive_scope.caller_id,
+            actor_home_library_id=archive_scope.library_id,
             request_id="req_" + "a" * 32,
             changed_at=OPERATION_TIME,
         )
@@ -73,6 +74,7 @@ def test_delete_restore_are_guarded_and_preserve_revision_source_graph(
             deleted,
             action="restore",
             actor_caller_id=archive_scope.caller_id,
+            actor_home_library_id=archive_scope.library_id,
             request_id="req_" + "b" * 32,
             changed_at=OPERATION_TIME,  # same wall tick; logical clock must advance
         )
@@ -117,6 +119,7 @@ def test_lifecycle_guards_reject_direct_state_changes_and_event_mutation(
             page,
             action="delete",
             actor_caller_id=archive_scope.caller_id,
+            actor_home_library_id=archive_scope.library_id,
             request_id="req_" + "c" * 32,
             changed_at=OPERATION_TIME,
         )
@@ -125,6 +128,7 @@ def test_lifecycle_guards_reject_direct_state_changes_and_event_mutation(
                 deleted,
                 action="delete",
                 actor_caller_id=archive_scope.caller_id,
+                actor_home_library_id=archive_scope.library_id,
                 request_id="req_" + "d" * 32,
                 changed_at=OPERATION_TIME + 1,
             )
@@ -152,6 +156,7 @@ def test_stale_page_snapshot_cannot_transition(
             stale,
             action="delete",
             actor_caller_id=archive_scope.caller_id,
+            actor_home_library_id=archive_scope.library_id,
             request_id="req_" + "f" * 32,
             changed_at=OPERATION_TIME,
         )
@@ -159,6 +164,7 @@ def test_stale_page_snapshot_cannot_transition(
             deleted,
             action="restore",
             actor_caller_id=archive_scope.caller_id,
+            actor_home_library_id=archive_scope.library_id,
             request_id="req_" + "1" * 32,
             changed_at=OPERATION_TIME + 1,
         )
@@ -167,6 +173,7 @@ def test_stale_page_snapshot_cannot_transition(
             stale,
             action="delete",
             actor_caller_id=archive_scope.caller_id,
+            actor_home_library_id=archive_scope.library_id,
             request_id="req_" + "2" * 32,
             changed_at=OPERATION_TIME + 2,
         )

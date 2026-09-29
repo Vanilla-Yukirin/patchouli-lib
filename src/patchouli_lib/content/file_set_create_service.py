@@ -217,6 +217,7 @@ class FileSetCreateService:
                 raise FileSetCreateNotFoundError("Book is not available.")
             caller = TransactionValidatedCaller(
                 library_id=command.library_id,
+                actor_home_library_id=authenticated.caller.library_id,
                 caller_id=authenticated.caller.id,
             )
             request = IdempotencyRequest(
@@ -297,6 +298,7 @@ class FileSetCreateService:
                 NewAuditEvent(
                     id=self._id_factory(),
                     library_id=page.library_id,
+                    actor_home_library_id=authenticated.caller.library_id,
                     actor_caller_id=authenticated.caller.id,
                     actor_credential_id=authenticated.credential.id,
                     action="content.page.file_set.create",

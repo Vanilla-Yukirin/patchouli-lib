@@ -990,6 +990,7 @@ def test_home_shows_only_scoped_successful_content_activity(
         )
         base = {
             "library_id": library,
+            "actor_home_library_id": library,
             "actor_caller_id": actor_id,
             "actor_credential_id": credential_id,
             "resource_type": "page",
@@ -1147,6 +1148,7 @@ def test_deleted_activity_links_to_trash_without_cross_library_preview(
         )
         base = {
             "library_id": library,
+            "actor_home_library_id": library,
             "actor_caller_id": caller_id,
             "actor_credential_id": credential_id,
             "resource_type": "page",
@@ -1215,6 +1217,7 @@ def test_activity_limit_and_tie_breaker_are_stable(browser: tuple[TestClient, En
                 {
                     "id": f"{index:032x}",
                     "library_id": library,
+                    "actor_home_library_id": library,
                     "actor_caller_id": caller_id,
                     "actor_credential_id": credential_id,
                     "action": "tag.create",
@@ -1232,6 +1235,7 @@ def test_activity_limit_and_tie_breaker_are_stable(browser: tuple[TestClient, En
             {
                 "id": "f" * 32,
                 "library_id": library,
+                "actor_home_library_id": library,
                 "actor_caller_id": caller_id,
                 "actor_credential_id": credential_id,
                 "action": "content.archive.correct_occurrence",

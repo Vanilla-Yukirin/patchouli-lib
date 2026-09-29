@@ -232,6 +232,7 @@ class PageOccurrenceCorrectionCommand(ContentSchema):
     old_occurred_at: OccurrenceMicros
     new_occurred_at: OccurrenceMicros
     actor_caller_id: OpaqueId
+    actor_home_library_id: OpaqueId
     corrected_at: StoredTimestamp
 
     @model_validator(mode="after")
@@ -261,6 +262,7 @@ class PageLifecycleEventRecord(ContentSchema):
     at_revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
     occurred_at_at_event: OccurrenceMicros
     actor_caller_id: OpaqueId
+    actor_home_library_id: OpaqueId
     request_id: RequestId
 
     @model_validator(mode="after")

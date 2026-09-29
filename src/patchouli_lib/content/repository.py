@@ -283,6 +283,7 @@ class ContentRepository:
         *,
         action: Literal["delete", "restore"],
         actor_caller_id: str,
+        actor_home_library_id: str,
         request_id: str,
         changed_at: int,
     ) -> tuple[PageRecord, PageLifecycleEventRecord]:
@@ -318,6 +319,7 @@ class ContentRepository:
             at_revision_number=page.current_revision_number,
             occurred_at_at_event=page.occurred_at,
             actor_caller_id=actor_caller_id,
+            actor_home_library_id=actor_home_library_id,
             request_id=request_id,
         )
         self._connection.execute(insert(PageLifecycleGuard), expected_event.model_dump())

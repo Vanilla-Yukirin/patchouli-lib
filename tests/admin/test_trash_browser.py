@@ -159,6 +159,7 @@ def _page(
                 stored,
                 action="delete",
                 actor_caller_id=caller,
+                actor_home_library_id=library,
                 request_id="req_" + f"{index:032x}",
                 changed_at=deleted_at,
             )
@@ -272,6 +273,7 @@ def test_trash_scope_state_and_metadata_only(browser: tuple[TestClient, Engine])
             page,
             action="restore",
             actor_caller_id=first[3],
+            actor_home_library_id=first[0],
             request_id="req_" + "f" * 32,
             changed_at=4_000_000,
         )

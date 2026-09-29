@@ -1277,6 +1277,7 @@ def test_audit_request_id_validation_rejects_token_shaped_value() -> None:
         NewAuditEvent(
             id="1" * 32,
             library_id="2" * 32,
+            actor_home_library_id="2" * 32,
             actor_caller_id="3" * 32,
             actor_credential_id="4" * 32,
             action="auth.synthetic",
@@ -1293,6 +1294,7 @@ def test_grant_audit_schema_rejects_incomplete_or_non_grant_identity() -> None:
         NewAuditEvent(
             id="1" * 32,
             library_id="2" * 32,
+            actor_home_library_id="2" * 32,
             actor_caller_id="3" * 32,
             actor_credential_id="4" * 32,
             action="auth.grant.add",
@@ -1308,6 +1310,7 @@ def test_grant_audit_schema_rejects_incomplete_or_non_grant_identity() -> None:
         NewAuditEvent(
             id="1" * 32,
             library_id="2" * 32,
+            actor_home_library_id="2" * 32,
             actor_caller_id="3" * 32,
             actor_credential_id="4" * 32,
             action="auth.caller.create",

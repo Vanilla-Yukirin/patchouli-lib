@@ -174,7 +174,7 @@ class PageOccurrenceCorrection(Base):
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
-            ["actor_caller_id", "library_id"],
+            ["actor_caller_id", "actor_home_library_id"],
             ["auth_callers.id", "auth_callers.library_id"],
             name="fk_page_occurrence_corrections_actor",
             ondelete="RESTRICT",
@@ -199,6 +199,7 @@ class PageOccurrenceCorrection(Base):
     )
 
     library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    actor_home_library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
     page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
     sequence: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     old_occurred_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -220,7 +221,7 @@ class PageOccurrenceCorrectionGuard(Base):
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
-            ["actor_caller_id", "library_id"],
+            ["actor_caller_id", "actor_home_library_id"],
             ["auth_callers.id", "auth_callers.library_id"],
             name="fk_page_occurrence_correction_guards_actor",
             ondelete="RESTRICT",
@@ -252,6 +253,7 @@ class PageOccurrenceCorrectionGuard(Base):
     )
 
     library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    actor_home_library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
     page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
     sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     old_occurred_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -278,7 +280,7 @@ class PageLifecycleEvent(Base):
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
-            ["actor_caller_id", "library_id"],
+            ["actor_caller_id", "actor_home_library_id"],
             ["auth_callers.id", "auth_callers.library_id"],
             name="fk_page_lifecycle_events_actor",
             ondelete="RESTRICT",
@@ -313,6 +315,7 @@ class PageLifecycleEvent(Base):
     )
 
     library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    actor_home_library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
     page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
     sequence: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     action: Mapped[str] = mapped_column(String(8), nullable=False)
@@ -344,7 +347,7 @@ class PageLifecycleGuard(Base):
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
-            ["actor_caller_id", "library_id"],
+            ["actor_caller_id", "actor_home_library_id"],
             ["auth_callers.id", "auth_callers.library_id"],
             name="fk_page_lifecycle_guards_actor",
             ondelete="RESTRICT",
@@ -390,6 +393,7 @@ class PageLifecycleGuard(Base):
     )
 
     library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    actor_home_library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
     page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
     sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     action: Mapped[str] = mapped_column(String(8), nullable=False)

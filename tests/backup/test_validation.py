@@ -19,6 +19,7 @@ from patchouli_lib.backup import validation as backup_validation
 from patchouli_lib.backup.manifest import (
     FILE_SET_SCHEMA_REVISION,
     INTERMEDIATE_SCHEMA_REVISION,
+    MASTER_IDENTITY_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
 )
@@ -732,6 +733,7 @@ def test_0008_validation_rejects_missing_seal_or_guard(
         PREVIOUS_SCHEMA_REVISION,
         INTERMEDIATE_SCHEMA_REVISION,
         FILE_SET_SCHEMA_REVISION,
+        MASTER_IDENTITY_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     ],
 )
