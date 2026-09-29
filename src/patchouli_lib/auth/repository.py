@@ -8,6 +8,7 @@ from patchouli_lib.auth.models import (
     BootstrapMarker,
     Caller,
     Credential,
+    CredentialLibraryPolicy,
     SectionGrant,
 )
 from patchouli_lib.auth.schemas import (
@@ -138,6 +139,21 @@ class AuthRepository:
         )
         row = self._connection.execute(statement).mappings().one_or_none()
         return None if row is None else StoredCredential.model_validate(row)
+
+    def has_library_grant_policy(
+        self,
+        library_id: str,
+        caller_id: str,
+        credential_id: str,
+    ) -> bool:
+        """Check explicit Library-grant mode for one exact credential identity."""
+        statement = select(CredentialLibraryPolicy.credential_id).where(
+            CredentialLibraryPolicy.home_library_id == library_id,
+            CredentialLibraryPolicy.caller_id == caller_id,
+            CredentialLibraryPolicy.credential_id == credential_id,
+            CredentialLibraryPolicy.mode == "library_grants",
+        )
+        return self._connection.execute(statement).scalar_one_or_none() is not None
 
     def find_credential_by_selector(self, selector: str) -> StoredCredential | None:
         statement = select(Credential.__table__).where(Credential.selector == selector)

@@ -313,6 +313,10 @@ class OperatorService:
         current = self._repository.get_credential(library_id, caller_id, credential_id)
         if current is None or current.revoked_at is not None or current.rotated_at is not None:
             raise CredentialLifecycleError
+        # This legacy path does not copy per-credential Library grants. Never
+        # replace an opted-in credential with an implicit legacy Section token.
+        if self._repository.has_library_grant_policy(library_id, caller_id, credential_id):
+            raise PolicyConflictError
 
         rotated_at = self._clock()
         replacement = CredentialIssuer(
