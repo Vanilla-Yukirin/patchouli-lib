@@ -360,6 +360,36 @@ class ContentRepository:
         self._connection.execute(insert(Revision), values)
         return RevisionRecord.model_validate(values)
 
+    def get_current_revision_storage_format(
+        self, page: PageRecord
+    ) -> Literal["legacy_markdown", "file_set_v1"]:
+        """Read the exact current Revision format, failing closed on missing state."""
+
+        row = self._connection.execute(
+            select(RevisionFileSet.storage_format, Revision.content_md.is_not(None))
+            .join(
+                Revision,
+                (Revision.library_id == RevisionFileSet.library_id)
+                & (Revision.page_uid == RevisionFileSet.page_uid)
+                & (Revision.revision_id == RevisionFileSet.revision_id)
+                & (Revision.revision_number == RevisionFileSet.revision_number),
+            )
+            .where(
+                RevisionFileSet.library_id == page.library_id,
+                RevisionFileSet.page_uid == page.page_uid,
+                RevisionFileSet.revision_id == page.current_revision_id,
+                RevisionFileSet.revision_number == page.current_revision_number,
+            )
+        ).one_or_none()
+        if row is None:
+            raise RuntimeError("Current Revision file-set manifest is missing.")
+        storage_format, content_md_present = row
+        if storage_format == "legacy_markdown" and content_md_present:
+            return "legacy_markdown"
+        if storage_format == "file_set_v1" and not content_md_present:
+            return "file_set_v1"
+        raise RuntimeError("Current Revision file-set format is inconsistent.")
+
     def get_current_file_manifest(self, page: PageRecord) -> FileManifest:
         """Read and verify the exact sealed current Revision, including legacy data."""
 

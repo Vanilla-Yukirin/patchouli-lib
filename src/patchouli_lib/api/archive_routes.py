@@ -54,6 +54,7 @@ from patchouli_lib.content import (
     ArchivePreconditionRequiredError,
     ArchiveService,
     ArchiveSourceInput,
+    ArchiveUnsupportedRevisionFormatError,
     CorrectArchiveOccurrenceCommand,
     CreateArchiveCommand,
     page_current_etag,
@@ -153,6 +154,15 @@ def _revision_conflict_problem() -> ApplicationProblem:
         code="revision_conflict",
         title="Precondition failed",
         detail="The Page has a newer current Revision.",
+    )
+
+
+def _unsupported_revision_format_problem() -> ApplicationProblem:
+    return ApplicationProblem(
+        status_code=409,
+        code="revision_format_unsupported",
+        title="Revision format not supported",
+        detail="This write route cannot represent the current Revision format.",
     )
 
 
@@ -819,6 +829,8 @@ def _perform_mutation(
         raise _precondition_required_problem() from None
     except ArchivePreconditionFailedError:
         raise _revision_conflict_problem() from None
+    except ArchiveUnsupportedRevisionFormatError:
+        raise _unsupported_revision_format_problem() from None
     except IdempotencyConflictError:
         raise _idempotency_conflict_problem() from None
 

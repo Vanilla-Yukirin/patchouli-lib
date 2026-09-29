@@ -114,6 +114,11 @@ class ArchivePreconditionFailedError(RuntimeError):
         super().__init__("The current archive revision does not match the precondition.")
 
 
+class ArchiveUnsupportedRevisionFormatError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("The current Revision format is not supported by this route.")
+
+
 class ArchiveOccurrenceUnchangedError(RuntimeError):
     def __init__(self) -> None:
         super().__init__("The Page already has the requested declared time.")
@@ -397,6 +402,8 @@ class ArchiveService:
         )
         if not hmac.compare_digest(command.expected_etag, current_etag):
             raise ArchivePreconditionFailedError
+        if self._content.get_current_revision_storage_format(page) != "legacy_markdown":
+            raise ArchiveUnsupportedRevisionFormatError
         if page.current_revision_number >= MAX_REVISION_NUMBER:
             raise ArchivePersistenceError
         if page.updated_at >= (1 << 63) - 1:

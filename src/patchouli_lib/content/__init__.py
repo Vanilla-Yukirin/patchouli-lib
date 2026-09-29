@@ -38,6 +38,7 @@ from patchouli_lib.content.service import (
     ArchiveReplayCorruptError,
     ArchiveService,
     ArchiveTransactionRequiredError,
+    ArchiveUnsupportedRevisionFormatError,
     page_current_etag,
 )
 
@@ -63,6 +64,7 @@ __all__ = [
     "ArchiveSourceInput",
     "CorrectArchiveOccurrenceCommand",
     "ArchiveTransactionRequiredError",
+    "ArchiveUnsupportedRevisionFormatError",
     "CreateArchiveCommand",
     "ContentRepository",
     "MarkdownContent",

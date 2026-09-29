@@ -12,6 +12,7 @@ from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import NewCredential, NewSectionGrant, SectionAction
 from patchouli_lib.auth.service import AuthorizationError
 from patchouli_lib.auth.tokens import generate_token
+from patchouli_lib.content.file_set_service import FileSetRevisionService
 from patchouli_lib.content.models import (
     Page,
     PageIdCollisionCounter,
@@ -28,6 +29,7 @@ from patchouli_lib.content.schemas import (
     ArchiveMutationSuccess,
     ArchiveSourceInput,
     CreateArchiveCommand,
+    NewPageSource,
 )
 from patchouli_lib.content.service import (
     ArchiveNotFoundError,
@@ -36,6 +38,7 @@ from patchouli_lib.content.service import (
     ArchivePreconditionRequiredError,
     ArchiveService,
     ArchiveTransactionRequiredError,
+    ArchiveUnsupportedRevisionFormatError,
     legacy_page_current_etag,
     page_current_etag,
 )
@@ -556,6 +559,102 @@ def test_revision_preconditions_append_once_keep_old_and_replay_after_advance(
         assert isinstance(create_replay, ArchiveMutationReplay)
         assert create_replay.body.page.current_revision_number == 1
         assert create_replay.response.response_etag == created.response.response_etag
+
+
+def test_legacy_revision_route_refuses_current_file_set_without_losing_replay(
+    content_engine: Engine,
+    archive_scope: ArchiveScope,
+) -> None:
+    with immediate_transaction(content_engine) as connection:
+        created = _create_once(connection, archive_scope)
+    previous = AppendArchiveRevisionCommand(
+        library_id=archive_scope.library_id,
+        section_id=archive_scope.section_id,
+        page_id=created.page.page_id,
+        expected_etag=created.response.response_etag,
+        source=ArchiveSourceInput(kind="synthetic legacy revision"),
+        content_md=b"# Legacy second revision\n",
+        request_id=f"req_{'1' * 32}",
+    )
+    replay_key = _key("legacy-before-file-set")
+    with immediate_transaction(content_engine) as connection:
+        previous_result = _service(
+            connection,
+            revision_ids=iter((f"rev_{'e' * 32}",)),
+            opaque_ids=iter(("7" * 32, "8" * 32)),
+        ).append_revision(archive_scope.token.value, previous, replay_key)
+        assert isinstance(previous_result, ArchiveMutationSuccess)
+        file_set_revision_id = f"rev_{'f' * 32}"
+        file_set = FileSetRevisionService(connection).append_existing_page(
+            library_id=archive_scope.library_id,
+            page_id=created.page.page_id,
+            expected_etag=previous_result.response.response_etag,
+            files=(("content.md", b"# Multi-file revision\n"), ("figure.bin", b"\x00\xff")),
+            revision_id=file_set_revision_id,
+            revision_at=OPERATION_TIME + 2,
+            source=NewPageSource(
+                library_id=archive_scope.library_id,
+                source_id="9" * 32,
+                page_uid=created.page.page_uid,
+                revision_id=file_set_revision_id,
+                revision_number=3,
+                kind="synthetic file set",
+                created_at=OPERATION_TIME + 2,
+            ),
+        )
+        assert file_set.changed
+        baseline = _counts(connection)
+
+    fresh = previous.model_copy(
+        update={
+            "expected_etag": file_set.etag,
+            "content_md": b"# Legacy replacement\n",
+            "request_id": f"req_{'2' * 32}",
+        }
+    )
+    with immediate_transaction(content_engine) as connection:
+        replayed = _service(connection).append_revision(
+            archive_scope.token.value, previous, replay_key
+        )
+        assert isinstance(replayed, ArchiveMutationReplay)
+        assert replayed.response.response_body == previous_result.response.response_body
+        with pytest.raises(IdempotencyConflictError):
+            _service(connection).append_revision(archive_scope.token.value, fresh, replay_key)
+        with pytest.raises(ArchivePreconditionFailedError):
+            _service(connection).append_revision(
+                archive_scope.token.value,
+                fresh.model_copy(update={"expected_etag": previous_result.response.response_etag}),
+                _key("stale-after-file-set"),
+            )
+        with pytest.raises(ArchivePreconditionRequiredError):
+            _service(connection).append_revision(
+                archive_scope.token.value,
+                fresh.model_copy(update={"expected_etag": None}),
+                _key("missing-etag-after-file-set"),
+            )
+        with pytest.raises(ArchiveUnsupportedRevisionFormatError):
+            _service(connection).append_revision(
+                archive_scope.token.value, fresh, _key("fresh-after-file-set")
+            )
+        assert _counts(connection) == baseline
+        current = ContentRepository(connection).get_page(
+            archive_scope.library_id, created.page.page_id
+        )
+        assert current is not None
+        assert current.current_revision_id == file_set_revision_id
+        assert current.current_revision_number == 3
+
+
+def test_current_revision_format_lookup_fails_closed_on_missing_exact_manifest(
+    content_engine: Engine,
+    archive_scope: ArchiveScope,
+) -> None:
+    with immediate_transaction(content_engine) as connection:
+        created = _create_once(connection, archive_scope)
+    with content_engine.connect() as connection:
+        absent = created.page.model_copy(update={"current_revision_id": f"rev_{'0' * 32}"})
+        with pytest.raises(RuntimeError, match="file-set manifest is missing"):
+            ContentRepository(connection).get_current_revision_storage_format(absent)
 
 
 def test_deleted_page_rejects_fresh_revision_but_replays_prior_success_without_mutation(

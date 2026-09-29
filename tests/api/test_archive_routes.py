@@ -14,9 +14,11 @@ from typing import Any, cast
 import anyio
 import httpx2
 import pytest
+from alembic import command
+from alembic.config import Config
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import Connection, Engine, func, select, update
+from sqlalchemy import Connection, Engine, func, select
 
 from patchouli_lib.api.archive_routes import (
     MAX_ARCHIVE_METADATA_BYTES,
@@ -38,7 +40,10 @@ from patchouli_lib.content import (
     ArchiveSourceInput,
     CreateArchiveCommand,
 )
+from patchouli_lib.content.file_set_service import FileSetRevisionService
 from patchouli_lib.content.models import MAX_MARKDOWN_BYTES, Page, PageSource, Revision
+from patchouli_lib.content.repository import ContentRepository
+from patchouli_lib.content.schemas import NewPageSource
 from patchouli_lib.content.service import legacy_page_current_etag
 from patchouli_lib.database import build_engine, immediate_transaction
 from patchouli_lib.idempotency.models import IdempotencyRecord
@@ -58,6 +63,7 @@ CREATE_METADATA = {
     "source": {"kind": "synthetic", "locator": "urn:synthetic:archive"},
 }
 CONTENT = b"# Synthetic archive\r\n\r\nExact bytes.\n"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,9 +114,12 @@ def _add_caller(
 
 
 @pytest.fixture
-def archive_api(tmp_path: Path) -> Iterator[ArchiveApiFixture]:
-    engine = build_engine(f"sqlite:///{(tmp_path / 'archive-routes.db').as_posix()}")
-    Page.metadata.create_all(engine)
+def archive_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[ArchiveApiFixture]:
+    database_url = f"sqlite:///{(tmp_path / 'archive-routes.db').as_posix()}"
+    monkeypatch.setenv("PATCHOULI_DATABASE_URL", database_url)
+    monkeypatch.setenv("PATCHOULI_ENVIRONMENT", "test")
+    command.upgrade(Config(str(REPOSITORY_ROOT / "alembic.ini")), "head")
+    engine = build_engine(database_url)
     try:
         identifiers = iter(("1" * 32, "2" * 32, "3" * 32))
         with immediate_transaction(engine) as connection:
@@ -1326,6 +1335,68 @@ def test_revision_requires_strong_if_match_and_replays_old_etag_after_advance(
     _problem(if_match_mismatch, 409, "idempotency_mismatch")
 
 
+def test_legacy_revision_route_refuses_current_file_set_after_authorization_and_etag(
+    archive_api: ArchiveApiFixture,
+) -> None:
+    with TestClient(_build_app(archive_api), raise_server_exceptions=False) as client:
+        created = _create(client, archive_api, key="file-set-guard-create")
+        assert created.status_code == 201
+        page_id = created.json()["page"]["page_id"]
+        path = f"/api/v1/sections/{archive_api.section_id}/pages/{page_id}/revisions"
+        with immediate_transaction(archive_api.engine) as connection:
+            page = ContentRepository(connection).get_page(archive_api.library_id, page_id)
+            assert page is not None
+            file_set_revision_id = f"rev_{'f' * 32}"
+            file_set = FileSetRevisionService(connection).append_existing_page(
+                library_id=archive_api.library_id,
+                page_id=page_id,
+                expected_etag=created.headers["ETag"],
+                files=(("content.md", b"# Multi-file\n"), ("private.bin", b"\x00\xff")),
+                revision_id=file_set_revision_id,
+                revision_at=OPERATION_TIME + 1,
+                source=NewPageSource(
+                    library_id=archive_api.library_id,
+                    source_id="9" * 32,
+                    page_uid=page.page_uid,
+                    revision_id=file_set_revision_id,
+                    revision_number=2,
+                    kind="synthetic file set",
+                    created_at=OPERATION_TIME + 1,
+                ),
+            )
+            assert file_set.changed
+        baseline = _counts(archive_api.engine)
+        media_type, body = _multipart({"source": {"kind": "synthetic revision"}}, b"# Old API\n")
+
+        def request(token: str | None, etag: str, key: str) -> Any:
+            headers = [
+                ("Idempotency-Key", key),
+                ("If-Match", etag),
+                ("Content-Type", media_type),
+            ]
+            if token is not None:
+                headers.insert(0, _authorization(token))
+            return client.post(path, headers=headers, content=body)
+
+        unauthorized = request(None, file_set.etag, "file-set-guard-no-token")
+        insufficient = request(archive_api.reader_token, file_set.etag, "file-set-guard-reader")
+        stale = request(archive_api.writer_token, created.headers["ETag"], "file-set-guard-stale")
+        unsupported = request(archive_api.writer_token, file_set.etag, "file-set-guard-current")
+
+    _problem(unauthorized, 401, "authentication_required")
+    _problem(insufficient, 403, "insufficient_scope")
+    _problem(stale, 412, "revision_conflict")
+    _problem(unsupported, 409, "revision_format_unsupported")
+    assert "private.bin" not in unsupported.text
+    assert "ETag" not in unsupported.headers
+    assert _counts(archive_api.engine) == baseline
+    with archive_api.engine.connect() as connection:
+        current = ContentRepository(connection).get_page(archive_api.library_id, page_id)
+        assert current is not None
+        assert current.current_revision_id == file_set_revision_id
+        assert current.current_revision_number == 2
+
+
 def test_deleted_page_rejects_fresh_revision_but_replays_prior_success_without_mutation(
     archive_api: ArchiveApiFixture,
 ) -> None:
@@ -1351,10 +1422,15 @@ def test_deleted_page_rejects_fresh_revision_but_replays_prior_success_without_m
         revised = client.post(path, headers=replay_headers, content=body)
         assert revised.status_code == 201
         with immediate_transaction(archive_api.engine) as connection:
-            connection.execute(
-                update(Page)
-                .where(Page.library_id == archive_api.library_id, Page.page_id == page_id)
-                .values(deleted_at=OPERATION_TIME + 1, updated_at=OPERATION_TIME + 1)
+            repository = ContentRepository(connection)
+            page = repository.get_page(archive_api.library_id, page_id)
+            assert page is not None
+            deleted, _ = repository.transition_page_lifecycle(
+                page,
+                action="delete",
+                actor_caller_id=archive_api.writer_id,
+                request_id=REQUEST_ID,
+                changed_at=OPERATION_TIME + 1,
             )
         baseline = _counts(archive_api.engine)
         replay = client.post(path, headers=replay_headers, content=body)
@@ -1375,7 +1451,7 @@ def test_deleted_page_rejects_fresh_revision_but_replays_prior_success_without_m
                 Page.library_id == archive_api.library_id, Page.page_id == page_id
             )
         ).one()
-    assert current == (revised.json()["revision"]["revision_id"], 2, OPERATION_TIME + 1)
+    assert current == (revised.json()["revision"]["revision_id"], 2, deleted.deleted_at)
 
 
 @pytest.mark.parametrize("mutation", ["revoke", "disable", "remove"])
