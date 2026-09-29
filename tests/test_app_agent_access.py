@@ -189,8 +189,7 @@ def test_application_registers_exact_agent_access_routes(tmp_path: Path) -> None
                 "POST",
             ),
             (
-                "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}"
-                "/revisions",
+                "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/revisions",
                 "GET",
             ),
             (
