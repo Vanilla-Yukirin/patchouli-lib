@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -13,6 +15,12 @@ MAX_ARCHIVE_BYTES = 2 * 1024 * 1024
 DEFAULT_PAGE_LIMIT = 20
 MAX_PAGE_LIMIT = 100
 MAX_CURSOR_LENGTH = 4_096
+MAX_FILE_SET_FILES = 64
+MAX_FILE_SET_FILE_BYTES = 16 * 1024 * 1024
+MAX_FILE_SET_PAGE_BYTES = 64 * 1024 * 1024
+_FILE_SET_DOMAIN = b"patchouli-page-file-snapshot-v1\x00"
+_FILE_NAME_FORBIDDEN = frozenset('<>:"/\\|?*')
+_DEVICE_NAMES = frozenset({"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"})
 
 _RFC3339_PATTERN = re.compile(
     r"^(?P<date>\d{4}-\d{2}-\d{2})T"
@@ -137,11 +145,29 @@ def require_canonical_api_path(value: str, *, context: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class FileSetLimits:
+    max_file_bytes: int
+    max_page_bytes: int
+    max_files_per_page: int
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> FileSetLimits:
+        values = tuple(
+            _integer(data, key)
+            for key in ("max_file_bytes", "max_page_bytes", "max_files_per_page")
+        )
+        if any(value < 1 for value in values):
+            raise ProtocolError("file-set limits must be positive")
+        return cls(*values)
+
+
+@dataclass(frozen=True, slots=True)
 class ApiLimits:
     max_content_bytes: int
     default_page_size: int
     max_page_size: int
     max_query_bytes: int
+    file_set: FileSetLimits | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> ApiLimits:
@@ -150,6 +176,11 @@ class ApiLimits:
             default_page_size=_integer(data, "default_page_size"),
             max_page_size=_integer(data, "max_page_size"),
             max_query_bytes=_integer(data, "max_query_bytes"),
+            file_set=(
+                FileSetLimits.from_dict(_object(data["file_set"], context="file_set"))
+                if data.get("file_set") is not None
+                else None
+            ),
         )
 
 
@@ -530,6 +561,236 @@ class MarkdownContent:
     @classmethod
     def from_text(cls, value: str) -> MarkdownContent:
         return cls(value.encode("utf-8"))
+
+
+def require_file_set_name(value: str) -> str:
+    if type(value) is not str or len(value) > 512:
+        raise ValueError("file-set filename must be bounded text")
+    name = unicodedata.normalize("NFC", value)
+    if (
+        not name
+        or name in {".", ".."}
+        or name[0] == " "
+        or name[-1] == "."
+        or any(part.endswith(" ") for part in name.split("."))
+        or any(character in _FILE_NAME_FORBIDDEN for character in name)
+        or any(
+            unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"} for character in name
+        )
+        or len(name.encode("utf-8")) > 255
+    ):
+        raise ValueError("file-set filename is not a safe flat filename")
+    stem = name.split(".", 1)[0].upper()
+    if stem in _DEVICE_NAMES or (
+        len(stem) == 4 and stem[:3] in {"COM", "LPT"} and stem[3] in "0123456789\u00b9\u00b2\u00b3"
+    ):
+        raise ValueError("file-set filename is reserved")
+    return name
+
+
+@dataclass(frozen=True, slots=True)
+class FileSetFile:
+    filename: str
+    body: bytes = field(repr=False)
+
+    def __post_init__(self) -> None:
+        require_file_set_name(self.filename)
+        if type(self.body) is not bytes or len(self.body) > MAX_FILE_SET_FILE_BYTES:
+            raise ValueError("file-set content must be bounded bytes")
+
+
+@dataclass(frozen=True, slots=True)
+class FileSetSource:
+    kind: str
+    locator: str | None = field(default=None, repr=False)
+    captured_at: int | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.kind) is not str
+            or not self.kind
+            or self.kind.strip() != self.kind
+            or len(self.kind) > 100
+            or "\x00" in self.kind
+        ):
+            raise ValueError("file-set source kind must be non-empty without edge whitespace")
+        if self.locator is not None and (
+            type(self.locator) is not str or not self.locator or "\x00" in self.locator
+        ):
+            raise ValueError("file-set source locator must be non-empty text without NUL")
+        if self.captured_at is not None and type(self.captured_at) is not int:
+            raise ValueError("file-set captured_at must be UTC microseconds")
+
+    def to_wire(self) -> dict[str, object]:
+        result: dict[str, object] = {"kind": self.kind}
+        if self.locator is not None:
+            result["locator"] = self.locator
+        if self.captured_at is not None:
+            result["captured_at"] = self.captured_at
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class FileSetCreateMetadata:
+    title: str = field(repr=False)
+    source: FileSetSource
+    occurred_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.title) is not str or not self.title.strip():
+            raise ValueError("file-set title must be non-empty")
+        if not isinstance(self.source, FileSetSource):
+            raise ValueError("file-set source must be FileSetSource")
+        if self.occurred_at is not None:
+            if not isinstance(self.occurred_at, datetime):
+                raise ValueError("file-set occurred_at must be a datetime")
+            format_rfc3339_utc(self.occurred_at)
+
+    def to_wire(self) -> dict[str, object]:
+        result: dict[str, object] = {"title": self.title, "source": self.source.to_wire()}
+        if self.occurred_at is not None:
+            result["occurred_at"] = format_rfc3339_utc(self.occurred_at)
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class FileSetRevisionMetadata:
+    source: FileSetSource
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, FileSetSource):
+            raise ValueError("file-set source must be FileSetSource")
+
+    def to_wire(self) -> dict[str, object]:
+        return {"source": self.source.to_wire()}
+
+
+def _sha256(value: str) -> str:
+    if re.fullmatch(r"[0-9a-f]{64}", value, re.ASCII) is None:
+        raise ProtocolError("response contained an invalid SHA-256 digest")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class FileSetFileSummary:
+    filename: str
+    size_bytes: int
+    content_sha256: str
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> FileSetFileSummary:
+        if set(data) != {"filename", "size_bytes", "content_sha256"}:
+            raise ProtocolError("file-set entry did not contain the expected fields")
+        name = _string(data, "filename")
+        try:
+            if require_file_set_name(name) != name:
+                raise ValueError("noncanonical filename")
+        except ValueError:
+            raise ProtocolError("file-set response contained an unsafe filename") from None
+        size = _integer(data, "size_bytes")
+        if not 0 <= size <= MAX_FILE_SET_FILE_BYTES:
+            raise ProtocolError("file-set response contained an invalid file size")
+        return cls(name, size, _sha256(_string(data, "content_sha256")))
+
+
+@dataclass(frozen=True, slots=True)
+class FileSetManifest:
+    page_id: str
+    revision_id: str
+    revision_number: int
+    snapshot_sha256: str
+    files: tuple[FileSetFileSummary, ...]
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> FileSetManifest:
+        if set(data) != {"page_id", "revision_id", "revision_number", "snapshot_sha256", "files"}:
+            raise ProtocolError("file-set manifest did not contain the expected fields")
+        page_id = _string(data, "page_id")
+        revision_id = _string(data, "revision_id")
+        number = _integer(data, "revision_number")
+        files = tuple(
+            FileSetFileSummary.from_dict(_object(item, context="file-set entry"))
+            for item in _object_list(data, "files")
+        )
+        if (
+            not page_id
+            or not revision_id
+            or number < 1
+            or not 1 <= len(files) <= MAX_FILE_SET_FILES
+        ):
+            raise ProtocolError("file-set manifest contained invalid identifiers or file count")
+        names = [item.filename for item in files]
+        if names != sorted(names, key=lambda name: name.encode("utf-8")) or len(
+            {unicodedata.normalize("NFC", name.casefold()) for name in names}
+        ) != len(names):
+            raise ProtocolError("file-set manifest was not canonically ordered")
+        if sum(item.size_bytes for item in files) > MAX_FILE_SET_PAGE_BYTES:
+            raise ProtocolError("file-set manifest exceeded the page size limit")
+        digest = hashlib.sha256(_FILE_SET_DOMAIN)
+        digest.update(len(files).to_bytes(8, "big"))
+        for item in files:
+            encoded = item.filename.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+            digest.update(item.size_bytes.to_bytes(8, "big"))
+            digest.update(bytes.fromhex(item.content_sha256))
+        snapshot = _sha256(_string(data, "snapshot_sha256"))
+        if digest.hexdigest() != snapshot:
+            raise ProtocolError("file-set manifest snapshot digest did not match its files")
+        return cls(page_id, revision_id, number, snapshot, files)
+
+
+def _manifest_fields(data: Mapping[str, object], extra: set[str]) -> FileSetManifest:
+    if (
+        set(data)
+        != {"page_id", "revision_id", "revision_number", "snapshot_sha256", "files"} | extra
+    ):
+        raise ProtocolError("file-set response did not contain the expected fields")
+    return FileSetManifest.from_dict(
+        {key: value for key, value in data.items() if key not in extra}
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class FileSetCreateResult:
+    section_id: str
+    book_id: str
+    occurred_at: datetime
+    occurrence_defaulted: bool
+    manifest: FileSetManifest
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> FileSetCreateResult:
+        extra = {"section_id", "book_id", "occurred_at", "occurrence_defaulted"}
+        manifest = _manifest_fields(data, extra)
+        if manifest.revision_number != 1:
+            raise ProtocolError("new Page did not contain first Revision")
+        section_id, book_id = _string(data, "section_id"), _string(data, "book_id")
+        if not section_id or not book_id:
+            raise ProtocolError("new Page response contained an empty scope identifier")
+        return cls(
+            section_id,
+            book_id,
+            parse_rfc3339(_string(data, "occurred_at")),
+            _boolean(data, "occurrence_defaulted"),
+            manifest,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class FileSetRevisionResult:
+    changed: bool
+    section_id: str
+    manifest: FileSetManifest
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> FileSetRevisionResult:
+        extra = {"changed", "section_id"}
+        manifest = _manifest_fields(data, extra)
+        section_id = _string(data, "section_id")
+        if not section_id:
+            raise ProtocolError("file-set revision contained an empty Section identifier")
+        return cls(_boolean(data, "changed"), section_id, manifest)
 
 
 @dataclass(frozen=True, slots=True)
