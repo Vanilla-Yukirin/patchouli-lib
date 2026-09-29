@@ -300,6 +300,8 @@ _ZH_CN: dict[str, str] = {
     "Library ID": "知识库 ID",
     "Library initialized": "知识库已初始化",
     "Library name": "知识库名称",
+    "Library description": "知识库简介",
+    "Optional. Briefly describe this knowledge space.": "选填。简要说明这个知识库的用途。",
     "Libraries": "知识库",
     "Home": "主页",
     "Setup and credentials": "初始化与凭据",
@@ -606,6 +608,12 @@ def operations_page(
                     "The name of this whole knowledge space. One Library is usually "
                     "enough for personal use."
                 ),
+            ),
+            _textarea(
+                "library_description",
+                "Library description",
+                locale,
+                help_text="Optional. Briefly describe this knowledge space.",
             ),
             _text(
                 "section_name",
@@ -1432,6 +1440,7 @@ def libraries_page(
     cards = "".join(
         '<li><a href="/admin/libraries/'
         f'{escape(item.id, quote=True)}">{escape(item.name)}</a>'
+        f"<p>{escape(item.description)}</p>"
         f'<p class="meta">{localize(locale, "Created")}: {_time(item.created_at)} · '
         f"{localize(locale, 'Page count')}: {item.page_count}</p></li>"
         for item in libraries
@@ -1445,6 +1454,7 @@ def libraries_page(
         '<section class="card"><h2>' + localize(locale, "Create Library") + "</h2>"
         f'<form method="post" action="/admin/libraries">{_csrf(escape(csrf_token, quote=True))}'
         f"{_text('name', 'Library name', locale)}"
+        f"{_textarea('description', 'Library description', locale)}"
         f'<button type="submit">{localize(locale, "Create Library")}</button></form></section>'
     )
     if message is not None:
@@ -1501,6 +1511,7 @@ def library_page(
         for item in view.sections
     )
     body = (
+        f"<p>{escape(view.library.description)}</p>"
         f'<p class="meta">{localize(locale, "Created")}: {_time(view.library.created_at)} · '
         f"{localize(locale, 'Page count')}: {view.library.page_count}</p>"
         f'<p><a href="{base}/tags">{localize(locale, "Tags")}</a></p>'

@@ -184,7 +184,6 @@ def test_0019_empty_roundtrip_restores_exact_0018_schema(
     command.upgrade(config, OLD_REVISION)
     old_schema = _snapshot(path)
     command.upgrade(config, NEW_REVISION)
-    command.check(config)
     engine = build_engine(url)
     try:
         with engine.connect() as connection:

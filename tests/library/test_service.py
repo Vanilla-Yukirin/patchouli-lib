@@ -9,8 +9,12 @@ from sqlalchemy.exc import IntegrityError
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.library.models import Book, Library, Section
 from patchouli_lib.library.repository import LibraryRepository
-from patchouli_lib.library.schemas import LibraryStructureSeed
-from patchouli_lib.library.service import LibrarySeedConflictError, LibrarySeedService
+from patchouli_lib.library.schemas import CreateLibraryInput, LibraryStructureSeed
+from patchouli_lib.library.service import (
+    LibrarySeedConflictError,
+    LibrarySeedService,
+    LibraryStructureService,
+)
 
 SYNTHETIC_SEED = LibraryStructureSeed(
     library_name="Example Library",
@@ -83,6 +87,10 @@ def test_seed_replay_returns_existing_structure_without_duplicates(
     ("replacement", "message"),
     [
         (
+            SYNTHETIC_SEED.model_copy(update={"library_description": "A different space."}),
+            "Existing Library",
+        ),
+        (
             SYNTHETIC_SEED.model_copy(update={"section_description": "A conflicting description."}),
             "Existing Section",
         ),
@@ -114,6 +122,21 @@ def test_seed_rejects_conflicting_existing_metadata(
         assert connection.scalar(select(func.count()).select_from(Library)) == 1
         assert connection.scalar(select(func.count()).select_from(Section)) == 1
         assert connection.scalar(select(func.count()).select_from(Book)) == 1
+
+
+def test_optional_library_description_is_bounded_and_persisted(library_engine: Engine) -> None:
+    with immediate_transaction(library_engine) as connection:
+        service = LibraryStructureService(LibraryRepository(connection))
+        described = service.create_library(
+            CreateLibraryInput(name="Described Library", description="x" * 4_000)
+        )
+        legacy = service.create_library(CreateLibraryInput(name="Legacy-style Library"))
+        assert described.description == "x" * 4_000
+        assert legacy.description == ""
+        assert LibraryRepository(connection).get_library(described.id) == described
+
+    with pytest.raises(ValidationError):
+        CreateLibraryInput(name="Rejected Library", description="x" * 4_001)
 
 
 def test_failed_seed_rolls_back_all_new_structure(library_engine: Engine) -> None:

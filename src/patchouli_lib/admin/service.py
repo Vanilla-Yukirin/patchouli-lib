@@ -281,6 +281,7 @@ class AdminActionService:
             ).seed(
                 LibraryStructureSeed(
                     library_name=request.library_name,
+                    library_description=request.library_description,
                     section_name=request.section_name,
                     section_description=request.section_description,
                     book_name=request.book_name,

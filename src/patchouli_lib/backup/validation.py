@@ -26,6 +26,7 @@ from patchouli_lib.backup.manifest import (
     LIFECYCLE_SCHEMA_REVISION,
     MASTER_AUDIT_SCHEMA_REVISION,
     MASTER_IDENTITY_SCHEMA_REVISION,
+    MASTER_LIFECYCLE_SCHEMA_REVISION,
     OCCURRENCE_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
@@ -462,6 +463,10 @@ _EXPECTED_SQL_HASHES_0019: Final = _EXPECTED_SQL_HASHES_0018 | {
         "4670af1144747e77b01dbe6eb6087a9906d00693a7bae577786ebc04c4c5809d"
     ),
 }
+_EXPECTED_SQL_HASHES_0020: Final = _EXPECTED_SQL_HASHES_0019 | {
+    # Derived from a fresh Alembic 0020 database with _canonical_schema_sql.
+    ("table", "libraries"): ("66347c3beb95842c572615086d35e0b22bc4bdd410d4a01d967bc7e426dc615d"),
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
     PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
@@ -475,7 +480,8 @@ _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     MASTER_IDENTITY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0016,
     ACTOR_HOME_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0017,
     MASTER_AUDIT_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0018,
-    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0019,
+    MASTER_LIFECYCLE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0019,
+    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0020,
 }
 _FILE_SET_REVISIONS: Final = frozenset(
     {
@@ -485,8 +491,12 @@ _FILE_SET_REVISIONS: Final = frozenset(
         MASTER_IDENTITY_SCHEMA_REVISION,
         ACTOR_HOME_SCHEMA_REVISION,
         MASTER_AUDIT_SCHEMA_REVISION,
+        MASTER_LIFECYCLE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }
+)
+_MASTER_LIFECYCLE_REVISIONS: Final = frozenset(
+    {MASTER_LIFECYCLE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}
 )
 _LIFECYCLE_REVISIONS: Final = _FILE_SET_REVISIONS | {LIFECYCLE_SCHEMA_REVISION}
 _OCCURRENCE_REVISIONS: Final = _LIFECYCLE_REVISIONS | {OCCURRENCE_SCHEMA_REVISION}
@@ -585,6 +595,13 @@ def _require_sqlite_integrity(connection: sqlite3.Connection) -> None:
         raise BackupDatabaseError
     if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
         raise BackupDatabaseError
+
+
+def _require_library_descriptions(connection: sqlite3.Connection) -> None:
+    # SQLite affinity does not prevent a BLOB from occupying a TEXT column.
+    for (description,) in connection.execute("SELECT description FROM libraries"):
+        if type(description) is not str or len(description) > 4_000:
+            raise BackupDatabaseError
 
 
 def _require_page_graph(connection: sqlite3.Connection, schema_revision: str) -> None:
@@ -935,7 +952,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
         )
 
     master_column = (
-        "master_audit_event_id" if schema_revision == SUPPORTED_SCHEMA_REVISION else "NULL"
+        "master_audit_event_id" if schema_revision in _MASTER_LIFECYCLE_REVISIONS else "NULL"
     )
     for row in connection.execute(
         "SELECT library_id, page_uid, sequence, action, section_id, old_deleted_at, "
@@ -974,7 +991,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
             raise BackupDatabaseError
         if master_audit_event_id is not None:
             if (
-                schema_revision != SUPPORTED_SCHEMA_REVISION
+                schema_revision not in _MASTER_LIFECYCLE_REVISIONS
                 or type(master_audit_event_id) is not str
                 or actor is not None
                 or action != "restore"
@@ -1426,7 +1443,7 @@ def _require_master_audit(connection: sqlite3.Connection, schema_revision: str) 
             or any(character not in "0123456789abcdef" for character in target_id)
         ):
             raise BackupDatabaseError
-        if schema_revision == SUPPORTED_SCHEMA_REVISION and action == "content.archive.restore":
+        if schema_revision in _MASTER_LIFECYCLE_REVISIONS and action == "content.archive.restore":
             linked_events = connection.execute(
                 "SELECT library_id, page_uid, changed_at FROM page_lifecycle_events "
                 "WHERE master_audit_event_id = ? LIMIT 2",
@@ -1462,7 +1479,7 @@ def _require_actor_home_graph(connection: sqlite3.Connection, schema_revision: s
         ("page_lifecycle_events", "actor_caller_id"),
         ("page_lifecycle_guards", "actor_caller_id"),
     ):
-        if schema_revision == SUPPORTED_SCHEMA_REVISION and table in {
+        if schema_revision in _MASTER_LIFECYCLE_REVISIONS and table in {
             "page_lifecycle_events",
             "page_lifecycle_guards",
         }:
@@ -1527,6 +1544,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         MASTER_IDENTITY_SCHEMA_REVISION,
         ACTOR_HOME_SCHEMA_REVISION,
         MASTER_AUDIT_SCHEMA_REVISION,
+        MASTER_LIFECYCLE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         invalid_library_policies = _one_integer(
@@ -1546,6 +1564,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         MASTER_IDENTITY_SCHEMA_REVISION,
         ACTOR_HOME_SCHEMA_REVISION,
         MASTER_AUDIT_SCHEMA_REVISION,
+        MASTER_LIFECYCLE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_agent_token_values(connection)
@@ -1554,6 +1573,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         MASTER_IDENTITY_SCHEMA_REVISION,
         ACTOR_HOME_SCHEMA_REVISION,
         MASTER_AUDIT_SCHEMA_REVISION,
+        MASTER_LIFECYCLE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_master_identity(connection)
@@ -1561,11 +1581,16 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
     if schema_revision in {
         ACTOR_HOME_SCHEMA_REVISION,
         MASTER_AUDIT_SCHEMA_REVISION,
+        MASTER_LIFECYCLE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_actor_home_graph(connection, schema_revision)
 
-    if schema_revision in {MASTER_AUDIT_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
+    if schema_revision in {
+        MASTER_AUDIT_SCHEMA_REVISION,
+        MASTER_LIFECYCLE_SCHEMA_REVISION,
+        SUPPORTED_SCHEMA_REVISION,
+    }:
         _require_master_audit(connection, schema_revision)
 
     rotations: dict[str, tuple[str, str, str | None, int | None, int | None, int]] = {}
@@ -2315,6 +2340,8 @@ def _validate_connection(
     ):
         raise BackupDatabaseError
     _require_page_graph(connection, schema_revision)
+    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+        _require_library_descriptions(connection)
     if schema_revision in _LIFECYCLE_REVISIONS:
         _require_lifecycle_graph(connection, schema_revision)
     if schema_revision not in {

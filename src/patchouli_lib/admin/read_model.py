@@ -39,6 +39,7 @@ def _lower_hex_id(value: str) -> bool:
 class LibraryItem:
     id: str
     name: str
+    description: str
     created_at: int
     page_count: int
 
@@ -1033,6 +1034,7 @@ def _library_summary_query() -> Select[Any]:
         select(
             Library.id,
             Library.name,
+            Library.description,
             Library.created_at,
             func.count(Page.page_uid).label("page_count"),
         )
@@ -1040,7 +1042,7 @@ def _library_summary_query() -> Select[Any]:
             Page,
             and_(Page.library_id == Library.id, Page.deleted_at.is_(None)),
         )
-        .group_by(Library.id, Library.name, Library.created_at)
+        .group_by(Library.id, Library.name, Library.description, Library.created_at)
         .order_by(Library.name, Library.id)
     )
 
@@ -1179,7 +1181,9 @@ def _get_book(
 
 
 def _library_item(row: RowMapping) -> LibraryItem:
-    return LibraryItem(row["id"], row["name"], row["created_at"], row["page_count"])
+    return LibraryItem(
+        row["id"], row["name"], row["description"], row["created_at"], row["page_count"]
+    )
 
 
 def _section_item(row: RowMapping) -> SectionItem:

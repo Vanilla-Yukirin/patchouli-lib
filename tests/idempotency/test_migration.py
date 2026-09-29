@@ -4,6 +4,7 @@ import pytest
 from alembic import command
 from sqlalchemy import inspect, text
 
+from patchouli_lib.backup.manifest import SUPPORTED_SCHEMA_REVISION
 from patchouli_lib.database import build_engine, immediate_transaction
 from patchouli_lib.idempotency import IdempotencyRepository, IdempotencyService
 
@@ -39,7 +40,7 @@ def test_migration_roundtrip_metadata_and_populated_downgrade(
             assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
             assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
         assert first.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == (
-            "20260930_0019"
+            SUPPORTED_SCHEMA_REVISION
         )
         assert set(
             first.execute(
@@ -70,9 +71,10 @@ def test_migration_roundtrip_metadata_and_populated_downgrade(
     engine = build_engine(database_url)
     try:
         with engine.connect() as connection:
-            assert connection.execute(
-                text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("20260930_0019")
+            assert (
+                connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+                == SUPPORTED_SCHEMA_REVISION
+            )
             assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
     finally:
         engine.dispose()

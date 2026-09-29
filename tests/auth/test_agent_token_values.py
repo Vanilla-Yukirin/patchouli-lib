@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Engine, func, insert, select, update
+from sqlalchemy import Engine, func, insert, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from patchouli_lib.auth.models import AgentTokenValue, Credential
@@ -18,9 +18,6 @@ from patchouli_lib.auth.service import (
 )
 from patchouli_lib.auth.tokens import generate_token
 from patchouli_lib.database import build_engine, immediate_transaction
-from patchouli_lib.library.repository import LibraryRepository
-from patchouli_lib.library.schemas import LibraryStructureSeed
-from patchouli_lib.library.service import LibrarySeedService
 
 LIBRARY = "1" * 32
 AGENT = "4" * 32
@@ -206,16 +203,28 @@ def test_0015_migration_keeps_legacy_tokens_unrecoverable_and_guards_direct_writ
     engine = build_engine(url)
     try:
         with immediate_transaction(engine) as connection:
-            LibrarySeedService(
-                LibraryRepository(connection),
-                id_factory=iter((LIBRARY, "2" * 32, "3" * 32)).__next__,
-                clock=lambda: 1_000_000,
-            ).seed(
-                LibraryStructureSeed(
-                    library_name="Synthetic Library",
-                    section_name="Synthetic Section",
-                    book_name="Synthetic Book",
-                )
+            connection.execute(
+                text(
+                    "INSERT INTO libraries (id, name, created_at, updated_at) "
+                    "VALUES (:id, 'Synthetic Library', 1000000, 1000000)"
+                ),
+                {"id": LIBRARY},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO sections "
+                    "(id, library_id, name, description, created_at, updated_at) "
+                    "VALUES (:id, :library_id, 'Synthetic Section', '', 1000000, 1000000)"
+                ),
+                {"id": "2" * 32, "library_id": LIBRARY},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO books "
+                    "(id, library_id, section_id, name, summary, created_at, updated_at) "
+                    "VALUES (:id, :library_id, :section_id, 'Synthetic Book', '', 1000000, 1000000)"
+                ),
+                {"id": "3" * 32, "library_id": LIBRARY, "section_id": "2" * 32},
             )
             repository = AuthRepository(connection)
             _caller(repository, kind=CallerKind.AGENT, caller_id=AGENT)

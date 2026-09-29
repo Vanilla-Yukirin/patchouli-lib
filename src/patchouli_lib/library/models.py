@@ -29,6 +29,10 @@ class Library(Base):
             name="ck_libraries_name",
         ),
         CheckConstraint(
+            "length(description) <= 4000",
+            name="ck_libraries_description",
+        ),
+        CheckConstraint(
             "created_at >= 0 AND updated_at >= created_at",
             name="ck_libraries_timestamps",
         ),
@@ -37,6 +41,7 @@ class Library(Base):
 
     id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
     name: Mapped[str] = mapped_column(String(NAME_MAX_LENGTH), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 

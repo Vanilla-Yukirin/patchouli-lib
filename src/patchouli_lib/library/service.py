@@ -83,6 +83,10 @@ class LibrarySeedService:
     ) -> tuple[LibraryRecord, bool]:
         existing = self._repository.find_library_by_name(seed.library_name)
         if existing is not None:
+            if existing.description != seed.library_description:
+                raise LibrarySeedConflictError(
+                    "Existing Library does not match requested seed metadata."
+                )
             return existing, False
 
         timestamp = creation_time()
@@ -90,6 +94,7 @@ class LibrarySeedService:
             NewLibrary(
                 id=self._id_factory(),
                 name=seed.library_name,
+                description=seed.library_description,
                 created_at=timestamp,
                 updated_at=timestamp,
             )
@@ -176,7 +181,13 @@ class LibraryStructureService:
             raise LibrarySeedConflictError("Library name already exists.")
         now = self._clock()
         return self._repository.add_library(
-            NewLibrary(id=self._id_factory(), name=request.name, created_at=now, updated_at=now)
+            NewLibrary(
+                id=self._id_factory(),
+                name=request.name,
+                description=request.description,
+                created_at=now,
+                updated_at=now,
+            )
         )
 
     def create_section(self, library_id: str, request: CreateSectionInput) -> SectionRecord:

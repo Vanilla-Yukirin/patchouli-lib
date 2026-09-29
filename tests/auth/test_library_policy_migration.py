@@ -31,11 +31,8 @@ from patchouli_lib.backup import (
     validate_database,
     verify_backup_bundle,
 )
-from patchouli_lib.backup.manifest import FILE_SET_SCHEMA_REVISION
+from patchouli_lib.backup.manifest import FILE_SET_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION
 from patchouli_lib.database import build_engine, immediate_transaction
-from patchouli_lib.library.repository import LibraryRepository
-from patchouli_lib.library.schemas import LibraryStructureSeed
-from patchouli_lib.library.service import LibrarySeedService
 
 ROOT = Path(__file__).resolve().parents[2]
 LIBRARY = "1" * 32
@@ -57,16 +54,23 @@ def _seed_legacy_credential(database_url: str) -> str:
     token = generate_token()
     try:
         with immediate_transaction(engine) as connection:
-            LibrarySeedService(
-                LibraryRepository(connection),
-                id_factory=iter((LIBRARY, SECTION, BOOK)).__next__,
-                clock=lambda: 1_000_000,
-            ).seed(
-                LibraryStructureSeed(
-                    library_name="Synthetic Existing Library",
-                    section_name="Synthetic Existing Section",
-                    book_name="Synthetic Existing Book",
-                )
+            # This fixture deliberately runs against historical schemas. Seed
+            # their original columns instead of using the current ORM model.
+            connection.exec_driver_sql(
+                "INSERT INTO libraries (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (LIBRARY, "Synthetic Existing Library", 1_000_000, 1_000_000),
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO sections "
+                "(id, library_id, name, description, created_at, updated_at) "
+                "VALUES (?, ?, ?, '', ?, ?)",
+                (SECTION, LIBRARY, "Synthetic Existing Section", 1_000_000, 1_000_000),
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO books "
+                "(id, library_id, section_id, name, summary, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, '', ?, ?)",
+                (BOOK, LIBRARY, SECTION, "Synthetic Existing Book", 1_000_000, 1_000_000),
             )
             repository = AuthRepository(connection)
             repository.add_caller(
@@ -303,11 +307,11 @@ def test_0014_policy_grant_survives_0015_verified_backup_restore(
             artifact_identity=artifact,
             app_version="0.0.0-test",
         )
-        assert result.manifest.schema_revision == "20260930_0019"
+        assert result.manifest.schema_revision == SUPPORTED_SCHEMA_REVISION
         assert verify_backup_bundle(bundle, app_version="0.0.0-test") == result.manifest
         restored = tmp_path / "policy-restored.db"
         restore_backup(bundle, restored, app_version="0.0.0-test")
-        assert validate_database(restored).schema_revision == "20260930_0019"
+        assert validate_database(restored).schema_revision == SUPPORTED_SCHEMA_REVISION
         restored_engine = build_engine(f"sqlite:///{restored.as_posix()}")
         try:
             with restored_engine.connect() as connection:

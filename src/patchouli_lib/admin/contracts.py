@@ -28,6 +28,7 @@ class AdminActionInput(BaseModel):
 
 class BootstrapInput(AdminActionInput):
     library_name: ResourceName
+    library_description: BoundedText = ""
     section_name: ResourceName
     section_description: BoundedText = ""
     book_name: ResourceName

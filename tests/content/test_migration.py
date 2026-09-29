@@ -7,7 +7,7 @@ from sqlalchemy import insert, inspect, select, text, update
 
 from patchouli_lib.content.models import Page, PageSource, Revision
 from patchouli_lib.content.schemas import MarkdownContent, NewRevision
-from patchouli_lib.database import build_engine, immediate_transaction
+from patchouli_lib.database import CURRENT_SCHEMA_REVISION, build_engine, immediate_transaction
 
 from .helpers import insert_page_graph, page_graph_values, seed_library_structure
 
@@ -247,7 +247,7 @@ def test_page_content_migration_upgrade_check_downgrade_upgrade(
                 "trg_pages_stable_identity",
             }
             assert first.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == (
-                "20260930_0019"
+                CURRENT_SCHEMA_REVISION
             )
     finally:
         engine.dispose()

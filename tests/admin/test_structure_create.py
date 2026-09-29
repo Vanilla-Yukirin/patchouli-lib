@@ -73,10 +73,21 @@ def test_create_hierarchy_from_web_with_distinct_session_audit(
         == 401
     )
     csrf = _login(client)
-    library = _post(client, "/admin/libraries", csrf, name="Synthetic Library")
+    description = '<script>alert("synthetic")</script>'
+    library = _post(
+        client,
+        "/admin/libraries",
+        csrf,
+        name="Synthetic Library",
+        description=description,
+    )
     assert library.status_code == 303
     library_path = library.headers["location"]
-    assert "Synthetic Library" in client.get(library_path).text
+    detail = client.get(library_path).text
+    directory = client.get("/admin/libraries").text
+    assert "Synthetic Library" in detail
+    assert "&lt;script&gt;" in detail and "&lt;script&gt;" in directory
+    assert description not in detail and description not in directory
 
     section = _post(
         client, library_path + "/sections", csrf, name="Synthetic Section", description="Brief"
@@ -107,6 +118,7 @@ def test_create_hierarchy_from_web_with_distinct_session_audit(
         assert all(event.session_fingerprint != csrf.encode() for event in events)
         assert connection.scalar(select(func.count()).select_from(Caller)) == 0
         assert connection.scalar(select(func.count()).select_from(Library)) == 1
+        assert connection.scalar(select(Library.description)) == description
         assert connection.scalar(select(func.count()).select_from(Section)) == 1
         assert connection.scalar(select(func.count()).select_from(Book)) == 1
 
@@ -128,6 +140,12 @@ def test_create_rejects_conflict_wrong_parent_origin_and_csrf(
         == 403
     )
     assert _post(client, "/admin/libraries", csrf, name=" ").status_code == 422
+    assert (
+        _post(
+            client, "/admin/libraries", csrf, name="Too long", description="x" * 4_001
+        ).status_code
+        == 422
+    )
     missing = "f" * 32
     assert (
         _post(client, f"/admin/libraries/{missing}/sections", csrf, name="Orphan").status_code
