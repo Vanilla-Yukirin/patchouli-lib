@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import platform
 import random
 import sqlite3
@@ -63,6 +64,8 @@ class Document:
     revision_id: str
     title: str
     body: str
+    text_files: tuple[tuple[str, str], ...]
+    binary_files: tuple[tuple[str, bytes], ...]
     tags: tuple[str, ...]
     occurred_at: int
     old_body: str | None
@@ -138,6 +141,20 @@ def generate_corpus(page_count: int, body_bytes: int) -> tuple[Document, ...]:
                 revision_id=f"revision-{number:05d}-current",
                 title=title,
                 body=body,
+                text_files=(
+                    (("notes.txt", "多文件文本独有信号"),)
+                    if number == 4
+                    else (("notes.txt", f"附页 {_han_word(number)} topic{number:05d}"),)
+                    if number % 17 == 0
+                    else ()
+                ),
+                binary_files=(
+                    (("binary-needle.bin", "二进制隐匿密文".encode()),)
+                    if number == 4
+                    else ((f"payload-{number:05d}.bin", b"\x00\xff" + number.to_bytes(4)),)
+                    if number % 23 == 0
+                    else ()
+                ),
                 tags=(f"tag-{number % 7}",) + (("shared",) if number % 5 == 0 else ()),
                 occurred_at=BASE_TIME + number * 1_000_000,
                 old_body=f"旧版独有标记 page-{number:05d}" if number % 11 == 0 else None,
@@ -162,7 +179,22 @@ def evaluation_queries(page_count: int) -> tuple[Query, ...]:
         Query("symbol_boundary", authorized, ("ral🙂!",), expected_first=("page-00003",)),
         Query("mixed_han_symbols", authorized, ("技术-lit🙂?",), expected_first=("page-00003",)),
         Query("keywords_or", authorized, ("独家信号", "共同主题"), expected_first=sentinel),
+        Query(
+            "disjoint_keywords_or",
+            authorized,
+            ("stararchive", "多文件文本独有信号"),
+            expected_first=("page-00000", "page-00004"),
+        ),
+        Query(
+            "wide_keywords_or",
+            ("library-0", "library-1", "library-2"),
+            ("共同主题",) + tuple(f"not-present-phrase-{number:02d}" for number in range(24)),
+        ),
         Query("broad_all", ("library-0", "library-1", "library-2"), ("共同主题",)),
+        Query("text_file", authorized, ("多文件文本独有信号",), expected_first=("page-00004",)),
+        Query("file_name", authorized, ("binary-needle.bin",), expected_first=("page-00004",)),
+        Query("binary_bytes_not_text", authorized, ("二进制隐匿密文",)),
+        Query("tags_any_only", authorized, tags_any=("tag-1", "tag-2")),
         Query(
             "tags_and_time_only",
             authorized,
@@ -171,6 +203,7 @@ def evaluation_queries(page_count: int) -> tuple[Query, ...]:
             occurred_before=BASE_TIME + min(page_count, 240) * 1_000_000,
         ),
         Query("time_only", ("library-0",), occurred_from=BASE_TIME + 10 * 1_000_000),
+        Query("time_before_only", authorized, occurred_before=BASE_TIME + 60 * 1_000_000),
         Query("old_revision_only", authorized, ("旧版独有标记",)),
         Query("deleted_only", authorized, ("回收站独有标记",)),
         Query("no_match", authorized, ("绝不会出现的镜面词",)),
@@ -227,10 +260,15 @@ def literal_oracle(documents: tuple[Document, ...], query: Query) -> frozenset[s
         if query.keywords:
             if any(keyword == "" for keyword in query.keywords):
                 raise ValueError("Empty keywords have no accepted experimental semantics.")
-            title_text = _normalized(document.title)
-            body_text = _normalized(document.body)
+            searchable_fields = (
+                document.title,
+                document.body,
+                *(name for name, _text in document.text_files),
+                *(content for _name, content in document.text_files),
+                *(name for name, _content in document.binary_files),
+            )
             if not any(
-                _normalized(keyword) in title_text or _normalized(keyword) in body_text
+                any(_normalized(keyword) in _normalized(field) for field in searchable_fields)
                 for keyword in query.keywords
             ):
                 continue
@@ -275,18 +313,21 @@ def _create_authority(connection: sqlite3.Connection, documents: tuple[Document,
         "CREATE TABLE documents (number INTEGER PRIMARY KEY, page_id TEXT UNIQUE NOT NULL, "
         "library_id TEXT NOT NULL, section_id TEXT NOT NULL, book_id TEXT NOT NULL, "
         "revision_id TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, "
+        "text_files_json TEXT NOT NULL, file_names_json TEXT NOT NULL, "
         "occurred_at INTEGER NOT NULL, deleted INTEGER NOT NULL);"
         "CREATE INDEX documents_scope ON documents(library_id, deleted, occurred_at);"
         "CREATE TABLE tags (number INTEGER NOT NULL, tag TEXT NOT NULL, "
         "PRIMARY KEY (number, tag));"
         "CREATE INDEX tags_lookup ON tags(tag, number);"
         "CREATE TABLE old_revisions (number INTEGER PRIMARY KEY, body TEXT NOT NULL);"
-        "CREATE VIRTUAL TABLE search_index USING fts5(title_terms, body_terms, "
+        "CREATE TABLE binary_files (number INTEGER NOT NULL, name TEXT NOT NULL, "
+        "payload BLOB NOT NULL, PRIMARY KEY (number, name));"
+        "CREATE VIRTUAL TABLE search_index USING fts5(title_terms, body_terms, file_terms, "
         "tokenize='unicode61');"
     )
     with connection:
         connection.executemany(
-            "INSERT INTO documents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO documents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 (
                     doc.number,
@@ -297,6 +338,12 @@ def _create_authority(connection: sqlite3.Connection, documents: tuple[Document,
                     doc.revision_id,
                     doc.title,
                     doc.body,
+                    json.dumps(doc.text_files, ensure_ascii=False),
+                    json.dumps(
+                        tuple(name for name, _text in doc.text_files)
+                        + tuple(name for name, _payload in doc.binary_files),
+                        ensure_ascii=False,
+                    ),
                     doc.occurred_at,
                     int(doc.deleted),
                 )
@@ -311,15 +358,37 @@ def _create_authority(connection: sqlite3.Connection, documents: tuple[Document,
             "INSERT INTO old_revisions VALUES (?, ?)",
             ((doc.number, doc.old_body) for doc in documents if doc.old_body is not None),
         )
+        connection.executemany(
+            "INSERT INTO binary_files VALUES (?, ?, ?)",
+            (
+                (doc.number, name, payload)
+                for doc in documents
+                for name, payload in doc.binary_files
+            ),
+        )
 
 
 def _index_documents(connection: sqlite3.Connection) -> float:
     started = time.perf_counter_ns()
-    rows = connection.execute("SELECT number, title, body FROM documents").fetchall()
+    rows = connection.execute(
+        "SELECT number, title, body, text_files_json, file_names_json "
+        "FROM documents WHERE deleted = 0"
+    ).fetchall()
     with connection:
         connection.executemany(
-            "INSERT INTO search_index(rowid, title_terms, body_terms) VALUES (?, ?, ?)",
-            ((number, _encoded_terms(title), _encoded_terms(body)) for number, title, body in rows),
+            "INSERT INTO search_index(rowid, title_terms, body_terms, file_terms) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                (
+                    number,
+                    _encoded_terms(title),
+                    _encoded_terms(body),
+                    _encoded_terms("\n".join(text for _name, text in json.loads(text_files_json)))
+                    + " "
+                    + _encoded_terms("\n".join(json.loads(file_names_json))),
+                )
+                for number, title, body, text_files_json, file_names_json in rows
+            ),
         )
     return (time.perf_counter_ns() - started) / 1_000_000
 
@@ -353,19 +422,25 @@ def _statement(query: Query) -> tuple[str, tuple[object, ...]]:
         )
         parameters.extend(query.tags_any)
     sql = (
-        "SELECT d.page_id, d.title, d.body, d.number FROM "
-        + from_clause
-        + " WHERE "
-        + " AND ".join(conditions)
+        "SELECT d.page_id, d.title, d.body, d.text_files_json, d.file_names_json, "
+        "d.number FROM " + from_clause + " WHERE " + " AND ".join(conditions)
     )
     return sql, tuple(parameters)
 
 
 def _candidate_rank(
-    page_id: str, title: str, body: str, tags: set[str], query: Query
+    page_id: str,
+    title: str,
+    body: str,
+    text_files_json: str,
+    file_names_json: str,
+    tags: set[str],
+    query: Query,
 ) -> tuple[int, str] | None:
     title_text = _normalized(title)
     body_text = _normalized(body)
+    extra_text = tuple(_normalized(text) for _name, text in json.loads(text_files_json))
+    file_names = tuple(_normalized(name) for name in json.loads(file_names_json))
     score = 0
     for keyword in query.keywords:
         literal = _normalized(keyword)
@@ -373,6 +448,10 @@ def _candidate_rank(
             score += 100
         if literal in body_text:
             score += 10
+        if any(literal in text for text in extra_text):
+            score += 10
+        if any(literal in name for name in file_names):
+            score += 5
     if query.keywords and score == 0:
         return None
     score += 2 * len(tags.intersection(query.tags_any))
@@ -390,8 +469,16 @@ def _candidate_search(connection: sqlite3.Connection, query: Query) -> tuple[tup
         ):
             tag_matches.setdefault(number, set()).add(tag)
     ranked: list[tuple[int, str]] = []
-    for page_id, title, body, number in rows:
-        score = _candidate_rank(page_id, title, body, tag_matches.get(number, set()), query)
+    for page_id, title, body, text_files_json, file_names_json, number in rows:
+        score = _candidate_rank(
+            page_id,
+            title,
+            body,
+            text_files_json,
+            file_names_json,
+            tag_matches.get(number, set()),
+            query,
+        )
         if score is not None:
             ranked.append(score)
     ranked.sort()
@@ -427,9 +514,11 @@ def _database_sizes(connection: sqlite3.Connection, path: Path) -> DatabaseSizes
 
 
 def _update_one_current_page(connection: sqlite3.Connection) -> float:
-    row = connection.execute("SELECT title, body FROM documents WHERE number = 2").fetchone()
+    row = connection.execute(
+        "SELECT title, body, text_files_json, file_names_json FROM documents WHERE number = 2"
+    ).fetchone()
     assert row is not None
-    title, body = row
+    title, body, text_files_json, file_names_json = row
     changed = body.replace("独家信号", "更新后信号", 1)
     started = time.perf_counter_ns()
     with connection:
@@ -439,8 +528,16 @@ def _update_one_current_page(connection: sqlite3.Connection) -> float:
         )
         connection.execute("DELETE FROM search_index WHERE rowid = 2")
         connection.execute(
-            "INSERT INTO search_index(rowid, title_terms, body_terms) VALUES (?, ?, ?)",
-            (2, _encoded_terms(title), _encoded_terms(changed)),
+            "INSERT INTO search_index(rowid, title_terms, body_terms, file_terms) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                2,
+                _encoded_terms(title),
+                _encoded_terms(changed),
+                _encoded_terms("\n".join(text for _name, text in json.loads(text_files_json)))
+                + " "
+                + _encoded_terms("\n".join(json.loads(file_names_json))),
+            ),
         )
     return (time.perf_counter_ns() - started) / 1_000_000
 
@@ -456,7 +553,7 @@ def _probe_unauthorized_noise(connection: sqlite3.Connection, number: int) -> di
         for offset in range(noise_count):
             noise_number = number + offset
             connection.execute(
-                "INSERT INTO documents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO documents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     noise_number,
                     f"page-unauthorized-noise-{offset:02d}",
@@ -466,13 +563,16 @@ def _probe_unauthorized_noise(connection: sqlite3.Connection, number: int) -> di
                     f"revision-noise-{offset:02d}",
                     noise_title,
                     noise_body,
+                    "[]",
+                    "[]",
                     BASE_TIME,
                     0,
                 ),
             )
             connection.execute(
-                "INSERT INTO search_index(rowid, title_terms, body_terms) VALUES (?, ?, ?)",
-                (noise_number, _encoded_terms(noise_title), _encoded_terms(noise_body)),
+                "INSERT INTO search_index(rowid, title_terms, body_terms, file_terms) "
+                "VALUES (?, ?, ?, ?)",
+                (noise_number, _encoded_terms(noise_title), _encoded_terms(noise_body), ""),
             )
         after_hits, after_candidates = _candidate_search(connection, query)
         global_query = Query(
@@ -519,10 +619,16 @@ def evaluate(
         with closing(sqlite3.connect(path)) as connection:
             _create_authority(connection, documents)
             authority_sizes = _database_sizes(connection, path)
+            binary_payloads = connection.execute(
+                "SELECT count(*), coalesce(sum(length(payload)), 0) FROM binary_files"
+            ).fetchone()
+            assert binary_payloads is not None
             build_ms = _index_documents(connection)
             sizes = _database_sizes(connection, path)
+            indexed_pages = connection.execute("SELECT count(*) FROM search_index").fetchone()[0]
             observations: list[dict[str, Any]] = []
-            all_samples: list[float] = []
+            warm_samples: list[float] = []
+            new_connection_samples: list[float] = []
             for query in queries:
                 expected = literal_oracle(documents, query)
                 sql, parameters = _statement(query)
@@ -532,6 +638,13 @@ def evaluate(
                         "EXPLAIN QUERY PLAN " + sql, parameters
                     )
                 ]
+                # A fresh SQLite connection is a useful cache-state contrast, but
+                # it cannot evict the operating system's file cache.
+                started = time.perf_counter_ns()
+                with closing(sqlite3.connect(path)) as fresh_connection:
+                    first_actual, first_candidates = _candidate_search(fresh_connection, query)
+                new_connection_ms = (time.perf_counter_ns() - started) / 1_000_000
+                new_connection_samples.append(new_connection_ms)
                 samples: list[float] = []
                 actual: tuple[str, ...] = ()
                 candidate_count = 0
@@ -539,7 +652,7 @@ def evaluate(
                     started = time.perf_counter_ns()
                     actual, candidate_count = _candidate_search(connection, query)
                     samples.append((time.perf_counter_ns() - started) / 1_000_000)
-                all_samples.extend(samples)
+                warm_samples.extend(samples)
                 observations.append(
                     {
                         "name": query.name,
@@ -548,13 +661,19 @@ def evaluate(
                         "matched_count": len(actual),
                         "oracle_count": len(expected),
                         "complete_membership": frozenset(actual) == expected,
+                        "new_connection_agrees": (
+                            first_actual == actual and first_candidates == candidate_count
+                        ),
                         "hand_labelled_top_k": (
                             list(actual[: len(query.expected_first)]) == list(query.expected_first)
                             if query.expected_first
                             else None
                         ),
                         "top_k_page_ids": list(actual[:TOP_K]),
-                        "latency": _percentiles(samples),
+                        "top_k_contains_no_duplicates": len(actual[:TOP_K])
+                        == len(set(actual[:TOP_K])),
+                        "warm_connection_latency": _percentiles(samples),
+                        "new_connection_ms": round(new_connection_ms, 3),
                         "query_plan": plan,
                     }
                 )
@@ -563,15 +682,20 @@ def evaluate(
             sentinel = Query("post_update", ("library-0", "library-1"), ("独家信号",))
             after_update, _ = _candidate_search(connection, sentinel)
             updated = after_update == ("page-00000",)
+            rebuild_started = time.perf_counter_ns()
             with connection:
                 connection.execute("DELETE FROM search_index")
-            rebuild_ms = _index_documents(connection)
+            _index_documents(connection)
+            rebuild_ms = (time.perf_counter_ns() - rebuild_started) / 1_000_000
             after_rebuild, _ = _candidate_search(connection, sentinel)
             rebuilt = after_rebuild == after_update
             rebuilt_sizes = _database_sizes(connection, path)
     evaluation_passed = (
         all(
-            observation["complete_membership"] and observation["hand_labelled_top_k"] is not False
+            observation["complete_membership"]
+            and observation["new_connection_agrees"]
+            and observation["top_k_contains_no_duplicates"]
+            and observation["hand_labelled_top_k"] is not False
             for observation in observations
         )
         and auth_isolation["passed"]
@@ -585,9 +709,24 @@ def evaluate(
         "provenance": "CC0-1.0 original deterministic synthetic text; no private data",
         "page_count": page_count,
         "body_bytes_per_page": body_bytes,
+        "occurred_at_unit": "synthetic microseconds since UTC epoch",
         "library_count": 3,
         "old_revision_count": sum(doc.old_body is not None for doc in documents),
         "deleted_count": sum(doc.deleted for doc in documents),
+        "pages_with_extra_text_files": sum(bool(doc.text_files) for doc in documents),
+        "pages_with_binary_files": sum(bool(doc.binary_files) for doc in documents),
+        "binary_payload_rows": binary_payloads[0],
+        "binary_payload_bytes": binary_payloads[1],
+        "indexed_current_undeleted_pages": indexed_pages,
+        "measurement_environment": {
+            "os_family": platform.system(),
+            "architecture": platform.machine(),
+            "logical_cpu_count": os.cpu_count(),
+            "python_version": platform.python_version(),
+            "sqlite_version": sqlite3.sqlite_version,
+            "processes": 1,
+            "database": "disposable local SQLite file; no application database",
+        },
         "python_version": platform.python_version(),
         "sqlite_version": sqlite3.sqlite_version,
         "unicode_version": unicodedata.unidata_version,
@@ -604,8 +743,11 @@ def evaluate(
             "fts_pages_bytes uses SQLite dbstat when available; estimated_fts_growth_bytes "
             "is the whole-database growth after indexing, not an exact index-only size."
         ),
+        "build_measurement_scope": "Fetch authority rows, derive tokens, and insert FTS rows",
+        "rebuild_measurement_scope": "Delete FTS rows, derive tokens, and reinsert current rows",
         "sizes_after_rebuild": rebuilt_sizes,
-        "overall_latency": _percentiles(all_samples),
+        "warm_connection_latency": _percentiles(warm_samples),
+        "new_connection_latency": _percentiles(new_connection_samples),
         "queries": observations,
         "unauthorized_high_relevance_probe": auth_isolation,
         "current_revision_update_replaces_old_match": updated,
@@ -614,9 +756,10 @@ def evaluate(
             "This is one local FTS5 candidate and an isolated SQLite schema, not the production "
             "authorization, API, migration, backup, concurrency, or restore path. Text is "
             "synthetic, not human relevance judgments. Hand-labelled sentinels cover only a few "
-            "rank cases. Five repetitions per query give indicative p99, "
-            "not a stable tail estimate. "
-            "Measurements use a warm OS cache; a new connection is not an OS-cold measurement. "
+            "rank cases. Five warm-connection repetitions and one new-connection sample per "
+            "query give indicative p99, not a stable tail estimate. Measurements use an "
+            "OS-warm cache; a new connection is not an OS-cold measurement. Only explicitly "
+            "labelled UTF-8 synthetic text files are indexed; binary payload bytes are excluded. "
             "The 1-second target and design acceptance are not established."
             " Empty keywords are explicitly unsupported pending a public semantics decision."
         ),
@@ -628,17 +771,25 @@ def render_markdown(report: dict[str, Any]) -> str:
         "# 搜索 v2 离线候选评估（Proposed，未启用生产搜索）",
         "",
         f"- 独立判断与安全探针全部通过：{report['evaluation_passed']}。",
-        f"- 合成 Page：{report['page_count']} × {report['body_bytes_per_page']} UTF-8 字节。",
+        f"- 合成 Page 主正文：{report['page_count']} × "
+        f"{report['body_bytes_per_page']} UTF-8 字节（另有文本和二进制文件）。",
+        f"- 带额外文本／二进制文件的 Page：{report['pages_with_extra_text_files']}／"
+        f"{report['pages_with_binary_files']}。",
+        f"- 索引中的未删除当前 Page：{report['indexed_current_undeleted_pages']}。",
+        f"- 测量环境：{report['measurement_environment']}。",
         f"- FTS 建立／更新／重建：{report['build_ms']}／{report['update_ms']}／"
         f"{report['rebuild_ms']} 毫秒。",
+        f"- 建立／重建口径：{report['build_measurement_scope']}；"
+        f"{report['rebuild_measurement_scope']}。",
         f"- 建立后数据库／FTS 页字节：{report['sizes_after_build']}。",
-        f"- 全部查询延迟：{report['overall_latency']}。",
+        f"- 复用连接／新连接查询延迟：{report['warm_connection_latency']}／"
+        f"{report['new_connection_latency']}。新连接不代表操作系统冷缓存。",
         "",
         "| 查询 | 候选 | 命中 | 独立相关性数 | 完整召回 | 手工 TopK | p95 ms | 最差 ms |",
         "| --- | ---: | ---: | ---: | --- | --- | ---: | ---: |",
     ]
     for query in report["queries"]:
-        latency = query["latency"]
+        latency = query["warm_connection_latency"]
         lines.append(
             f"| `{query['name']}` | {query['candidate_count']} | {query['matched_count']} | "
             f"{query['oracle_count']} | {query['complete_membership']} | "

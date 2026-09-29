@@ -53,6 +53,9 @@ def test_corpus_is_deterministic_diverse_and_keeps_history_outside_current_text(
     assert any(doc.old_body is not None for doc in first)
     assert any(doc.deleted for doc in first)
     assert all("旧版独有标记" not in doc.body for doc in first)
+    assert first[4].text_files == (("notes.txt", "多文件文本独有信号"),)
+    assert first[4].binary_files[0][0] == "binary-needle.bin"
+    assert first[4].binary_files[0][1].decode("utf-8") == "二进制隐匿密文"
     with pytest.raises(ValueError):
         generate_corpus(20_000, 10 * 1_024)
     with pytest.raises(ValueError):
@@ -69,6 +72,23 @@ def test_independent_oracle_uses_literal_page_membership_not_candidate_rank() ->
     )
     old_only = next(query for query in evaluation_queries(96) if query.name == "old_revision_only")
     assert literal_oracle(documents, old_only) == frozenset()
+    disjoint = next(
+        query for query in evaluation_queries(96) if query.name == "disjoint_keywords_or"
+    )
+    assert literal_oracle(documents, disjoint) == frozenset({"page-00000", "page-00004"})
+    text_file = next(query for query in evaluation_queries(96) if query.name == "text_file")
+    assert literal_oracle(documents, text_file) == frozenset({"page-00004"})
+    binary_content = next(
+        query for query in evaluation_queries(96) if query.name == "binary_bytes_not_text"
+    )
+    assert literal_oracle(documents, binary_content) == frozenset()
+    tags = next(query for query in evaluation_queries(96) if query.name == "tags_any_only")
+    assert literal_oracle(documents, tags) == literal_oracle(
+        documents, replace(tags, tags_any=("tag-1",))
+    ) | literal_oracle(documents, replace(tags, tags_any=("tag-2",)))
+    before = next(query for query in evaluation_queries(96) if query.name == "time_before_only")
+    assert "page-00060" not in literal_oracle(documents, before)
+    assert "page-00058" in literal_oracle(documents, before)
     for name in SHORT_LITERAL_QUERIES:
         query = next(item for item in evaluation_queries(96) if item.name == name)
         assert literal_oracle(documents, query) == frozenset({"page-00003"})
@@ -92,20 +112,41 @@ def test_all_queries_have_complete_membership_and_manual_sentinels(report: dict[
     assert report["provenance"].startswith("CC0-1.0 original deterministic synthetic text")
     assert report["page_count"] == 330
     assert report["body_bytes_per_page"] == 512
+    assert report["pages_with_extra_text_files"] > 10
+    assert report["pages_with_binary_files"] > 10
+    assert report["binary_payload_rows"] == report["pages_with_binary_files"]
+    assert report["binary_payload_bytes"] > 0
+    assert report["indexed_current_undeleted_pages"] == (
+        report["page_count"] - report["deleted_count"]
+    )
+    assert report["occurred_at_unit"] == "synthetic microseconds since UTC epoch"
     assert all(query["complete_membership"] is True for query in report["queries"])
+    assert all(query["new_connection_agrees"] is True for query in report["queries"])
+    assert all(query["top_k_contains_no_duplicates"] is True for query in report["queries"])
     assert all(
         query["hand_labelled_top_k"] is True
         for query in report["queries"]
         if query["hand_labelled_top_k"] is not None
     )
     assert _query(report, "broad_all")["candidate_count"] > 256
+    assert _query(report, "wide_keywords_or")["candidate_count"] > 256
+    assert _query(report, "disjoint_keywords_or")["top_k_page_ids"] == [
+        "page-00000",
+        "page-00004",
+    ]
+    assert _query(report, "text_file")["top_k_page_ids"] == ["page-00004"]
+    assert _query(report, "file_name")["top_k_page_ids"] == ["page-00004"]
+    assert _query(report, "binary_bytes_not_text")["matched_count"] == 0
     assert (
         _query(report, "broad_all")["matched_count"]
         == report["page_count"] - report["deleted_count"]
     )
     assert _query(report, "tags_and_time_only")["matched_count"] > 0
+    assert _query(report, "tags_any_only")["matched_count"] > 0
+    assert _query(report, "time_before_only")["matched_count"] > 0
     assert _query(report, "old_revision_only")["matched_count"] == 0
     assert _query(report, "deleted_only")["matched_count"] == 0
+    assert _query(report, "deleted_only")["candidate_count"] == 0
     assert _query(report, "no_match")["matched_count"] == 0
     for name in SHORT_LITERAL_QUERIES:
         query = _query(report, name)
@@ -129,14 +170,21 @@ def test_auth_update_rebuild_and_measurement_caveats(report: dict[str, Any]) -> 
     assert report["build_ms"] > 0
     assert report["update_ms"] > 0
     assert report["rebuild_ms"] > 0
+    assert report["build_measurement_scope"].startswith("Fetch authority rows")
+    assert report["rebuild_measurement_scope"].startswith("Delete FTS rows")
+    environment = report["measurement_environment"]
+    assert environment["processes"] == 1
+    assert environment["database"].startswith("disposable local SQLite")
     assert report["sizes_after_build"]["database_bytes"] > 0
     assert report["estimated_fts_growth_bytes"] > 0
     assert report["short_literal_terms_version"].startswith("non-Han-codepoint-1-2-3")
     assert "not an exact index-only size" in report["index_size_method"]
-    for percentile in ("p50_ms", "p95_ms", "p99_ms", "worst_ms"):
-        assert report["overall_latency"][percentile] >= 0
-    assert report["overall_latency"]["sample_count"] == len(report["queries"]) * 5
+    for kind, samples in (("warm_connection_latency", 5), ("new_connection_latency", 1)):
+        for percentile in ("p50_ms", "p95_ms", "p99_ms", "worst_ms"):
+            assert report[kind][percentile] >= 0
+        assert report[kind]["sample_count"] == len(report["queries"]) * samples
     assert "new connection is not an OS-cold measurement" in report["limitations"]
+    assert "binary payload bytes are excluded" in report["limitations"]
     assert "not established" in report["limitations"]
 
 
