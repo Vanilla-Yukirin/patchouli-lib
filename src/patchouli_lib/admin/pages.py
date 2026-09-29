@@ -232,6 +232,15 @@ _ZH_CN: dict[str, str] = {
     "Content activity": "内容近况",
     "Created a page": "创建了页面",
     "Revised a page": "更新了页面",
+    "Corrected a page's occurrence time": "更正了页面的发生时间",
+    "Deleted a page": "删除了页面",
+    "Restored a page": "恢复了页面",
+    "Created a tag": "创建了标签",
+    "Attached tag": "关联了标签",
+    "Removed tag": "移除了标签",
+    "to page": "到页面",
+    "from page": "从页面",
+    "Tag no longer available": "标签目前不可查看",
     "No content activity yet.": "暂无内容活动。",
     "Page no longer available": "页面目前不可预览",
     "Identity details": "身份详情",
@@ -569,25 +578,51 @@ def _content_activity_timeline(
             f"{escape(item.actor_id, quote=True)}"
         )
         actor = f'<a href="{actor_path}">{escape(item.actor_name)}</a>'
-        action = "Created a page" if item.action == "content.archive.create" else "Revised a page"
-        if (
-            item.page_id is not None
-            and item.section_id is not None
-            and item.book_id is not None
-            and item.revision_number is not None
-        ):
-            page_path = (
+        tag = escape(item.tag_name or localize(locale, "Tag no longer available"))
+        if item.tag_id is not None:
+            tag_path = (
+                f"/admin/libraries/{escape(item.library_id, quote=True)}/tags/"
+                f"{escape(item.tag_id, quote=True)}"
+            )
+            tag = f'<a href="{tag_path}">{tag}</a>'
+        page = escape(item.page_title or localize(locale, "Page no longer available"))
+        if item.page_id is not None and item.section_id is not None and item.book_id is not None:
+            section_path = (
                 f"/admin/libraries/{escape(item.library_id, quote=True)}"
                 f"/sections/{escape(item.section_id, quote=True)}"
-                f"/books/{escape(item.book_id, quote=True)}"
-                f"/pages/{escape(item.page_id, quote=True)}"
-                f"/revisions/{item.revision_number}"
             )
-            page = f'<a href="{page_path}">{escape(item.page_title or "")}</a>'
+            if item.page_deleted:
+                page_path = f"{section_path}/trash/{escape(item.page_id, quote=True)}"
+            else:
+                page_path = (
+                    section_path
+                    + f"/books/{escape(item.book_id, quote=True)}"
+                    + f"/pages/{escape(item.page_id, quote=True)}"
+                )
+                if item.revision_number is not None:
+                    page_path += f"/revisions/{item.revision_number}"
+            page = f'<a href="{page_path}">{page}</a>'
+        if item.action == "tag.create":
+            description = f"{localize(locale, 'Created a tag')} {tag}"
+        elif item.action == "tag.page.attach":
+            description = (
+                f"{localize(locale, 'Attached tag')} {tag} {localize(locale, 'to page')} {page}"
+            )
+        elif item.action == "tag.page.detach":
+            description = (
+                f"{localize(locale, 'Removed tag')} {tag} {localize(locale, 'from page')} {page}"
+            )
         else:
-            page = escape(item.page_title or localize(locale, "Page no longer available"))
+            action = {
+                "content.archive.create": "Created a page",
+                "content.archive.revise": "Revised a page",
+                "content.archive.correct_occurrence": "Corrected a page's occurrence time",
+                "content.archive.delete": "Deleted a page",
+                "content.archive.restore": "Restored a page",
+            }[item.action]
+            description = f"{localize(locale, action)} {page}"
         entries.append(
-            f"<li>{actor} {localize(locale, action)} {page}"
+            f"<li>{actor} {description}"
             f'<p class="meta">{_relative_time(item.occurred_at, locale)}</p></li>'
         )
     body = (

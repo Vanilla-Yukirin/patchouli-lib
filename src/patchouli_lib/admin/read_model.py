@@ -174,6 +174,9 @@ class ContentActivityItem:
     book_id: str | None
     page_id: str | None
     revision_number: int | None
+    page_deleted: bool
+    tag_id: str | None
+    tag_name: str | None
 
 
 @dataclass(frozen=True)
@@ -303,7 +306,7 @@ class AdminReadModel:
             return tuple(CallerItem(**row) for row in rows)
 
     def recent_content_activity(self, *, limit: int = 50) -> tuple[ContentActivityItem, ...]:
-        """Show successful content writes only; this is not an API request log."""
+        """Show successful content changes only; this is not an API request log."""
 
         if not 1 <= limit <= 50:
             raise ValueError("Activity limit must be between 1 and 50.")
@@ -315,6 +318,7 @@ class AdminReadModel:
                         AuditEvent.actor_caller_id,
                         Caller.name.label("actor_name"),
                         AuditEvent.action,
+                        AuditEvent.resource_type,
                         AuditEvent.resource_id,
                         AuditEvent.occurred_at,
                     )
@@ -327,7 +331,18 @@ class AdminReadModel:
                     )
                     .where(
                         AuditEvent.outcome == "succeeded",
-                        AuditEvent.action.in_(("content.archive.create", "content.archive.revise")),
+                        AuditEvent.action.in_(
+                            (
+                                "content.archive.create",
+                                "content.archive.revise",
+                                "content.archive.correct_occurrence",
+                                "content.archive.delete",
+                                "content.archive.restore",
+                                "tag.create",
+                                "tag.page.attach",
+                                "tag.page.detach",
+                            )
+                        ),
                     )
                     .order_by(AuditEvent.occurred_at.desc(), AuditEvent.id.desc())
                     .limit(limit)
@@ -337,25 +352,13 @@ class AdminReadModel:
             )
             items: list[ContentActivityItem] = []
             for event in events:
-                if event["action"] == "content.archive.create":
-                    page = (
-                        connection.execute(
-                            select(
-                                Page.section_id,
-                                Page.book_id,
-                                Page.page_id,
-                                Page.title,
-                                Page.deleted_at,
-                            ).where(
-                                Page.library_id == event["library_id"],
-                                Page.page_id == event["resource_id"],
-                            )
-                        )
-                        .mappings()
-                        .one_or_none()
-                    )
-                    revision_number = None if page is None else 1
-                else:
+                action = event["action"]
+                resource_type = event["resource_type"]
+                page_id: str | None = None
+                tag_id: str | None = None
+                revision_number: int | None = None
+                page = None
+                if action == "content.archive.revise" and resource_type == "revision":
                     page = (
                         connection.execute(
                             select(
@@ -382,26 +385,61 @@ class AdminReadModel:
                         .one_or_none()
                     )
                     revision_number = None if page is None else page["revision_number"]
-                if page is None or page["deleted_at"] is not None:
-                    section_id = book_id = page_id = None
-                    visible_revision_number = None
-                else:
-                    section_id = page["section_id"]
-                    book_id = page["book_id"]
-                    page_id = page["page_id"]
-                    visible_revision_number = revision_number
+                elif action == "tag.create" and resource_type == "tag":
+                    tag_id = event["resource_id"]
+                elif action in ("tag.page.attach", "tag.page.detach"):
+                    if resource_type == "page_tag":
+                        parts = event["resource_id"].split(":")
+                        if len(parts) == 2 and all(parts):
+                            page_id, tag_id = parts
+                elif resource_type == "page":
+                    page_id = event["resource_id"]
+                    if action == "content.archive.create":
+                        revision_number = 1
+
+                if page is None and page_id is not None:
+                    page = (
+                        connection.execute(
+                            select(
+                                Page.section_id,
+                                Page.book_id,
+                                Page.page_id,
+                                Page.title,
+                                Page.deleted_at,
+                            ).where(
+                                Page.library_id == event["library_id"],
+                                Page.page_id == page_id,
+                            )
+                        )
+                        .mappings()
+                        .one_or_none()
+                    )
+                tag = (
+                    connection.execute(
+                        select(Tag.id, Tag.display_name).where(
+                            Tag.library_id == event["library_id"], Tag.id == tag_id
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                    if tag_id is not None
+                    else None
+                )
                 items.append(
                     ContentActivityItem(
                         library_id=event["library_id"],
                         actor_id=event["actor_caller_id"],
                         actor_name=event["actor_name"],
-                        action=event["action"],
+                        action=action,
                         occurred_at=event["occurred_at"],
                         page_title=None if page is None else page["title"],
-                        section_id=section_id,
-                        book_id=book_id,
-                        page_id=page_id,
-                        revision_number=visible_revision_number,
+                        section_id=None if page is None else page["section_id"],
+                        book_id=None if page is None else page["book_id"],
+                        page_id=None if page is None else page["page_id"],
+                        revision_number=None if page is None else revision_number,
+                        page_deleted=page is not None and page["deleted_at"] is not None,
+                        tag_id=None if tag is None else tag["id"],
+                        tag_name=None if tag is None else tag["display_name"],
                     )
                 )
             return tuple(items)

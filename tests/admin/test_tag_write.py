@@ -395,7 +395,13 @@ def test_page_tag_attach_detach_scoping_and_noop_feedback(
         actions = connection.scalars(select(AuditEvent.action)).all()
     assert actions.count("tag.page.attach") == 1
     assert actions.count("tag.page.detach") == 1
-    assert "No content activity yet." in client.get("/admin").text
+    activity = client.get("/admin")
+    assert activity.status_code == 200
+    assert activity.text.count("Created a tag") == 2
+    assert activity.text.count("Attached tag") == 1
+    assert activity.text.count("Removed tag") == 1
+    assert f"/admin/libraries/{library}/tags/{tag_id}" in activity.text
+    assert page_path in activity.text
 
 
 def test_page_tag_attachment_rolls_back_if_audit_fails(

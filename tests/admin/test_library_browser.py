@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine, insert, update
 
 from patchouli_lib.admin.passwords import hash_password
+from patchouli_lib.admin.read_model import AdminReadModel
 from patchouli_lib.app import create_app
 from patchouli_lib.auth.models import AuditEvent, Caller, Credential
 from patchouli_lib.config import Settings
@@ -21,6 +22,7 @@ from patchouli_lib.identifiers.page_ids import parse_occurrence_time
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import LibraryStructureSeed, NewLibrary
 from patchouli_lib.library.service import LibrarySeedService
+from patchouli_lib.tags.models import Tag
 
 _ORIGIN = "https://admin.example.invalid"
 _PASSWORD = "synthetic browser password"
@@ -147,6 +149,40 @@ def _insert_page(
             )
         )
     return identifier.value
+
+
+def _seed_activity_actor(engine: Engine, library_id: str, marker: str) -> tuple[str, str]:
+    caller_id = marker * 32
+    credential_id = format(int(marker, 16) + 1, "x") * 32
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            insert(Caller),
+            {
+                "id": caller_id,
+                "library_id": library_id,
+                "kind": "agent",
+                "name": f"Actor {marker}",
+                "description": "Synthetic activity actor",
+                "policy_version": 1,
+                "created_at": 1,
+                "updated_at": 1,
+            },
+        )
+        connection.execute(
+            insert(Credential),
+            {
+                "id": credential_id,
+                "library_id": library_id,
+                "caller_id": caller_id,
+                "selector": marker * 22,
+                "token_version": 1,
+                "verifier": b"v" * 32,
+                "expires_at": 10_000_000,
+                "created_at": 1,
+                "updated_at": 1,
+            },
+        )
+    return caller_id, credential_id
 
 
 def test_identity_browser_is_protected_and_shows_metadata_only(
@@ -433,6 +469,7 @@ def test_home_shows_only_scoped_successful_content_activity(
     actor_id = "a" * 32
     credential_id = "b" * 32
     revision_id = "rev_" + "3" * 32
+    tag_id = "9" * 32
     with immediate_transaction(engine) as connection:
         connection.execute(
             insert(Caller),
@@ -517,7 +554,65 @@ def test_home_shows_only_scoped_successful_content_activity(
                 },
                 {**base, "id": "e" * 32, "action": "content.archive.create", "outcome": "failed"},
                 {**base, "id": "f" * 32, "action": "auth.credential.issue", "outcome": "succeeded"},
+                {
+                    **base,
+                    "id": "0" * 32,
+                    "action": "content.archive.correct_occurrence",
+                    "outcome": "succeeded",
+                    "occurred_at": 5_000_000,
+                },
+                {
+                    **base,
+                    "id": "1" * 32,
+                    "action": "content.archive.delete",
+                    "outcome": "succeeded",
+                    "occurred_at": 6_000_000,
+                },
+                {
+                    **base,
+                    "id": "2" * 32,
+                    "action": "content.archive.restore",
+                    "outcome": "succeeded",
+                    "occurred_at": 7_000_000,
+                },
+                {
+                    **base,
+                    "id": "3" * 32,
+                    "action": "tag.create",
+                    "resource_type": "tag",
+                    "resource_id": tag_id,
+                    "outcome": "succeeded",
+                    "occurred_at": 8_000_000,
+                },
+                {
+                    **base,
+                    "id": "4" * 32,
+                    "action": "tag.page.attach",
+                    "resource_type": "page_tag",
+                    "resource_id": f"{page_id}:{tag_id}",
+                    "outcome": "succeeded",
+                    "occurred_at": 9_000_000,
+                },
+                {
+                    **base,
+                    "id": "5" * 32,
+                    "action": "tag.page.detach",
+                    "resource_type": "page_tag",
+                    "resource_id": f"{page_id}:{tag_id}",
+                    "outcome": "succeeded",
+                    "occurred_at": 10_000_000,
+                },
             ],
+        )
+        connection.execute(
+            insert(Tag),
+            {
+                "library_id": library,
+                "id": tag_id,
+                "display_name": "Tag <svg onload=alert(1)>",
+                "match_key": "tag <svg onload=alert(1)>",
+                "created_at": 8_000_000,
+            },
         )
 
     assert client.get("/admin").status_code == 303
@@ -528,13 +623,32 @@ def test_home_shows_only_scoped_successful_content_activity(
     assert "内容近况" in home.text
     assert home.text.count("更新了页面") == 1
     assert home.text.count("创建了页面") == 1
+    assert home.text.count("更正了页面的发生时间") == 1
+    assert home.text.count("删除了页面") == 1
+    assert home.text.count("恢复了页面") == 1
+    assert home.text.count("创建了标签") == 1
+    assert home.text.count("关联了标签") == 1
+    assert home.text.count("移除了标签") == 1
     assert home.text.index("更新了页面") < home.text.index("创建了页面")
+    assert home.text.index("移除了标签") < home.text.index("关联了标签")
     assert f"/admin/libraries/{library}/callers/{actor_id}" in home.text
     assert f"/pages/{page_id}/revisions/2" in home.text
+    assert (
+        f'恢复了页面 <a href="/admin/libraries/{library}/sections/{section}'
+        f'/books/{book}/pages/{page_id}">'
+    ) in home.text
+    assert (
+        f'删除了页面 <a href="/admin/libraries/{library}/sections/{section}'
+        f'/books/{book}/pages/{page_id}">'
+    ) in home.text
+    assert f"/admin/libraries/{library}/tags/{tag_id}" in home.text
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in home.text
+    assert "&lt;svg onload=alert(1)&gt;" in home.text
     assert "<script>alert(1)</script>" not in home.text
     assert "<img src=x onerror=alert(1)>" not in home.text
+    assert "<svg onload=alert(1)>" not in home.text
     assert 'title="1970-01-01 00:00:04 UTC"' in home.text
+    assert 'title="1970-01-01 00:00:10 UTC"' in home.text
     assert home.headers["cache-control"] == "no-store, max-age=0"
 
     rejected_form = client.post(
@@ -549,3 +663,136 @@ def test_home_shows_only_scoped_successful_content_activity(
     assert "Synthetic caller" in caller.text
     assert "&lt;img src=x onerror=alert(1)&gt;" in caller.text
     assert client.get(f"/admin/libraries/{other_library}/callers/{actor_id}").status_code == 404
+
+
+def test_deleted_activity_links_to_trash_without_cross_library_preview(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    library, section, book = _seed_structure(engine)
+    other_library, other_section, other_book = _seed_structure(engine, prefix="4", label="Other")
+    page_id = _insert_page(engine, library, section, book, title="Deleted local page")
+    foreign_id = _insert_page(
+        engine, other_library, other_section, other_book, title="Foreign secret title"
+    )
+    caller_id, credential_id = _seed_activity_actor(engine, library, "a")
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            update(Page)
+            .where(Page.library_id == library, Page.page_id == page_id)
+            .values(deleted_at=5_000_000, updated_at=5_000_000)
+        )
+        base = {
+            "library_id": library,
+            "actor_caller_id": caller_id,
+            "actor_credential_id": credential_id,
+            "resource_type": "page",
+            "outcome": "succeeded",
+            "request_id": "synthetic-request",
+        }
+        connection.execute(
+            insert(AuditEvent),
+            [
+                {
+                    **base,
+                    "id": "1" * 32,
+                    "action": "content.archive.delete",
+                    "resource_id": page_id,
+                    "occurred_at": 5_000_000,
+                },
+                {
+                    **base,
+                    "id": "2" * 32,
+                    "action": "content.archive.create",
+                    "resource_id": foreign_id,
+                    "occurred_at": 6_000_000,
+                },
+                {
+                    **base,
+                    "id": "3" * 32,
+                    "action": "tag.page.attach",
+                    "resource_type": "page_tag",
+                    "resource_id": "malformed",
+                    "occurred_at": 7_000_000,
+                },
+            ],
+        )
+
+    _login(client)
+    home = client.get("/admin?lang=zh-CN")
+    assert home.status_code == 200
+    assert f"/admin/libraries/{library}/sections/{section}/trash/{page_id}" in home.text
+    assert f"/books/{book}/pages/{page_id}" not in home.text
+    assert "Foreign secret title" not in home.text
+    assert f"/pages/{foreign_id}" not in home.text
+    assert "页面目前不可预览" in home.text
+    assert "标签目前不可查看" in home.text
+    assert home.headers["cache-control"] == "no-store, max-age=0"
+
+
+def test_activity_limit_and_tie_breaker_are_stable(browser: tuple[TestClient, Engine]) -> None:
+    client, engine = browser
+    library, _, _ = _seed_structure(engine)
+    caller_id, credential_id = _seed_activity_actor(engine, library, "a")
+    tag_id = "9" * 32
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            insert(Tag),
+            {
+                "library_id": library,
+                "id": tag_id,
+                "display_name": "Synthetic tag",
+                "match_key": "synthetic tag",
+                "created_at": 1,
+            },
+        )
+        connection.execute(
+            insert(AuditEvent),
+            [
+                {
+                    "id": f"{index:032x}",
+                    "library_id": library,
+                    "actor_caller_id": caller_id,
+                    "actor_credential_id": credential_id,
+                    "action": "tag.create",
+                    "resource_type": "tag",
+                    "resource_id": tag_id,
+                    "outcome": "succeeded",
+                    "request_id": "synthetic-request",
+                    "occurred_at": index,
+                }
+                for index in range(1, 52)
+            ],
+        )
+        connection.execute(
+            insert(AuditEvent),
+            {
+                "id": "f" * 32,
+                "library_id": library,
+                "actor_caller_id": caller_id,
+                "actor_credential_id": credential_id,
+                "action": "content.archive.correct_occurrence",
+                "resource_type": "page",
+                "resource_id": "missing-page",
+                "outcome": "succeeded",
+                "request_id": "synthetic-request",
+                "occurred_at": 51,
+            },
+        )
+    model = AdminReadModel(engine)
+    assert len(model.recent_content_activity()) == 50
+    newest = model.recent_content_activity(limit=2)
+    assert [item.action for item in newest] == [
+        "content.archive.correct_occurrence",
+        "tag.create",
+    ]
+    assert [item.occurred_at for item in newest] == [51, 51]
+    with pytest.raises(ValueError, match="between 1 and 50"):
+        model.recent_content_activity(limit=0)
+    with pytest.raises(ValueError, match="between 1 and 50"):
+        model.recent_content_activity(limit=51)
+    _login(client)
+    home = client.get("/admin?lang=en")
+    assert home.status_code == 200
+    assert home.text.count("Created a tag") == 49
+    assert "Corrected a page's occurrence time" in home.text
