@@ -169,7 +169,7 @@ class _InteractiveInput(StringIO):
     def isatty(self) -> bool:
         return True
 
-    def read(self, size: int = -1) -> str:
+    def read(self, size: int | None = -1) -> str:
         del size
         raise AssertionError("Interactive input must not be read after getpass.")
 
