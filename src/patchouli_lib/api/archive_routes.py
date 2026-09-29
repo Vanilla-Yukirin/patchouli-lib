@@ -33,6 +33,7 @@ from patchouli_lib.api.errors import (
     resource_not_found,
 )
 from patchouli_lib.api.request_ids import REQUEST_ID_HEADER, get_request_id
+from patchouli_lib.auth.library_policy import LegacySectionPolicy, resolve_library_policy
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import CallerKind, SectionAction
 from patchouli_lib.auth.service import (
@@ -72,6 +73,7 @@ from patchouli_lib.database import immediate_transaction
 from patchouli_lib.idempotency import IdempotencyConflictError, digest_idempotency_key
 from patchouli_lib.idempotency.schemas import OriginalResponse, ReplayResponse
 from patchouli_lib.identifiers import InvalidPageIdError, canonical_utc_wire, parse_occurrence_time
+from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import OpaqueId
 from patchouli_lib.retrieval.cursor import CursorBinding, CursorCodec, InvalidCursorError
 
@@ -747,31 +749,69 @@ def _trash_item(page: PageRecord) -> dict[str, object]:
     }
 
 
-def _require_archive_access(
+async def _require_archive_access(
+    engine: Engine,
     context: AuthenticatedRequestContext,
     section_id: str,
+    clock: Clock,
+    *,
+    read_action: SectionAction | None = None,
 ) -> None:
-    if context.authenticated.caller.kind is not CallerKind.AGENT:
-        raise insufficient_scope()
-    section_actions = {grant.action for grant in context.grants if grant.section_id == section_id}
-    if not section_actions:
-        raise resource_not_found()
-    if SectionAction.ARCHIVE_WRITE not in section_actions:
-        raise insufficient_scope()
+    def preflight() -> None:
+        caller = context.authenticated.caller
+        if caller.kind is not CallerKind.AGENT:
+            raise insufficient_scope()
+        with engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN")
+            try:
+                policy = resolve_library_policy(
+                    connection,
+                    credential_id=context.authenticated.credential.id,
+                    caller_id=caller.id,
+                    home_library_id=caller.library_id,
+                    target_library_id=caller.library_id,
+                    active_at=clock(),
+                )
+                if policy is None:
+                    raise invalid_token()
+                if isinstance(policy, LegacySectionPolicy):
+                    current_grants = AuthRepository(connection).list_grants(
+                        caller.library_id, caller.id
+                    )
+                    actions = {
+                        grant.action for grant in current_grants if grant.section_id == section_id
+                    }
+                    if not actions:
+                        raise resource_not_found()
+                    if SectionAction.ARCHIVE_WRITE not in actions or (
+                        read_action is not None and read_action not in actions
+                    ):
+                        raise insufficient_scope()
+                elif not policy.write or (read_action is not None and not policy.read):
+                    raise insufficient_scope()
+                if LibraryRepository(connection).get_section(caller.library_id, section_id) is None:
+                    raise resource_not_found()
+            finally:
+                connection.rollback()
+
+    await anyio.to_thread.run_sync(preflight, abandon_on_cancel=False)
 
 
-def _require_trash_read_access(
+async def _require_trash_read_access(
+    engine: Engine,
     context: AuthenticatedRequestContext,
     section_id: str,
+    clock: Clock,
     *,
     detail: bool,
 ) -> None:
-    _require_archive_access(context, section_id)
-    required = SectionAction.PAGE_READ if detail else SectionAction.QUERY
-    if not any(
-        grant.section_id == section_id and grant.action == required for grant in context.grants
-    ):
-        raise insufficient_scope()
+    await _require_archive_access(
+        engine,
+        context,
+        section_id,
+        clock,
+        read_action=SectionAction.PAGE_READ if detail else SectionAction.QUERY,
+    )
 
 
 def _perform_mutation(
@@ -918,33 +958,39 @@ def _read_trash(
     before: tuple[int, str] | None = None,
 ) -> PageRecord | tuple[PageRecord, ...]:
     try:
-        with engine.connect() as connection, connection.begin():
-            AuthenticationService(AuthRepository(connection), clock=clock).authorize_content(
-                token,
-                library_id=library_id,
-                section_id=section_id,
-                action=SectionAction.ARCHIVE_WRITE,
-            )
-            AuthenticationService(AuthRepository(connection), clock=clock).authorize_content(
-                token,
-                library_id=library_id,
-                section_id=section_id,
-                action=(SectionAction.PAGE_READ if page_id is not None else SectionAction.QUERY),
-            )
-            repository = ContentRepository(connection)
-            if page_id is None:
-                return repository.list_deleted_pages(
-                    library_id, section_id, limit=limit, before=before
+        with engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN")
+            try:
+                AuthenticationService(AuthRepository(connection), clock=clock).authorize_content(
+                    token,
+                    library_id=library_id,
+                    section_id=section_id,
+                    action=SectionAction.ARCHIVE_WRITE,
                 )
-            page = repository.get_page(library_id, page_id)
-            if (
-                page is None
-                or page.page_type != "archive"
-                or page.section_id != section_id
-                or page.deleted_at is None
-            ):
-                raise ArchiveNotFoundError
-            return page
+                AuthenticationService(AuthRepository(connection), clock=clock).authorize_content(
+                    token,
+                    library_id=library_id,
+                    section_id=section_id,
+                    action=(
+                        SectionAction.PAGE_READ if page_id is not None else SectionAction.QUERY
+                    ),
+                )
+                repository = ContentRepository(connection)
+                if page_id is None:
+                    return repository.list_deleted_pages(
+                        library_id, section_id, limit=limit, before=before
+                    )
+                page = repository.get_page(library_id, page_id)
+                if (
+                    page is None
+                    or page.page_type != "archive"
+                    or page.section_id != section_id
+                    or page.deleted_at is None
+                ):
+                    raise ArchiveNotFoundError
+                return page
+            finally:
+                connection.rollback()
     except AuthenticationError:
         raise invalid_token() from None
     except AuthorizationError:
@@ -1060,9 +1106,9 @@ def create_archive_router(
         validated_book_id = _validate_route_id(book_id)
         idempotency = _idempotency_key(request)
         _create_precondition(request)
-        metadata, content = await _archive_parts(request)
         context = await _authenticate(authenticate, request)
-        _require_archive_access(context, validated_section_id)
+        await _require_archive_access(engine, context, validated_section_id, clock)
+        metadata, content = await _archive_parts(request)
         command = _create_command(
             metadata,
             content,
@@ -1091,9 +1137,9 @@ def create_archive_router(
         validated_section_id = _validate_route_id(section_id)
         idempotency = _idempotency_key(request)
         expected_etag = _revision_precondition(request)
-        metadata, content = await _archive_parts(request)
         context = await _authenticate(authenticate, request)
-        _require_archive_access(context, validated_section_id)
+        await _require_archive_access(engine, context, validated_section_id, clock)
+        metadata, content = await _archive_parts(request)
         command = _revision_command(
             metadata,
             content,
@@ -1123,9 +1169,9 @@ def create_archive_router(
         validated_section_id = _validate_route_id(section_id)
         idempotency = _idempotency_key(request)
         expected_etag = _revision_precondition(request)
-        occurred_at = await _occurrence_value(request)
         context = await _authenticate(authenticate, request)
-        _require_archive_access(context, validated_section_id)
+        await _require_archive_access(engine, context, validated_section_id, clock)
+        occurred_at = await _occurrence_value(request)
         command = _occurrence_command(
             context=context,
             section_id=validated_section_id,
@@ -1158,9 +1204,9 @@ def create_archive_router(
         validated_section_id = _validate_route_id(section_id)
         idempotency = _idempotency_key(request)
         expected_etag = _revision_precondition(request)
-        await _require_empty_body(request)
         context = await _authenticate(authenticate, request)
-        _require_archive_access(context, validated_section_id)
+        await _require_archive_access(engine, context, validated_section_id, clock)
+        await _require_empty_body(request)
         command = _lifecycle_command(
             context=context,
             section_id=validated_section_id,
@@ -1196,7 +1242,7 @@ def create_archive_router(
     async def get_trashed_page(section_id: str, page_id: str, request: Request) -> JSONResponse:
         validated_section_id = _validate_route_id(section_id)
         context = await _authenticate(authenticate, request)
-        _require_trash_read_access(context, validated_section_id, detail=True)
+        await _require_trash_read_access(engine, context, validated_section_id, clock, detail=True)
         page = await anyio.to_thread.run_sync(
             partial(
                 _read_trash,
@@ -1228,7 +1274,9 @@ def create_archive_router(
             validated_section_id = _validate_route_id(section_id)
             pagination = _trash_pagination(request)
             context = await _authenticate(authenticate, request)
-            _require_trash_read_access(context, validated_section_id, detail=False)
+            await _require_trash_read_access(
+                engine, context, validated_section_id, clock, detail=False
+            )
             binding = _trash_cursor_binding(context, validated_section_id, pagination.limit)
             before: tuple[int, str] | None = None
             if pagination.cursor is not None:

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from fastapi import Request
 from sqlalchemy import Engine
 
 from patchouli_lib.api.errors import authentication_required, invalid_token
-from patchouli_lib.auth.repository import AuthRepository
+from patchouli_lib.auth.repository import AuthRepository, CredentialLibraryGrantSummary
 from patchouli_lib.auth.schemas import (
     AuthenticatedCaller,
     CallerKind,
@@ -23,6 +24,7 @@ from patchouli_lib.database import immediate_transaction
 
 AUTHORIZATION_HEADER = b"authorization"
 MAX_AUTHORIZATION_HEADER_BYTES = 256
+PolicyMode = Literal["operator", "legacy_section", "library_grants"]
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -31,6 +33,9 @@ class AuthenticatedRequestContext:
 
     authenticated: AuthenticatedCaller
     grants: tuple[SectionGrantRecord, ...]
+    # Defaults preserve manually constructed legacy contexts in route tests.
+    policy_mode: PolicyMode = "legacy_section"
+    library_grants: tuple[CredentialLibraryGrantSummary, ...] = ()
 
     def __repr__(self) -> str:
         return (
@@ -95,17 +100,30 @@ class BearerAuthentication:
                     repository,
                     clock=self._clock,
                 ).authenticate(credential)
-                grants = (
-                    repository.list_grants(
-                        authenticated.caller.library_id,
-                        authenticated.caller.id,
-                    )
-                    if authenticated.caller.kind is CallerKind.AGENT
-                    else ()
-                )
+                grants: tuple[SectionGrantRecord, ...] = ()
+                library_grants: tuple[CredentialLibraryGrantSummary, ...] = ()
+                policy_mode: PolicyMode = "operator"
+                if authenticated.caller.kind is CallerKind.AGENT:
+                    home_library_id = authenticated.caller.library_id
+                    caller_id = authenticated.caller.id
+                    credential_id = authenticated.credential.id
+                    if repository.has_library_grant_policy(
+                        home_library_id, caller_id, credential_id
+                    ):
+                        policy_mode = "library_grants"
+                        library_grants = repository.list_credential_library_grants(
+                            home_library_id=home_library_id,
+                            caller_id=caller_id,
+                            credential_id=credential_id,
+                        )
+                    else:
+                        policy_mode = "legacy_section"
+                        grants = repository.list_grants(home_library_id, caller_id)
                 context = AuthenticatedRequestContext(
                     authenticated=authenticated,
                     grants=grants,
+                    policy_mode=policy_mode,
+                    library_grants=library_grants,
                 )
         except AuthenticationError:
             raise invalid_token() from None
@@ -115,6 +133,7 @@ class BearerAuthentication:
 __all__ = [
     "AUTHORIZATION_HEADER",
     "MAX_AUTHORIZATION_HEADER_BYTES",
+    "PolicyMode",
     "AuthenticatedRequestContext",
     "BearerAuthentication",
     "extract_bearer_token",

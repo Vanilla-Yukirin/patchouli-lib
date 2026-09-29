@@ -211,9 +211,11 @@ class TagRepository:
         limit: int = 100,
         offset: int = 0,
     ) -> list[TagCountRecord]:
-        """Count only live Pages in readable/queryable Sections for an Agent.
+        """Count only live Pages in the caller's authorized scope.
 
-        Operator callers pass ``None`` to include unassociated Tag definitions.
+        Operator or Library-readable callers pass ``None`` to include all Tag
+        definitions and live Pages in the requested Library. Legacy Agents pass
+        their caller ID to retain the exact two-Section-grant restriction.
         Visibility is applied inside SQL before grouping or pagination.
         """
 

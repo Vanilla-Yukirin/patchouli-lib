@@ -18,21 +18,32 @@ from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import Connection, Engine, func, select
+from sqlalchemy import Connection, Engine, delete, func, insert, select
 
 from patchouli_lib.api.archive_routes import (
     MAX_ARCHIVE_METADATA_BYTES,
     MAX_ARCHIVE_MULTIPART_BYTES,
     ArchiveServiceFactory,
+    _require_archive_access,
     create_archive_router,
 )
+from patchouli_lib.api.authentication import AuthenticatedRequestContext
 from patchouli_lib.api.contracts import PROTECTED_CACHE_CONTROL
-from patchouli_lib.api.errors import ProblemDetails, install_api_exception_handlers
+from patchouli_lib.api.errors import (
+    ApplicationProblem,
+    ProblemDetails,
+    install_api_exception_handlers,
+)
 from patchouli_lib.api.request_ids import REQUEST_ID_HEADER, RequestIDMiddleware
-from patchouli_lib.auth.models import AuditEvent, Credential
+from patchouli_lib.auth.models import (
+    AuditEvent,
+    Credential,
+    CredentialLibraryGrant,
+    CredentialLibraryPolicy,
+)
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import CallerKind, NewCaller, NewSectionGrant, SectionAction
-from patchouli_lib.auth.service import CredentialIssuer
+from patchouli_lib.auth.service import AuthenticationService, CredentialIssuer
 from patchouli_lib.content import (
     ArchiveIdempotencyKey,
     ArchiveMutationSuccess,
@@ -52,6 +63,7 @@ from patchouli_lib.identifiers import canonical_utc_wire, parse_occurrence_time
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import LibraryStructureSeed, NewBook, NewSection
 from patchouli_lib.library.service import LibrarySeedService
+from patchouli_lib.retrieval.cursor import CursorCodec
 
 REQUEST_ID = f"req_{'9' * 32}"
 OPERATION_TIME = 1_776_000_000_000_000
@@ -238,6 +250,7 @@ def _build_app(
     request_id_factory: Callable[[], str] = lambda: REQUEST_ID,
     service_factory: ArchiveServiceFactory | None = None,
     clock: Callable[[], int] = lambda: OPERATION_TIME,
+    cursor_codec: CursorCodec | None = None,
 ) -> FastAPI:
     application = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     install_api_exception_handlers(application)
@@ -250,6 +263,7 @@ def _build_app(
             fixture.engine,
             clock=clock,
             service_factory=service_factory,
+            cursor_codec=cursor_codec,
         )
     )
     return application
@@ -342,6 +356,46 @@ def _counts(engine: Engine) -> dict[str, int]:
                 ("idempotency_records", IdempotencyRecord),
             )
         }
+
+
+def _opt_in_writer(fixture: ArchiveApiFixture) -> None:
+    with immediate_transaction(fixture.engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryPolicy),
+            {
+                "credential_id": fixture.writer_credential_id,
+                "caller_id": fixture.writer_id,
+                "home_library_id": fixture.library_id,
+                "mode": "library_grants",
+                "created_at": ISSUED_TIME,
+            },
+        )
+
+
+def _grant_writer_library(fixture: ArchiveApiFixture, action: str) -> None:
+    with immediate_transaction(fixture.engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryGrant),
+            {
+                "credential_id": fixture.writer_credential_id,
+                "caller_id": fixture.writer_id,
+                "home_library_id": fixture.library_id,
+                "target_library_id": fixture.library_id,
+                "action": action,
+                "created_at": OPERATION_TIME - 1,
+            },
+        )
+
+
+def _remove_writer_library_grant(fixture: ArchiveApiFixture, action: str) -> None:
+    with immediate_transaction(fixture.engine) as connection:
+        connection.execute(
+            delete(CredentialLibraryGrant).where(
+                CredentialLibraryGrant.credential_id == fixture.writer_credential_id,
+                CredentialLibraryGrant.target_library_id == fixture.library_id,
+                CredentialLibraryGrant.action == action,
+            )
+        )
 
 
 def _seed_hidden_archive(fixture: ArchiveApiFixture) -> tuple[str, str]:
@@ -537,6 +591,151 @@ def test_operator_visible_without_write_and_hidden_section_are_distinct(
         "audit_events": 0,
         "idempotency_records": 0,
     }
+
+
+def test_opted_in_archive_write_and_trash_read_do_not_fall_back_to_section_grants(
+    archive_api: ArchiveApiFixture,
+) -> None:
+    with immediate_transaction(archive_api.engine) as connection:
+        auth = AuthRepository(connection)
+        for action in (SectionAction.QUERY, SectionAction.PAGE_READ):
+            auth.add_grant(
+                NewSectionGrant(
+                    library_id=archive_api.library_id,
+                    caller_id=archive_api.writer_id,
+                    section_id=archive_api.section_id,
+                    action=action,
+                    created_at=OPERATION_TIME - 1,
+                )
+            )
+    _opt_in_writer(archive_api)
+    cursor_codec = CursorCodec(b"synthetic-archive-cursor-key-32bytes")
+    trash_path = f"/api/v1/sections/{archive_api.section_id}/trash"
+    with TestClient(
+        _build_app(archive_api, cursor_codec=cursor_codec), raise_server_exceptions=False
+    ) as client:
+        denied = _create(
+            client,
+            archive_api,
+            key="opted-in-no-write",
+            content=b"\xff",
+        )
+        foreign_denied = _create(
+            client,
+            archive_api,
+            key="opted-in-foreign-no-write",
+            path=_create_path(archive_api, section_id=archive_api.foreign_section_id),
+        )
+        _problem(denied, 403, "insufficient_scope")
+        _problem(foreign_denied, 403, "insufficient_scope")
+        assert _counts(archive_api.engine)["pages"] == 0
+
+        _grant_writer_library(archive_api, "write")
+        _problem(
+            _create(
+                client,
+                archive_api,
+                key="opted-in-foreign-with-write",
+                path=_create_path(archive_api, section_id=archive_api.foreign_section_id),
+            ),
+            404,
+            "resource_not_found",
+        )
+        created = _create(client, archive_api, key="opted-in-write")
+        assert created.status_code == 201
+        page_id = created.json()["page"]["page_id"]
+        deleted = client.delete(
+            f"/api/v1/sections/{archive_api.section_id}/pages/{page_id}",
+            headers=[
+                _authorization(archive_api.writer_token),
+                ("Idempotency-Key", "opted-in-delete"),
+                ("If-Match", created.headers["ETag"]),
+            ],
+        )
+        assert deleted.status_code == 200
+        _problem(
+            client.get(trash_path, headers=[_authorization(archive_api.writer_token)]),
+            403,
+            "insufficient_scope",
+        )
+        _problem(
+            client.get(
+                f"{trash_path}/{page_id}", headers=[_authorization(archive_api.writer_token)]
+            ),
+            403,
+            "insufficient_scope",
+        )
+
+        _grant_writer_library(archive_api, "read")
+        listing = client.get(trash_path, headers=[_authorization(archive_api.writer_token)])
+        detail = client.get(
+            f"{trash_path}/{page_id}", headers=[_authorization(archive_api.writer_token)]
+        )
+        assert listing.status_code == detail.status_code == 200
+        assert [item["page_id"] for item in listing.json()["items"]] == [page_id]
+        assert detail.json()["page_id"] == page_id
+        _problem(
+            client.get(
+                f"/api/v1/sections/{archive_api.foreign_section_id}/trash",
+                headers=[_authorization(archive_api.writer_token)],
+            ),
+            404,
+            "resource_not_found",
+        )
+
+        _remove_writer_library_grant(archive_api, "read")
+        _problem(
+            client.get(trash_path, headers=[_authorization(archive_api.writer_token)]),
+            403,
+            "insufficient_scope",
+        )
+        _problem(
+            client.get(
+                f"{trash_path}/{page_id}", headers=[_authorization(archive_api.writer_token)]
+            ),
+            403,
+            "insufficient_scope",
+        )
+        _remove_writer_library_grant(archive_api, "write")
+        _problem(
+            _create(client, archive_api, key="opted-in-write-revoked"),
+            403,
+            "insufficient_scope",
+        )
+
+
+def test_opted_in_write_revoked_inside_transaction_rolls_back(
+    archive_api: ArchiveApiFixture,
+) -> None:
+    _opt_in_writer(archive_api)
+    _grant_writer_library(archive_api, "write")
+
+    def factory(connection: Connection) -> ArchiveService:
+        connection.execute(
+            delete(CredentialLibraryGrant).where(
+                CredentialLibraryGrant.credential_id == archive_api.writer_credential_id,
+                CredentialLibraryGrant.target_library_id == archive_api.library_id,
+                CredentialLibraryGrant.action == "write",
+            )
+        )
+        return ArchiveService(connection, clock=lambda: OPERATION_TIME)
+
+    with TestClient(
+        _build_app(archive_api, service_factory=factory), raise_server_exceptions=False
+    ) as client:
+        response = _create(client, archive_api, key="opted-in-internal-revoke")
+    _problem(response, 403, "insufficient_scope")
+    assert _counts(archive_api.engine)["pages"] == 0
+    with archive_api.engine.connect() as connection:
+        assert (
+            connection.execute(
+                select(CredentialLibraryGrant.action).where(
+                    CredentialLibraryGrant.credential_id == archive_api.writer_credential_id,
+                    CredentialLibraryGrant.target_library_id == archive_api.library_id,
+                )
+            ).scalar_one()
+            == "write"
+        )
 
 
 def test_wrong_book_section_and_page_are_hidden_as_not_found(
@@ -1454,6 +1653,36 @@ def test_deleted_page_rejects_fresh_revision_but_replays_prior_success_without_m
     assert current == (revised.json()["revision"]["revision_id"], 2, deleted.deleted_at)
 
 
+def test_legacy_archive_preflight_uses_current_grants_not_captured_context(
+    archive_api: ArchiveApiFixture,
+) -> None:
+    with immediate_transaction(archive_api.engine) as connection:
+        repository = AuthRepository(connection)
+        service = AuthenticationService(repository, clock=lambda: OPERATION_TIME)
+        authenticated = service.authenticate(archive_api.writer_token)
+        context = AuthenticatedRequestContext(
+            authenticated=authenticated,
+            grants=repository.list_grants(archive_api.library_id, archive_api.writer_id),
+        )
+        assert repository.remove_grant(
+            archive_api.library_id,
+            archive_api.writer_id,
+            archive_api.section_id,
+            SectionAction.ARCHIVE_WRITE,
+        )
+    assert SectionAction.ARCHIVE_WRITE in {grant.action for grant in context.grants}
+    with pytest.raises(ApplicationProblem) as failure:
+        anyio.run(
+            _require_archive_access,
+            archive_api.engine,
+            context,
+            archive_api.section_id,
+            lambda: OPERATION_TIME,
+        )
+    assert failure.value.status_code == 404
+    assert failure.value.code == "resource_not_found"
+
+
 @pytest.mark.parametrize("mutation", ["revoke", "disable", "remove"])
 def test_transaction_internal_revocation_disable_and_grant_removal_deny(
     archive_api: ArchiveApiFixture,
@@ -1576,7 +1805,7 @@ def test_last_used_commits_after_envelope_validation_and_coalesces(
     assert last_used() == touched_at
 
 
-def test_cancellation_while_streaming_stops_before_database_work(
+def test_cancellation_while_streaming_stops_before_mutation(
     archive_api: ArchiveApiFixture,
 ) -> None:
     media_type, body = _multipart()
@@ -1608,7 +1837,7 @@ def test_cancellation_while_streaming_stops_before_database_work(
         last_used = connection.execute(
             select(Credential.last_used_at).where(Credential.id == archive_api.writer_credential_id)
         ).scalar_one()
-    assert last_used is None
+    assert last_used == OPERATION_TIME
     assert all(value == 0 for value in _counts(archive_api.engine).values())
 
 

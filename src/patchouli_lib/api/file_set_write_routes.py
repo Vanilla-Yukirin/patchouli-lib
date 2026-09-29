@@ -34,6 +34,8 @@ from patchouli_lib.api.errors import (
 )
 from patchouli_lib.api.file_set_multipart import parse_file_set_multipart
 from patchouli_lib.api.request_ids import REQUEST_ID_HEADER, get_request_id
+from patchouli_lib.auth.library_policy import LegacySectionPolicy, LibraryAction
+from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import CallerKind, SectionAction
 from patchouli_lib.auth.service import (
     AuthenticationError,
@@ -72,6 +74,7 @@ from patchouli_lib.idempotency import (
 )
 from patchouli_lib.idempotency.schemas import OriginalResponse, ReplayResponse
 from patchouli_lib.identifiers import InvalidPageIdError, parse_occurrence_time
+from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import OpaqueId
 
 _OPAQUE_ID_ADAPTER = TypeAdapter(OpaqueId)
@@ -343,17 +346,40 @@ def _source(value: object) -> ArchiveSourceInput:
 
 
 def _authorize_scope(
-    context: AuthenticatedRequestContext, library_id: str, section_id: str
+    engine: Engine,
+    context: AuthenticatedRequestContext,
+    library_id: str,
+    section_id: str,
+    *,
+    clock: Clock,
 ) -> None:
     if context.authenticated.caller.library_id != library_id:
         raise resource_not_found()
     if context.authenticated.caller.kind is not CallerKind.AGENT:
         raise insufficient_scope()
-    grants = {grant.action for grant in context.grants if grant.section_id == section_id}
-    if not grants:
-        raise resource_not_found()
-    if SectionAction.ARCHIVE_WRITE not in grants:
-        raise insufficient_scope()
+    with immediate_transaction(engine) as connection:
+        policy = AuthRepository(connection).get_library_policy(
+            credential_id=context.authenticated.credential.id,
+            caller_id=context.authenticated.caller.id,
+            home_library_id=context.authenticated.caller.library_id,
+            target_library_id=library_id,
+            active_at=clock(),
+        )
+        if policy is None:
+            raise invalid_token()
+        if isinstance(policy, LegacySectionPolicy):
+            current_grants = AuthRepository(connection).list_grants(
+                library_id, context.authenticated.caller.id
+            )
+            grants = {grant.action for grant in current_grants if grant.section_id == section_id}
+            if not grants:
+                raise resource_not_found()
+            if SectionAction.ARCHIVE_WRITE not in grants:
+                raise insufficient_scope()
+        elif not policy.allows(LibraryAction.WRITE):
+            raise insufficient_scope()
+        if LibraryRepository(connection).get_section(library_id, section_id) is None:
+            raise resource_not_found()
 
 
 def _perform_create(
@@ -502,7 +528,10 @@ def create_file_set_write_router(
         context = await anyio.to_thread.run_sync(
             partial(authenticate, request), abandon_on_cancel=False
         )
-        _authorize_scope(context, scoped_library, scoped_section)
+        await anyio.to_thread.run_sync(
+            partial(_authorize_scope, engine, context, scoped_library, scoped_section, clock=clock),
+            abandon_on_cancel=False,
+        )
         upload = await parse_file_set_multipart(request)
         metadata = _metadata(upload.metadata)
         if set(metadata) not in ({"title", "source"}, {"title", "occurred_at", "source"}):
@@ -559,7 +588,10 @@ def create_file_set_write_router(
         context = await anyio.to_thread.run_sync(
             partial(authenticate, request), abandon_on_cancel=False
         )
-        _authorize_scope(context, scoped_library, scoped_section)
+        await anyio.to_thread.run_sync(
+            partial(_authorize_scope, engine, context, scoped_library, scoped_section, clock=clock),
+            abandon_on_cancel=False,
+        )
         upload = await parse_file_set_multipart(request)
         metadata = _metadata(upload.metadata)
         if set(metadata) != {"source"}:

@@ -5,7 +5,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from patchouli_lib.api.authentication import AuthenticatedRequestContext
+from patchouli_lib.api.authentication import AuthenticatedRequestContext, PolicyMode
 from patchouli_lib.api.contracts import (
     DEFAULT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
@@ -13,6 +13,7 @@ from patchouli_lib.api.contracts import (
     OpaqueIdentifier,
     WireModel,
 )
+from patchouli_lib.auth.library_policy import LibraryAction
 from patchouli_lib.auth.schemas import CallerKind, SectionAction
 from patchouli_lib.content.file_manifest import MAX_FILE_BYTES, MAX_FILES_PER_PAGE, MAX_PAGE_BYTES
 from patchouli_lib.library.schemas import BoundedText, ResourceName
@@ -88,6 +89,11 @@ class EffectiveSectionGrant(WireModel):
     actions: tuple[SectionAction, ...]
 
 
+class EffectiveLibraryGrant(WireModel):
+    library_id: OpaqueIdentifier
+    actions: tuple[LibraryAction, ...]
+
+
 class WhoAmIResponse(WireModel):
     caller_id: OpaqueIdentifier
     credential_id: OpaqueIdentifier
@@ -97,6 +103,8 @@ class WhoAmIResponse(WireModel):
     expires_at: RFC3339UTC
     policy_version: Annotated[int, Field(ge=1)]
     grants: tuple[EffectiveSectionGrant, ...]
+    policy_mode: PolicyMode
+    library_grants: tuple[EffectiveLibraryGrant, ...]
 
 
 def capabilities_response(configuration: CapabilityConfiguration) -> CapabilitiesResponse:
@@ -144,6 +152,11 @@ def whoami_response(context: AuthenticatedRequestContext) -> WhoAmIResponse:
         expires_at=_timestamp_datetime(authenticated.credential.expires_at),
         policy_version=authenticated.caller.policy_version,
         grants=_effective_grants(context),
+        policy_mode=context.policy_mode,
+        library_grants=tuple(
+            EffectiveLibraryGrant(library_id=grant.library_id, actions=grant.actions)
+            for grant in context.library_grants
+        ),
     )
 
 
@@ -156,6 +169,7 @@ __all__ = [
     "CapabilitiesResponse",
     "CapabilityConfiguration",
     "EffectiveSectionGrant",
+    "EffectiveLibraryGrant",
     "FileSetLimits",
     "IdempotencySupport",
     "WhoAmIResponse",

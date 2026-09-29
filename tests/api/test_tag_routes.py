@@ -11,6 +11,7 @@ from threading import Event
 from typing import Any, cast
 
 import pytest
+from content.helpers import insert_page_graph, page_graph_values, seed_library_structure
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from retrieval_read.conftest import (
@@ -22,12 +23,12 @@ from retrieval_read.conftest import (
 )
 from retrieval_read.conftest import retrieval_engine as retrieval_engine_fixture
 from retrieval_read.conftest import retrieval_scope as retrieval_scope_fixture
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, delete, insert, select
 
 from patchouli_lib.api.errors import install_api_exception_handlers
 from patchouli_lib.api.request_ids import RequestIDMiddleware
 from patchouli_lib.api.tag_routes import _perform, create_tag_router
-from patchouli_lib.auth.models import AuditEvent
+from patchouli_lib.auth.models import AuditEvent, CredentialLibraryGrant, CredentialLibraryPolicy
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
     CallerKind,
@@ -154,6 +155,67 @@ def _seed_tag(api: TagApi, *, tag_id: str, name: str, page_ids: list[str]) -> No
                 tag_id=tag_id,
                 created_at=1_500_000,
             )
+
+
+def _opt_in(api: TagApi) -> None:
+    with immediate_transaction(api.engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryPolicy),
+            {
+                "credential_id": AGENT_CREDENTIAL_ID,
+                "caller_id": CALLER_ID,
+                "home_library_id": api.scope.library_id,
+                "mode": "library_grants",
+                "created_at": 1_500_000,
+            },
+        )
+
+
+def _grant(api: TagApi, action: str) -> None:
+    with immediate_transaction(api.engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryGrant),
+            {
+                "credential_id": AGENT_CREDENTIAL_ID,
+                "caller_id": CALLER_ID,
+                "home_library_id": api.scope.library_id,
+                "target_library_id": api.scope.library_id,
+                "action": action,
+                "created_at": 1_500_000,
+            },
+        )
+
+
+def _revoke(api: TagApi, action: str) -> None:
+    with immediate_transaction(api.engine) as connection:
+        connection.execute(
+            delete(CredentialLibraryGrant).where(
+                CredentialLibraryGrant.credential_id == AGENT_CREDENTIAL_ID,
+                CredentialLibraryGrant.caller_id == CALLER_ID,
+                CredentialLibraryGrant.home_library_id == api.scope.library_id,
+                CredentialLibraryGrant.target_library_id == api.scope.library_id,
+                CredentialLibraryGrant.action == action,
+            )
+        )
+
+
+def _legacy_sibling_token(api: TagApi) -> str:
+    sibling = generate_token()
+    with immediate_transaction(api.engine) as connection:
+        AuthRepository(connection).add_credential(
+            NewCredential(
+                id="0" * 32,
+                library_id=api.scope.library_id,
+                caller_id=CALLER_ID,
+                selector=sibling.selector,
+                token_version=sibling.version,
+                verifier=sibling.verifier,
+                expires_at=10_000_000,
+                created_at=1_000_000,
+                updated_at=1_000_000,
+            )
+        )
+    return sibling.value
 
 
 def test_directory_hides_hidden_and_deleted_page_names_counts_and_pagination(
@@ -307,6 +369,198 @@ def test_cross_library_deleted_pages_and_grant_revocation_fail_closed(tag_api: T
         assert (
             client.get(visible_path.rsplit("/", 1)[0], headers=_auth(api.agent_token)).status_code
             == 403
+        )
+
+
+def test_opt_in_uses_exact_credential_read_and_write_without_legacy_fallback(
+    tag_api: TagApi,
+) -> None:
+    api = tag_api
+    _seed_tag(api, tag_id="1" * 32, name="Visible", page_ids=[api.scope.first_page_id])
+    _seed_tag(api, tag_id="2" * 32, name="Hidden", page_ids=[api.scope.hidden_page_id])
+    _seed_tag(api, tag_id="3" * 32, name="Unassociated", page_ids=[])
+    sibling_token = _legacy_sibling_token(api)
+    _opt_in(api)
+    directory = _path(api, "tags")
+    visible = _path(api, f"sections/{QUERY_SECTION_ID}/pages/{api.scope.first_page_id}/tags")
+    hidden = _path(api, f"sections/{HIDDEN_SECTION_ID}/pages/{api.scope.hidden_page_id}/tags")
+    with TestClient(_app(api), raise_server_exceptions=False) as client:
+        assert client.get(directory, headers=_auth(api.agent_token)).status_code == 403
+        assert client.get(visible, headers=_auth(api.agent_token)).status_code == 403
+        assert (
+            client.put(f"{visible}/{'1' * 32}", headers=_auth(api.agent_token)).status_code == 403
+        )
+        assert (
+            client.post(
+                directory, headers=_auth(api.agent_token), json={"name": "Denied"}
+            ).status_code
+            == 403
+        )
+        sibling = client.get(directory, headers=_auth(sibling_token))
+        assert [item["name"] for item in sibling.json()["items"]] == ["Visible"]
+
+        _grant(api, "read")
+        readable = client.get(directory, headers=_auth(api.agent_token))
+        assert [(item["name"], item["page_count"]) for item in readable.json()["items"]] == [
+            ("Hidden", 1),
+            ("Unassociated", 0),
+            ("Visible", 1),
+        ]
+        assert (
+            client.get(hidden, headers=_auth(api.agent_token)).json()["items"][0]["name"]
+            == "Hidden"
+        )
+        assert (
+            client.get(_path(api, f"tags/{'2' * 32}/pages"), headers=_auth(api.agent_token)).json()[
+                "items"
+            ][0]["page_id"]
+            == api.scope.hidden_page_id
+        )
+        assert client.put(f"{hidden}/{'1' * 32}", headers=_auth(api.agent_token)).status_code == 403
+
+        _grant(api, "write")
+        assert client.put(f"{hidden}/{'1' * 32}", headers=_auth(api.agent_token)).json() == {
+            "changed": True
+        }
+        created = client.post(directory, headers=_auth(api.agent_token), json={"name": "New"})
+        assert created.status_code == 201
+        assert client.get(directory, headers=_auth(sibling_token)).json()["items"] == [
+            {
+                "tag_id": "1" * 32,
+                "name": "Visible",
+                "created_at": 1_500_000,
+                "page_count": 1,
+            }
+        ]
+    with api.engine.connect() as connection:
+        tag_audits = connection.execute(
+            select(AuditEvent.library_id, AuditEvent.actor_credential_id).where(
+                AuditEvent.action.like("tag.%")
+            )
+        ).all()
+        assert [tuple(row) for row in tag_audits] == [
+            (api.scope.library_id, AGENT_CREDENTIAL_ID),
+            (api.scope.library_id, AGENT_CREDENTIAL_ID),
+        ]
+
+
+def test_opt_in_write_only_does_not_grant_tag_read(tag_api: TagApi) -> None:
+    api = tag_api
+    _seed_tag(api, tag_id="1" * 32, name="Existing", page_ids=[])
+    _opt_in(api)
+    _grant(api, "write")
+    directory = _path(api, "tags")
+    hidden = _path(api, f"sections/{HIDDEN_SECTION_ID}/pages/{api.scope.hidden_page_id}/tags")
+    with TestClient(_app(api), raise_server_exceptions=False) as client:
+        assert client.get(directory, headers=_auth(api.agent_token)).status_code == 403
+        assert client.get(hidden, headers=_auth(api.agent_token)).status_code == 403
+        assert (
+            client.get(
+                _path(api, f"tags/{'1' * 32}/pages"), headers=_auth(api.agent_token)
+            ).status_code
+            == 403
+        )
+        assert client.put(f"{hidden}/{'1' * 32}", headers=_auth(api.agent_token)).json() == {
+            "changed": True
+        }
+        assert (
+            client.post(
+                directory, headers=_auth(api.agent_token), json={"name": "Created"}
+            ).status_code
+            == 201
+        )
+        assert (
+            client.post(
+                directory, headers=_auth(api.agent_token), json={"name": "Existing"}
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                directory, headers=_auth(api.agent_token), json={"name": "Created"}
+            ).status_code
+            == 403
+        )
+        assert client.get(directory, headers=_auth(api.agent_token)).status_code == 403
+
+
+def test_opt_in_tag_grant_revocation_takes_effect_immediately(tag_api: TagApi) -> None:
+    api = tag_api
+    _seed_tag(api, tag_id="1" * 32, name="Existing", page_ids=[])
+    _opt_in(api)
+    _grant(api, "read")
+    _grant(api, "write")
+    directory = _path(api, "tags")
+    with TestClient(_app(api), raise_server_exceptions=False) as client:
+        assert client.get(directory, headers=_auth(api.agent_token)).status_code == 200
+        assert (
+            client.post(
+                directory, headers=_auth(api.agent_token), json={"name": "Existing"}
+            ).status_code
+            == 200
+        )
+        _revoke(api, "read")
+        assert client.get(directory, headers=_auth(api.agent_token)).status_code == 403
+        assert (
+            client.post(
+                directory, headers=_auth(api.agent_token), json={"name": "Existing"}
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(directory, headers=_auth(api.agent_token), json={"name": "New"}).status_code
+            == 201
+        )
+        _revoke(api, "write")
+        assert (
+            client.post(
+                directory, headers=_auth(api.agent_token), json={"name": "Other"}
+            ).status_code
+            == 403
+        )
+
+
+def test_opt_in_home_library_tag_counts_do_not_include_foreign_library(tag_api: TagApi) -> None:
+    api = tag_api
+    shared_id = "1" * 32
+    _seed_tag(api, tag_id=shared_id, name="Home", page_ids=[api.scope.first_page_id])
+    foreign_library, foreign_section, foreign_book = seed_library_structure(
+        api.engine, prefix="b", label="Foreign"
+    )
+    foreign_page = page_graph_values(
+        library_id=foreign_library,
+        section_id=foreign_section,
+        book_id=foreign_book,
+        page_byte=0x77,
+        revision_hex="88",
+        source_hex="9",
+    )
+    with immediate_transaction(api.engine) as connection:
+        insert_page_graph(connection, foreign_page)
+        repository = TagRepository(connection)
+        repository.add_tag(
+            library_id=foreign_library, tag_id=shared_id, name="Foreign", created_at=1_500_000
+        )
+        repository.attach_page(
+            library_id=foreign_library,
+            page_uid=foreign_page[0].page_uid,
+            tag_id=shared_id,
+            created_at=1_500_000,
+        )
+    _opt_in(api)
+    _grant(api, "read")
+    with TestClient(_app(api), raise_server_exceptions=False) as client:
+        directory = client.get(_path(api, "tags"), headers=_auth(api.agent_token))
+        assert [(item["name"], item["page_count"]) for item in directory.json()["items"]] == [
+            ("Home", 1)
+        ]
+        pages = client.get(_path(api, f"tags/{shared_id}/pages"), headers=_auth(api.agent_token))
+        assert [item["page_id"] for item in pages.json()["items"]] == [api.scope.first_page_id]
+        assert (
+            client.get(
+                f"/api/v1/libraries/{foreign_library}/tags", headers=_auth(api.agent_token)
+            ).status_code
+            == 404
         )
 
 

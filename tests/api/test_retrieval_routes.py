@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass
@@ -23,7 +24,7 @@ from retrieval_read.conftest import (
 from retrieval_read.conftest import (
     retrieval_scope as retrieval_scope_fixture,
 )
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, insert, select
 from starlette.requests import Request
 from starlette.routing import Route
 
@@ -33,6 +34,7 @@ from patchouli_lib.api.contracts import PROTECTED_CACHE_CONTROL
 from patchouli_lib.api.errors import PROBLEM_MEDIA_TYPE, install_api_exception_handlers
 from patchouli_lib.api.request_ids import REQUEST_ID_HEADER, RequestIDMiddleware
 from patchouli_lib.api.retrieval_routes import _perform_read, create_retrieval_router
+from patchouli_lib.auth.models import CredentialLibraryGrant, CredentialLibraryPolicy
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
     CallerKind,
@@ -730,6 +732,110 @@ def test_grant_removal_between_authentication_and_read_is_rechecked(
         f"/api/v1/sections/{retrieval_api.scope.query_section_id}/pages",
     )
     _assert_problem(response, 403, "insufficient_scope")
+
+
+def test_read_uses_one_real_sqlite_snapshot_for_grant_and_page(
+    retrieval_api: RetrievalApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scope = retrieval_api.scope
+    page_path = f"/api/v1/sections/{scope.query_section_id}/pages/{scope.first_page_id}"
+    with retrieval_api.engine.connect() as connection:
+        assert connection.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one() == "wal"
+
+    original_actions = RetrievalRepository.section_actions
+    observed_transactions: list[bool] = []
+
+    def actions_then_revoke_and_delete(
+        repository: RetrievalRepository,
+        library_id: str,
+        caller_id: str,
+        section_id: str,
+    ) -> tuple[SectionAction, ...]:
+        actions = original_actions(repository, library_id, caller_id, section_id)
+        raw = repository._connection.connection.driver_connection
+        assert isinstance(raw, sqlite3.Connection)
+        observed_transactions.append(raw.in_transaction)
+        with immediate_transaction(retrieval_api.engine) as writer:
+            assert AuthRepository(writer).remove_grant(
+                scope.library_id, CALLER_ID, scope.query_section_id, SectionAction.PAGE_READ
+            )
+            writer.exec_driver_sql(
+                "UPDATE pages SET deleted_at = 4000000, updated_at = 4000000 "
+                "WHERE library_id = ? AND page_uid = ?",
+                (scope.library_id, scope.first_page_uid),
+            )
+        return actions
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(RetrievalRepository, "section_actions", actions_then_revoke_and_delete)
+        response = _get(retrieval_api, page_path)
+    assert observed_transactions == [True]
+    assert response.status_code == 200
+    assert response.json()["revision"]["content"] == scope.current_content
+    _assert_problem(_get(retrieval_api, page_path), 403, "insufficient_scope")
+
+
+def test_opted_in_library_grant_and_body_share_one_sqlite_snapshot(
+    retrieval_api: RetrievalApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scope = retrieval_api.scope
+    credential_id = "d" * 32
+    with immediate_transaction(retrieval_api.engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryPolicy),
+            {
+                "credential_id": credential_id,
+                "caller_id": CALLER_ID,
+                "home_library_id": scope.library_id,
+                "mode": "library_grants",
+                "created_at": 1_000_000,
+            },
+        )
+        connection.execute(
+            insert(CredentialLibraryGrant),
+            {
+                "credential_id": credential_id,
+                "caller_id": CALLER_ID,
+                "home_library_id": scope.library_id,
+                "target_library_id": scope.library_id,
+                "action": "read",
+                "created_at": 1_000_000,
+            },
+        )
+    with retrieval_api.engine.connect() as connection:
+        assert connection.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one() == "wal"
+
+    original_policy = RetrievalRepository.get_library_policy
+    observed_transactions: list[bool] = []
+
+    def policy_then_revoke_and_delete(repository: RetrievalRepository, **kwargs: Any) -> Any:
+        policy = original_policy(repository, **kwargs)
+        raw = repository._connection.connection.driver_connection
+        assert isinstance(raw, sqlite3.Connection)
+        observed_transactions.append(raw.in_transaction)
+        with immediate_transaction(retrieval_api.engine) as writer:
+            writer.exec_driver_sql(
+                "DELETE FROM auth_credential_library_grants "
+                "WHERE credential_id = ? AND target_library_id = ? AND action = 'read'",
+                (credential_id, scope.library_id),
+            )
+            writer.exec_driver_sql(
+                "UPDATE pages SET deleted_at = 4000000, updated_at = 4000000 "
+                "WHERE library_id = ? AND page_uid = ?",
+                (scope.library_id, scope.first_page_uid),
+            )
+        return policy
+
+    page_path = f"/api/v1/sections/{scope.query_section_id}/pages/{scope.first_page_id}"
+    with monkeypatch.context() as patcher:
+        patcher.setattr(RetrievalRepository, "get_library_policy", policy_then_revoke_and_delete)
+        response = _get(retrieval_api, page_path)
+    assert observed_transactions == [True]
+    assert response.status_code == 200
+    assert response.json()["revision"]["content"] == scope.current_content
+    _assert_problem(_get(retrieval_api, page_path), 403, "insufficient_scope")
 
 
 def test_revision_file_download_rechecks_page_read_grant_after_authentication(

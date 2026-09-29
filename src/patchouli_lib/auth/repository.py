@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from sqlalchemy import Connection, delete, insert, select, update
 
+from patchouli_lib.auth.library_policy import LibraryAction, LibraryPolicy, resolve_library_policy
 from patchouli_lib.auth.models import (
     AgentTokenValue,
     AuditEvent,
     BootstrapMarker,
     Caller,
     Credential,
+    CredentialLibraryGrant,
     CredentialLibraryPolicy,
     SectionGrant,
 )
@@ -26,6 +30,14 @@ from patchouli_lib.auth.schemas import (
 )
 from patchouli_lib.auth.tokens import InvalidTokenError, parse_token, verify_token
 from patchouli_lib.library.models import Library, Section
+
+
+@dataclass(frozen=True, slots=True)
+class CredentialLibraryGrantSummary:
+    """Current rights for one target Library, never a derived Section grant."""
+
+    library_id: str
+    actions: tuple[LibraryAction, ...]
 
 
 class AuthRepository:
@@ -154,6 +166,52 @@ class AuthRepository:
             CredentialLibraryPolicy.mode == "library_grants",
         )
         return self._connection.execute(statement).scalar_one_or_none() is not None
+
+    def list_credential_library_grants(
+        self,
+        *,
+        home_library_id: str,
+        caller_id: str,
+        credential_id: str,
+    ) -> tuple[CredentialLibraryGrantSummary, ...]:
+        """List grants for only this exact credential, in deterministic order."""
+
+        statement = (
+            select(CredentialLibraryGrant.target_library_id, CredentialLibraryGrant.action)
+            .where(
+                CredentialLibraryGrant.home_library_id == home_library_id,
+                CredentialLibraryGrant.caller_id == caller_id,
+                CredentialLibraryGrant.credential_id == credential_id,
+            )
+            .order_by(CredentialLibraryGrant.target_library_id, CredentialLibraryGrant.action)
+        )
+        grouped: dict[str, list[LibraryAction]] = {}
+        for library_id, action in self._connection.execute(statement):
+            grouped.setdefault(library_id, []).append(LibraryAction(action))
+        return tuple(
+            CredentialLibraryGrantSummary(library_id=library_id, actions=tuple(actions))
+            for library_id, actions in grouped.items()
+        )
+
+    def get_library_policy(
+        self,
+        *,
+        credential_id: str,
+        caller_id: str,
+        home_library_id: str,
+        target_library_id: str,
+        active_at: int,
+    ) -> LibraryPolicy | None:
+        """Resolve the current policy for one exact active Agent credential."""
+
+        return resolve_library_policy(
+            self._connection,
+            credential_id=credential_id,
+            caller_id=caller_id,
+            home_library_id=home_library_id,
+            target_library_id=target_library_id,
+            active_at=active_at,
+        )
 
     def find_credential_by_selector(self, selector: str) -> StoredCredential | None:
         statement = select(Credential.__table__).where(Credential.selector == selector)

@@ -4,8 +4,10 @@ import dataclasses
 import hashlib
 
 import pytest
-from sqlalchemy import Connection, Engine, select
+from sqlalchemy import Connection, Engine, insert, select
 
+from patchouli_lib.auth.library_policy import LegacySectionPolicy
+from patchouli_lib.auth.models import CredentialLibraryGrant, CredentialLibraryPolicy
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
     CallerRecord,
@@ -70,6 +72,80 @@ def test_sections_only_discover_query_grants_with_bounded_keyset(
         assert retrieval_scope.read_section_id not in {
             item.section_id for item in (*first.items, *second.items)
         }
+    finally:
+        connection.close()
+
+
+def test_opted_in_library_read_replaces_legacy_section_visibility(
+    retrieval_engine: Engine,
+    retrieval_scope: RetrievalScope,
+) -> None:
+    scope = retrieval_scope
+    with immediate_transaction(retrieval_engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryPolicy),
+            {
+                "credential_id": scope.authenticated.credential.id,
+                "caller_id": scope.authenticated.caller.id,
+                "home_library_id": scope.library_id,
+                "mode": "library_grants",
+                "created_at": 1_000_000,
+            },
+        )
+        connection.execute(
+            insert(CredentialLibraryGrant),
+            {
+                "credential_id": scope.authenticated.credential.id,
+                "caller_id": scope.authenticated.caller.id,
+                "home_library_id": scope.library_id,
+                "target_library_id": scope.library_id,
+                "action": "write",
+                "created_at": 1_000_000,
+            },
+        )
+
+    connection, service = _service(retrieval_engine, scope)
+    try:
+        with pytest.raises(RetrievalAuthorizationError):
+            service.list_sections()
+        with pytest.raises(RetrievalAuthorizationError):
+            service.get_current_page(scope.query_section_id, scope.first_page_id)
+    finally:
+        connection.close()
+
+    with immediate_transaction(retrieval_engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryGrant),
+            {
+                "credential_id": scope.authenticated.credential.id,
+                "caller_id": scope.authenticated.caller.id,
+                "home_library_id": scope.library_id,
+                "target_library_id": scope.library_id,
+                "action": "read",
+                "created_at": 1_000_000,
+            },
+        )
+
+    connection, service = _service(retrieval_engine, scope)
+    try:
+        first = service.list_sections(ReadWindow(limit=2))
+        assert [item.section_id for item in first.items] == [
+            scope.query_section_id,
+            scope.second_query_section_id,
+        ]
+        assert first.next_key == scope.second_query_section_id
+        second = service.list_sections(ReadWindow(limit=2, after_key=first.next_key))
+        assert [item.section_id for item in second.items] == [
+            scope.read_section_id,
+            scope.hidden_section_id,
+        ]
+        assert second.next_key is None
+        assert (
+            service.get_current_page(
+                scope.hidden_section_id, scope.hidden_page_id
+            ).document.revision.content
+            == "# Hidden\n"
+        )
     finally:
         connection.close()
 
@@ -480,6 +556,9 @@ def test_visible_page_reads_reject_malformed_page_ids(
             credential_id: str,
         ) -> CredentialRecord:
             return retrieval_scope.authenticated.credential
+
+        def get_library_policy(self, **kwargs: object) -> LegacySectionPolicy:
+            return LegacySectionPolicy()
 
         def get_current_document(self, *args: object) -> None:
             raise AssertionError("Malformed Page IDs must not reach persistence.")

@@ -188,13 +188,20 @@ def _perform_read[ResultT](
     clock: Clock,
 ) -> ResultT:
     try:
-        with engine.connect() as connection, connection.begin():
-            service = RetrievalService(
-                RetrievalRepository(connection),
-                context.authenticated,
-                clock=clock,
-            )
-            return operation(service)
+        with engine.connect() as connection:
+            # SQLAlchemy's transaction marker alone does not issue a pysqlite
+            # BEGIN before SELECT. Keep policy/grant and content checks in one
+            # real SQLite read snapshot, including when the operation raises.
+            connection.exec_driver_sql("BEGIN")
+            try:
+                service = RetrievalService(
+                    RetrievalRepository(connection),
+                    context.authenticated,
+                    clock=clock,
+                )
+                return operation(service)
+            finally:
+                connection.rollback()
     except RetrievalAuthenticationError:
         raise invalid_token() from None
     except RetrievalAuthorizationError:

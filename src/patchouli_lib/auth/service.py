@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from patchouli_lib.auth.library_policy import LegacySectionPolicy, LibraryAction
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
     MAX_RFC3339_TIMESTAMP_MICROSECONDS,
@@ -177,18 +178,37 @@ class AuthenticationService:
         action: SectionAction,
     ) -> AuthenticatedCaller:
         authenticated = self.authenticate(token_value)
-        if (
-            authenticated.caller.library_id != library_id
-            or authenticated.caller.kind is not CallerKind.AGENT
-        ):
+        if authenticated.caller.kind is not CallerKind.AGENT:
             raise AuthorizationError
-        grant = self._repository.get_grant(
-            library_id,
-            authenticated.caller.id,
-            section_id,
-            action,
+        policy = self._repository.get_library_policy(
+            credential_id=authenticated.credential.id,
+            caller_id=authenticated.caller.id,
+            home_library_id=authenticated.caller.library_id,
+            target_library_id=library_id,
+            active_at=self._clock(),
         )
-        if grant is None:
+        if policy is None:
+            raise AuthenticationError
+        if isinstance(policy, LegacySectionPolicy):
+            if authenticated.caller.library_id != library_id:
+                raise AuthorizationError
+            grant = self._repository.get_grant(
+                library_id,
+                authenticated.caller.id,
+                section_id,
+                action,
+            )
+            if grant is None:
+                raise AuthorizationError
+            return authenticated
+
+        if action in (SectionAction.QUERY, SectionAction.PAGE_READ):
+            library_action = LibraryAction.READ
+        elif action is SectionAction.ARCHIVE_WRITE:
+            library_action = LibraryAction.WRITE
+        else:
+            raise AuthorizationError
+        if not policy.allows(library_action):
             raise AuthorizationError
         return authenticated
 

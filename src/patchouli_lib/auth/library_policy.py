@@ -1,4 +1,4 @@
-"""Unactivated per-credential Library policy evaluation.
+"""Per-credential Library policy evaluation.
 
 Callers must still authenticate the bearer token before using this data-layer
 helper. Legacy Section policy is deliberately a marker, not a grant.
@@ -64,7 +64,7 @@ def resolve_library_policy(
 
     ``None`` means an invalid, inactive, or mismatched identity. A legacy marker
     does not authorize anything by itself; existing Section checks remain
-    responsible for those credentials. This module is not wired into routes.
+    responsible for those credentials.
     """
 
     if active_at < 0:

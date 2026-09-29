@@ -14,17 +14,22 @@ from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, delete, func, insert, select
 
+from patchouli_lib.api.authentication import AuthenticatedRequestContext
 from patchouli_lib.api.contracts import PROTECTED_CACHE_CONTROL
-from patchouli_lib.api.errors import ProblemDetails, install_api_exception_handlers
+from patchouli_lib.api.errors import (
+    ApplicationProblem,
+    ProblemDetails,
+    install_api_exception_handlers,
+)
 from patchouli_lib.api.file_set_read_routes import create_file_set_read_router
-from patchouli_lib.api.file_set_write_routes import create_file_set_write_router
+from patchouli_lib.api.file_set_write_routes import _authorize_scope, create_file_set_write_router
 from patchouli_lib.api.request_ids import REQUEST_ID_HEADER, RequestIDMiddleware
-from patchouli_lib.auth.models import AuditEvent
+from patchouli_lib.auth.models import AuditEvent, CredentialLibraryGrant, CredentialLibraryPolicy
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import CallerKind, NewCaller, NewSectionGrant, SectionAction
-from patchouli_lib.auth.service import CredentialIssuer
+from patchouli_lib.auth.service import AuthenticationService, CredentialIssuer
 from patchouli_lib.backup.validation import validate_database
 from patchouli_lib.content.file_manifest import build_file_manifest
 from patchouli_lib.content.models import Page, PageSource, Revision, RevisionFile
@@ -615,3 +620,102 @@ def test_authorization_preconditions_and_validation_fail_without_writes(
         for response in (forbidden, foreign, no_book, bad_metadata, bad_time, stale, read_only):
             for secret in (file_set_http.writer, file_set_http.reader, SOURCE["locator"]):
                 assert secret not in response.text
+
+
+def test_library_policy_write_precheck_does_not_fall_back_to_old_section_grant(
+    file_set_http: FileSetHttp,
+) -> None:
+    with immediate_transaction(file_set_http.engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryPolicy),
+            {
+                "credential_id": "b" * 32,
+                "caller_id": "a" * 32,
+                "home_library_id": file_set_http.library_id,
+                "mode": "library_grants",
+                "created_at": NOW - 1,
+            },
+        )
+    with TestClient(_app(file_set_http), raise_server_exceptions=False) as client:
+        denied = _create(
+            client,
+            file_set_http,
+            key="policy-denied",
+            files=(("content.md", b"# Synthetic\n"),),
+        )
+        _problem(denied, 403, "insufficient_scope")
+        hidden = _create(
+            client,
+            file_set_http,
+            key="policy-hidden-section",
+            files=(("content.md", b"# Synthetic\n"),),
+            path=_create_path(file_set_http).replace(file_set_http.section_id, "f" * 32, 1),
+        )
+        _problem(hidden, 403, "insufficient_scope")
+        assert _counts(file_set_http) == (0, 0, 0, 0, 0, 0)
+        with immediate_transaction(file_set_http.engine) as connection:
+            connection.execute(
+                insert(CredentialLibraryGrant),
+                {
+                    "credential_id": "b" * 32,
+                    "caller_id": "a" * 32,
+                    "home_library_id": file_set_http.library_id,
+                    "target_library_id": file_set_http.library_id,
+                    "action": "write",
+                    "created_at": NOW - 1,
+                },
+            )
+        allowed = _create(
+            client,
+            file_set_http,
+            key="policy-allowed",
+            files=(("content.md", b"# Synthetic\n"),),
+        )
+        assert allowed.status_code == 201, allowed.text
+        with immediate_transaction(file_set_http.engine) as connection:
+            connection.execute(
+                delete(CredentialLibraryGrant).where(
+                    CredentialLibraryGrant.credential_id == "b" * 32,
+                    CredentialLibraryGrant.target_library_id == file_set_http.library_id,
+                    CredentialLibraryGrant.action == "write",
+                )
+            )
+        revoked = _revise(
+            client,
+            file_set_http,
+            allowed.json()["page_id"],
+            key="policy-revoked",
+            etag=allowed.headers["ETag"],
+            files=(("content.md", b"# Changed\n"),),
+        )
+        _problem(revoked, 403, "insufficient_scope")
+
+
+def test_legacy_file_set_precheck_uses_current_grants_not_captured_context(
+    file_set_http: FileSetHttp,
+) -> None:
+    with immediate_transaction(file_set_http.engine) as connection:
+        repository = AuthRepository(connection)
+        service = AuthenticationService(repository, clock=lambda: NOW)
+        authenticated = service.authenticate(file_set_http.writer)
+        context = AuthenticatedRequestContext(
+            authenticated=authenticated,
+            grants=repository.list_grants(file_set_http.library_id, authenticated.caller.id),
+        )
+        assert repository.remove_grant(
+            file_set_http.library_id,
+            authenticated.caller.id,
+            file_set_http.section_id,
+            SectionAction.ARCHIVE_WRITE,
+        )
+    assert SectionAction.ARCHIVE_WRITE in {grant.action for grant in context.grants}
+    with pytest.raises(ApplicationProblem) as failure:
+        _authorize_scope(
+            file_set_http.engine,
+            context,
+            file_set_http.library_id,
+            file_set_http.section_id,
+            clock=lambda: NOW,
+        )
+    assert failure.value.status_code == 403
+    assert failure.value.code == "insufficient_scope"

@@ -1,4 +1,4 @@
-"""Transaction-owned Tag operations with legacy Section-grant authorization."""
+"""Transaction-owned Tag operations with credential-specific authorization."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 from sqlalchemy import Connection
 
+from patchouli_lib.auth.library_policy import LegacySectionPolicy, LibraryAction
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
     AuditOutcome,
@@ -44,9 +45,10 @@ class TagValidationError(RuntimeError):
 class TagService:
     """Keep authentication, authorization, Tag writes and audit in one transaction.
 
-    Until Library read/write grants exist, Agent directory reads include only Tags
-    associated with live Pages in Sections where both query and Page-read grants
-    are current. Unassociated Tag definitions are only visible to an Operator.
+    Legacy Agent directory reads include only Tags associated with live Pages
+    in Sections where both query and Page-read grants are current. An opted-in
+    Agent with a Library READ grant sees all Tag definitions and live Pages in
+    its home Library. Cross-Library requests remain unavailable here.
     """
 
     def __init__(
@@ -79,7 +81,11 @@ class TagService:
             query_key = None if query is None else normalize_tag_name(query)[1]
         except ValueError:
             raise TagValidationError from None
-        scoped_id = None if caller.caller.kind is CallerKind.OPERATOR else caller.caller.id
+        scoped_id = None
+        if caller.caller.kind is CallerKind.AGENT and not self._library_grant_mode(
+            caller, library_id, LibraryAction.READ
+        ):
+            scoped_id = caller.caller.id
         items = self._repository.visible_tags(
             library_id=library_id,
             caller_id=scoped_id,
@@ -100,7 +106,11 @@ class TagService:
         offset: int = 0,
     ) -> tuple[list[TaggedPageRecord], int | None]:
         caller = self._caller(token, library_id)
-        scoped_id = None if caller.caller.kind is CallerKind.OPERATOR else caller.caller.id
+        scoped_id = None
+        if caller.caller.kind is CallerKind.AGENT and not self._library_grant_mode(
+            caller, library_id, LibraryAction.READ
+        ):
+            scoped_id = caller.caller.id
         if not self._repository.visible_tags(
             library_id=library_id, caller_id=scoped_id, tag_id=tag_id, limit=1
         ):
@@ -119,7 +129,9 @@ class TagService:
         self, token: str, *, library_id: str, name: str, request_id: str
     ) -> tuple[TagRecord, bool]:
         caller = self._caller(token, library_id)
-        if caller.caller.kind is not CallerKind.OPERATOR:
+        if caller.caller.kind is CallerKind.AGENT and not self._library_grant_mode(
+            caller, library_id, LibraryAction.WRITE
+        ):
             raise TagAuthorizationError
         try:
             normalize_tag_name(name)
@@ -127,6 +139,8 @@ class TagService:
             raise TagValidationError from None
         previous = self._repository.find_tag(library_id=library_id, name=name)
         if previous is not None:
+            if caller.caller.kind is CallerKind.AGENT:
+                self._library_grant_mode(caller, library_id, LibraryAction.READ)
             return previous, False
         now = self._clock()
         created = self._repository.add_tag(
@@ -146,7 +160,9 @@ class TagService:
         offset: int = 0,
     ) -> tuple[list[TagRecord], int | None]:
         caller = self._caller(token, library_id)
-        if caller.caller.kind is CallerKind.AGENT:
+        if caller.caller.kind is CallerKind.AGENT and not self._library_grant_mode(
+            caller, library_id, LibraryAction.READ
+        ):
             self._require_section_action(caller, section_id, SectionAction.PAGE_READ)
         page_uid = self._live_page(library_id, section_id, page_id)
         items = self._repository.list_page_tags(
@@ -167,7 +183,9 @@ class TagService:
         request_id: str,
     ) -> bool:
         caller = self._caller(token, library_id)
-        if caller.caller.kind is CallerKind.AGENT:
+        if caller.caller.kind is CallerKind.AGENT and not self._library_grant_mode(
+            caller, library_id, LibraryAction.WRITE
+        ):
             self._require_section_action(caller, section_id, SectionAction.PAGE_READ)
             self._require_section_action(caller, section_id, SectionAction.ARCHIVE_WRITE)
         page_uid = self._live_page(library_id, section_id, page_id)
@@ -211,6 +229,24 @@ class TagService:
         if caller.caller.kind not in {CallerKind.AGENT, CallerKind.OPERATOR}:
             raise TagAuthorizationError
         return caller
+
+    def _library_grant_mode(
+        self, caller: AuthenticatedCaller, library_id: str, action: LibraryAction
+    ) -> bool:
+        policy = self._auth.get_library_policy(
+            credential_id=caller.credential.id,
+            caller_id=caller.caller.id,
+            home_library_id=caller.caller.library_id,
+            target_library_id=library_id,
+            active_at=self._clock(),
+        )
+        if policy is None:
+            raise TagAuthorizationError
+        if isinstance(policy, LegacySectionPolicy):
+            return False
+        if not policy.allows(action):
+            raise TagAuthorizationError
+        return True
 
     def _require_section_action(
         self, caller: AuthenticatedCaller, section_id: str, action: SectionAction

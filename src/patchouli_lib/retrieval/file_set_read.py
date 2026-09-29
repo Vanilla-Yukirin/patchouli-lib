@@ -13,6 +13,7 @@ from pydantic import Field
 from sqlalchemy import Connection, select
 
 from patchouli_lib.api.contracts import MAX_PAGE_LIMIT
+from patchouli_lib.auth.library_policy import LegacySectionPolicy, resolve_library_policy
 from patchouli_lib.auth.schemas import AuthenticatedCaller, CallerKind, CallerRecord, SectionAction
 from patchouli_lib.auth.service import Clock, utc_microseconds
 from patchouli_lib.content.file_manifest import FileManifest, build_file_manifest
@@ -282,14 +283,27 @@ class FileSetReadService:
         section_id: str,
         page_id: str,
     ) -> PageRecord:
-        caller = self._require_current_agent()
-        if library_id != caller.library_id:
+        caller, now = self._require_current_agent()
+        policy = resolve_library_policy(
+            self._connection,
+            credential_id=self._authenticated.credential.id,
+            caller_id=caller.id,
+            home_library_id=caller.library_id,
+            target_library_id=library_id,
+            active_at=now,
+        )
+        if policy is None:
+            raise FileSetReadAuthenticationError
+        if isinstance(policy, LegacySectionPolicy):
+            if library_id != caller.library_id:
+                raise FileSetReadNotFoundError
+            actions = self._repository.section_actions(library_id, caller.id, section_id)
+            if not actions:
+                raise FileSetReadNotFoundError
+            if SectionAction.PAGE_READ not in actions:
+                raise FileSetReadAuthorizationError
+        elif not policy.read:
             raise FileSetReadNotFoundError
-        actions = self._repository.section_actions(library_id, caller.id, section_id)
-        if not actions:
-            raise FileSetReadNotFoundError
-        if SectionAction.PAGE_READ not in actions:
-            raise FileSetReadAuthorizationError
         validate_page_id(page_id)
         page = self._repository.get_page(library_id, section_id, page_id)
         if page is None:
@@ -371,7 +385,7 @@ class FileSetReadService:
             raise FileSetReadPersistenceError from None
         return _VerifiedSnapshot(page.page_id, revision_id, revision_number, manifest)
 
-    def _require_current_agent(self) -> CallerRecord:
+    def _require_current_agent(self) -> tuple[CallerRecord, int]:
         authenticated = self._authenticated
         identity = authenticated.caller
         credential = authenticated.credential
@@ -397,7 +411,7 @@ class FileSetReadService:
             or now >= current_credential.expires_at
         ):
             raise FileSetReadAuthenticationError
-        return current
+        return current, now
 
 
 __all__ = [

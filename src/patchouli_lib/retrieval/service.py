@@ -6,6 +6,7 @@ import hmac
 from collections.abc import Callable
 
 from patchouli_lib.api.contracts import Citation, build_api_v1_path
+from patchouli_lib.auth.library_policy import LegacySectionPolicy, LibraryPolicy
 from patchouli_lib.auth.schemas import (
     AuthenticatedCaller,
     CallerKind,
@@ -81,13 +82,18 @@ class RetrievalService:
         self._clock = clock
 
     def list_sections(self, window: ReadWindow | None = None) -> KeysetPage[SectionView]:
-        caller = self._require_current_agent()
+        caller, policy = self._require_current_agent()
         resolved_window = window or ReadWindow()
-        stored = self._repository.list_queryable_sections(
-            caller.library_id,
-            caller.id,
-            resolved_window,
-        )
+        if isinstance(policy, LegacySectionPolicy):
+            stored = self._repository.list_queryable_sections(
+                caller.library_id,
+                caller.id,
+                resolved_window,
+            )
+        else:
+            if not policy.read:
+                raise RetrievalAuthorizationError
+            stored = self._repository.list_sections(caller.library_id, resolved_window)
         return self._map_page(
             stored,
             lambda section: SectionView(section_id=section.id, name=section.name),
@@ -279,7 +285,7 @@ class RetrievalService:
         except RuntimeError:
             raise RetrievalPersistenceError from None
 
-    def _require_current_agent(self) -> CallerRecord:
+    def _require_current_agent(self) -> tuple[CallerRecord, LibraryPolicy]:
         authenticated = self._authenticated
         identity = authenticated.caller
         credential = authenticated.credential
@@ -307,22 +313,34 @@ class RetrievalService:
             or now >= current_credential.expires_at
         ):
             raise RetrievalAuthenticationError
-        return current
+        policy = self._repository.get_library_policy(
+            credential_id=credential.id,
+            caller_id=identity.id,
+            home_library_id=identity.library_id,
+            target_library_id=identity.library_id,
+            active_at=now,
+        )
+        if policy is None:
+            raise RetrievalAuthenticationError
+        return current, policy
 
     def _require_action(
         self,
         section_id: str,
         action: SectionAction,
     ) -> CallerRecord:
-        caller = self._require_current_agent()
-        actions = self._repository.section_actions(
-            caller.library_id,
-            caller.id,
-            section_id,
-        )
-        if not actions:
-            raise RetrievalNotFoundError
-        if action not in actions:
+        caller, policy = self._require_current_agent()
+        if isinstance(policy, LegacySectionPolicy):
+            actions = self._repository.section_actions(
+                caller.library_id,
+                caller.id,
+                section_id,
+            )
+            if not actions:
+                raise RetrievalNotFoundError
+            if action not in actions:
+                raise RetrievalAuthorizationError
+        elif not policy.read:
             raise RetrievalAuthorizationError
         return caller
 

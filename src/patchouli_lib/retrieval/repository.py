@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import Connection, and_, select
 
+from patchouli_lib.auth.library_policy import LibraryPolicy, resolve_library_policy
 from patchouli_lib.auth.models import Caller, Credential, SectionGrant
 from patchouli_lib.auth.schemas import (
     CallerRecord,
@@ -105,6 +106,40 @@ class RetrievalRepository:
         return tuple(
             SectionAction(value) for value in self._connection.execute(statement).scalars().all()
         )
+
+    def get_library_policy(
+        self,
+        *,
+        credential_id: str,
+        caller_id: str,
+        home_library_id: str,
+        target_library_id: str,
+        active_at: int,
+    ) -> LibraryPolicy | None:
+        return resolve_library_policy(
+            self._connection,
+            credential_id=credential_id,
+            caller_id=caller_id,
+            home_library_id=home_library_id,
+            target_library_id=target_library_id,
+            active_at=active_at,
+        )
+
+    def list_sections(
+        self,
+        library_id: str,
+        window: ReadWindow,
+    ) -> KeysetPage[SectionRecord]:
+        """List one already-authorized Library without consulting legacy Section grants."""
+
+        statement = (
+            select(Section.__table__).where(Section.library_id == library_id).order_by(Section.id)
+        )
+        if window.after_key is not None:
+            statement = statement.where(Section.id > window.after_key)
+        rows = self._connection.execute(statement.limit(window.limit + 1)).mappings().all()
+        records = tuple(SectionRecord.model_validate(dict(row)) for row in rows)
+        return self._page(records, window.limit, key=lambda item: item.id)
 
     def list_queryable_sections(
         self,

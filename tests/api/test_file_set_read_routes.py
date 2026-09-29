@@ -24,7 +24,7 @@ from retrieval_read.conftest import (
 )
 from retrieval_read.conftest import retrieval_engine as retrieval_engine_fixture
 from retrieval_read.conftest import retrieval_scope as retrieval_scope_fixture
-from sqlalchemy import Engine
+from sqlalchemy import Engine, insert
 from starlette.requests import Request
 from starlette.routing import Route
 
@@ -34,6 +34,7 @@ from patchouli_lib.api.errors import ApplicationProblem, install_api_exception_h
 from patchouli_lib.api.file_set_read_routes import _perform_read, create_file_set_read_router
 from patchouli_lib.api.file_set_write_routes import create_file_set_write_router
 from patchouli_lib.api.request_ids import REQUEST_ID_HEADER, RequestIDMiddleware
+from patchouli_lib.auth.models import CredentialLibraryGrant, CredentialLibraryPolicy
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
     CallerKind,
@@ -406,6 +407,125 @@ def test_current_page_auth_scope_and_recycle_bin_are_closed(file_set_api: FileSe
         404,
         "resource_not_found",
     )
+
+
+def test_opted_in_policy_scopes_reads_to_each_explicit_library(
+    file_set_api: FileSetApi,
+) -> None:
+    scope = file_set_api.scope
+    credential_id = "d" * 32
+    target_library_id, target_section_id, target_book_id = seed_library_structure(
+        file_set_api.engine, prefix="d", label="Target"
+    )
+    target = page_graph_values(
+        library_id=target_library_id,
+        section_id=target_section_id,
+        book_id=target_book_id,
+        page_byte=0x66,
+        revision_hex="ef",
+        source_hex="e",
+        title="Target Archive",
+        content_md=b"# Target library\n",
+    )
+    target_page, target_revision, *_ = target
+    with immediate_transaction(file_set_api.engine) as connection:
+        insert_page_graph(connection, target)
+        connection.exec_driver_sql(
+            "INSERT INTO revision_file_sets "
+            "(library_id, page_uid, revision_id, revision_number, storage_format, "
+            "file_count, total_size_bytes, snapshot_sha256) "
+            "VALUES (?, ?, ?, 1, 'legacy_markdown', 1, ?, NULL)",
+            (
+                target_library_id,
+                target_page.page_uid,
+                target_revision.revision_id,
+                target_revision.content_size_bytes,
+            ),
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO revision_files "
+            "(library_id, page_uid, revision_id, revision_number, filename, "
+            "content_bytes, size_bytes, content_sha256) "
+            "VALUES (?, ?, ?, 1, 'content.md', ?, ?, ?)",
+            (
+                target_library_id,
+                target_page.page_uid,
+                target_revision.revision_id,
+                target_revision.content_md,
+                target_revision.content_size_bytes,
+                target_revision.content_sha256,
+            ),
+        )
+        for table in ("revision_file_seals", "revision_file_seal_guards"):
+            connection.exec_driver_sql(
+                f"INSERT INTO {table} "
+                "(library_id, page_uid, revision_id, revision_number) VALUES (?, ?, ?, 1)",
+                (target_library_id, target_page.page_uid, target_revision.revision_id),
+            )
+        connection.execute(
+            insert(CredentialLibraryPolicy),
+            {
+                "credential_id": credential_id,
+                "caller_id": CALLER_ID,
+                "home_library_id": scope.library_id,
+                "mode": "library_grants",
+                "created_at": 1_000_000,
+            },
+        )
+        connection.execute(
+            insert(CredentialLibraryGrant),
+            {
+                "credential_id": credential_id,
+                "caller_id": CALLER_ID,
+                "home_library_id": scope.library_id,
+                "target_library_id": scope.library_id,
+                "action": "write",
+                "created_at": 1_000_000,
+            },
+        )
+
+    home_path = _base(file_set_api).split("/revisions/", 1)[0]
+    target_path = (
+        f"/api/v1/libraries/{target_library_id}/sections/{target_section_id}"
+        f"/pages/{target_page.page_id}"
+    )
+    target_revision_path = f"{target_path}/revisions/{target_revision.revision_id}/files"
+    _problem(_get(file_set_api, home_path), 404, "resource_not_found")
+    _problem(_get(file_set_api, target_path), 404, "resource_not_found")
+    _problem(_get(file_set_api, f"{target_path}/revisions"), 404, "resource_not_found")
+    _problem(_get(file_set_api, target_revision_path), 404, "resource_not_found")
+    _problem(_get(file_set_api, f"{target_revision_path}/content.md"), 404, "resource_not_found")
+
+    with immediate_transaction(file_set_api.engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryGrant),
+            {
+                "credential_id": credential_id,
+                "caller_id": CALLER_ID,
+                "home_library_id": scope.library_id,
+                "target_library_id": target_library_id,
+                "action": "read",
+                "created_at": 1_000_000,
+            },
+        )
+    current = _get(file_set_api, target_path)
+    assert current.status_code == 200, current.text
+    assert current.json()["revision_id"] == target_revision.revision_id
+    history = _get(file_set_api, f"{target_path}/revisions")
+    assert history.status_code == 200
+    assert [item["revision_id"] for item in history.json()["items"]] == [
+        target_revision.revision_id
+    ]
+    listing = _get(file_set_api, target_revision_path)
+    assert listing.status_code == 200
+    assert [item["filename"] for item in listing.json()["files"]] == ["content.md"]
+    downloaded = _get(
+        file_set_api,
+        f"{target_revision_path}/content.md",
+    )
+    assert downloaded.status_code == 200
+    assert downloaded.content == b"# Target library\n"
+    _problem(_get(file_set_api, home_path), 404, "resource_not_found")
 
 
 def test_legacy_revision_is_one_file_in_the_unified_contract(file_set_api: FileSetApi) -> None:
