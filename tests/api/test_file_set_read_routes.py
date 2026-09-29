@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from collections.abc import Callable, Iterator
-from contextlib import suppress
+from contextlib import closing, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -31,6 +32,7 @@ from patchouli_lib.api.authentication import BearerAuthentication
 from patchouli_lib.api.contracts import PROTECTED_CACHE_CONTROL
 from patchouli_lib.api.errors import ApplicationProblem, install_api_exception_handlers
 from patchouli_lib.api.file_set_read_routes import _perform_read, create_file_set_read_router
+from patchouli_lib.api.file_set_write_routes import create_file_set_write_router
 from patchouli_lib.api.request_ids import REQUEST_ID_HEADER, RequestIDMiddleware
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
@@ -46,6 +48,7 @@ from patchouli_lib.content.file_set_service import FileSetRevisionService
 from patchouli_lib.content.schemas import NewPageSource
 from patchouli_lib.content.service import page_current_etag
 from patchouli_lib.database import build_engine, immediate_transaction
+from patchouli_lib.identifiers import parse_occurrence_time
 from patchouli_lib.retrieval.repository import RetrievalRepository
 
 REQUEST_ID = "req_1234567890abcdef1234567890abcdef"
@@ -124,6 +127,27 @@ def _get(api: FileSetApi, path: str, *, authenticated: bool = True) -> Any:
         return client.get(path, headers=headers)
 
 
+def _revision_upload(content: bytes) -> tuple[str, bytes]:
+    boundary = "synthetic-current-page-boundary"
+    metadata = json.dumps({"source": {"kind": "synthetic"}}).encode()
+    body = b"".join(
+        (
+            f"--{boundary}\r\n".encode(),
+            b'Content-Disposition: form-data; name="metadata"\r\n',
+            b"Content-Type: application/json\r\n\r\n",
+            metadata,
+            b"\r\n",
+            f"--{boundary}\r\n".encode(),
+            b'Content-Disposition: form-data; name="file"; filename="content.md"\r\n',
+            b"Content-Type: text/markdown\r\n\r\n",
+            content,
+            b"\r\n",
+            f"--{boundary}--\r\n".encode(),
+        )
+    )
+    return f"multipart/form-data; boundary={boundary}", body
+
+
 def _problem(response: Any, status: int, code: str) -> None:
     assert response.status_code == status
     assert response.json()["code"] == code
@@ -185,13 +209,17 @@ def _install_file_set(api: FileSetApi) -> tuple[str, dict[str, bytes]]:
     return scope.second_revision_id, files
 
 
-def test_router_only_exposes_two_exact_file_reads(file_set_api: FileSetApi) -> None:
+def test_router_exposes_current_and_two_exact_file_reads(file_set_api: FileSetApi) -> None:
     router = create_file_set_read_router(file_set_api.engine)
     assert {
         (route.path, tuple(sorted(route.methods or ())))
         for route in router.routes
         if isinstance(route, Route)
     } == {
+        (
+            "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}",
+            ("GET",),
+        ),
         (
             "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}"
             "/revisions/{revision_id}/files",
@@ -203,6 +231,67 @@ def test_router_only_exposes_two_exact_file_reads(file_set_api: FileSetApi) -> N
             ("GET",),
         ),
     }
+
+
+def test_current_page_returns_verified_manifest_and_strong_etag(file_set_api: FileSetApi) -> None:
+    scope = file_set_api.scope
+    path = (
+        f"/api/v1/libraries/{scope.library_id}/sections/{scope.query_section_id}"
+        f"/pages/{scope.first_page_id}"
+    )
+    current = _get(file_set_api, path)
+    assert current.status_code == 200
+    assert current.json() == {
+        "page_id": scope.first_page_id,
+        "revision_id": scope.second_revision_id,
+        "revision_number": 2,
+        "snapshot_sha256": build_file_manifest(
+            [("content.md", scope.current_content.encode())]
+        ).snapshot_sha256.hex(),
+        "files": [
+            {
+                "filename": "content.md",
+                "size_bytes": len(scope.current_content.encode()),
+                "content_sha256": hashlib.sha256(scope.current_content.encode()).hexdigest(),
+            }
+        ],
+    }
+    assert current.headers["ETag"] == page_current_etag(
+        scope.first_page_uid,
+        scope.second_revision_id,
+        2,
+        parse_occurrence_time("2026-08-13T10:00:00.123456Z").utc_microseconds,
+        3_000_000,
+    )
+    assert current.headers["Cache-Control"] == PROTECTED_CACHE_CONTROL
+    assert scope.current_content not in current.text
+
+
+def test_current_page_auth_scope_and_recycle_bin_are_closed(file_set_api: FileSetApi) -> None:
+    scope = file_set_api.scope
+    path = (
+        f"/api/v1/libraries/{scope.library_id}/sections/{scope.query_section_id}"
+        f"/pages/{scope.first_page_id}"
+    )
+    _problem(_get(file_set_api, path, authenticated=False), 401, "authentication_required")
+    _problem(
+        _get(file_set_api, path.replace(scope.library_id, "f" * 32, 1)), 404, "resource_not_found"
+    )
+    _problem(
+        _get(file_set_api, path.replace(scope.query_section_id, SECOND_QUERY_SECTION_ID, 1)),
+        403,
+        "insufficient_scope",
+    )
+    _problem(
+        _get(file_set_api, path.replace(scope.query_section_id, scope.hidden_section_id, 1)),
+        404,
+        "resource_not_found",
+    )
+    _problem(
+        _get(file_set_api, path.replace(scope.first_page_id, scope.deleted_page_id, 1)),
+        404,
+        "resource_not_found",
+    )
 
 
 def test_legacy_revision_is_one_file_in_the_unified_contract(file_set_api: FileSetApi) -> None:
@@ -243,7 +332,11 @@ def test_multifile_current_and_legacy_history_use_same_routes(file_set_api: File
     revision_id, files = _install_file_set(file_set_api)
     base = _base(file_set_api, revision_id=revision_id)
     listing = _get(file_set_api, base)
+    current = _get(file_set_api, base.split("/revisions/", 1)[0])
     assert listing.status_code == 200
+    assert current.status_code == 200
+    assert current.json() == listing.json()
+    assert current.headers["ETag"].startswith('"page-v2-')
     assert listing.json()["revision_number"] == 2
     assert (
         listing.json()["snapshot_sha256"]
@@ -281,6 +374,7 @@ def test_migrated_database_and_real_append_are_read_by_one_file_set_contract(
             book_id=book_id,
         )
         issued = generate_token()
+        writer_issued = generate_token()
         with immediate_transaction(engine) as connection:
             insert_page_graph(connection, (page, legacy, identifier, counter, source))
             auth = AuthRepository(connection)
@@ -313,6 +407,38 @@ def test_migrated_database_and_real_append_are_read_by_one_file_set_contract(
                     caller_id="4" * 32,
                     section_id=section_id,
                     action=SectionAction.PAGE_READ,
+                    created_at=1_000_000,
+                )
+            )
+            auth.add_caller(
+                NewCaller(
+                    id="8" * 32,
+                    library_id=library_id,
+                    kind=CallerKind.AGENT,
+                    name="Synthetic Write Agent",
+                    created_at=1_000_000,
+                    updated_at=1_000_000,
+                )
+            )
+            auth.add_credential(
+                NewCredential(
+                    id="9" * 32,
+                    library_id=library_id,
+                    caller_id="8" * 32,
+                    selector=writer_issued.selector,
+                    token_version=writer_issued.version,
+                    verifier=writer_issued.verifier,
+                    expires_at=10_000_000,
+                    created_at=1_000_000,
+                    updated_at=1_000_000,
+                )
+            )
+            auth.add_grant(
+                NewSectionGrant(
+                    library_id=library_id,
+                    caller_id="8" * 32,
+                    section_id=section_id,
+                    action=SectionAction.ARCHIVE_WRITE,
                     created_at=1_000_000,
                 )
             )
@@ -350,6 +476,7 @@ def test_migrated_database_and_real_append_are_read_by_one_file_set_contract(
         install_api_exception_handlers(app)
         app.add_middleware(RequestIDMiddleware, request_id_factory=lambda: REQUEST_ID)
         app.include_router(create_file_set_read_router(engine, clock=lambda: 4_000_000))
+        app.include_router(create_file_set_write_router(engine, clock=lambda: 4_000_000))
         page_path = f"/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page.page_id}"
         base = f"{page_path}/revisions"
         with TestClient(app, raise_server_exceptions=False) as client:
@@ -357,6 +484,36 @@ def test_migrated_database_and_real_append_are_read_by_one_file_set_contract(
             prior = client.get(f"{base}/{legacy.revision_id}/files", headers=headers)
             current = client.get(f"{base}/{next_revision_id}/files", headers=headers)
             binary = client.get(f"{base}/{next_revision_id}/files/figure.png", headers=headers)
+            state = client.get(page_path, headers=headers)
+            writer_denied = client.get(
+                page_path, headers={"Authorization": f"Bearer {writer_issued.value}"}
+            )
+            media, body = _revision_upload(b"# Third revision\n")
+            read_only_denied = client.post(
+                f"{page_path}/file-revisions",
+                headers={
+                    "Authorization": f"Bearer {issued.value}",
+                    "Content-Type": media,
+                    "Idempotency-Key": "reader-cannot-write",
+                    "If-Match": state.headers["ETag"],
+                },
+                content=body,
+            )
+            write_headers = {
+                "Authorization": f"Bearer {writer_issued.value}",
+                "Content-Type": media,
+                "Idempotency-Key": "writer-third-revision",
+                "If-Match": state.headers["ETag"],
+            }
+            revised = client.post(
+                f"{page_path}/file-revisions", headers=write_headers, content=body
+            )
+            latest = client.get(page_path, headers=headers)
+            stale = client.post(
+                f"{page_path}/file-revisions",
+                headers={**write_headers, "Idempotency-Key": "writer-stale-etag"},
+                content=body,
+            )
         assert prior.status_code == current.status_code == binary.status_code == 200
         assert prior.json()["files"][0]["filename"] == "content.md"
         assert current.json()["snapshot_sha256"] == appended.manifest.snapshot_sha256.hex()
@@ -365,6 +522,23 @@ def test_migrated_database_and_real_append_are_read_by_one_file_set_contract(
             "figure.png",
         ]
         assert binary.content == b"\x89PNG\x00\xff"
+        assert state.status_code == 200
+        assert state.json()["revision_id"] == next_revision_id
+        assert state.json()["snapshot_sha256"] == appended.manifest.snapshot_sha256.hex()
+        assert state.headers["ETag"] == appended.etag
+        _problem(writer_denied, 403, "insufficient_scope")
+        _problem(read_only_denied, 403, "insufficient_scope")
+        assert revised.status_code == 200, revised.text
+        assert revised.json()["changed"] is True
+        assert latest.status_code == 200
+        assert latest.headers["ETag"] == revised.headers["ETag"]
+        assert latest.headers["ETag"] != state.headers["ETag"]
+        assert latest.json()["revision_id"] == revised.json()["revision_id"]
+        assert (
+            latest.json()["files"][0]["content_sha256"]
+            == hashlib.sha256(b"# Third revision\n").hexdigest()
+        )
+        _problem(stale, 412, "revision_conflict")
     finally:
         engine.dispose()
 
@@ -428,7 +602,7 @@ def test_corrupt_snapshot_fails_closed(file_set_api: FileSetApi, kind: str) -> N
                 (b"x" * 32, revision_id),
             )
     base = _base(file_set_api, revision_id=revision_id)
-    for path in (base, f"{base}/note.md"):
+    for path in (base.split("/revisions/", 1)[0], base, f"{base}/note.md"):
         response = _get(file_set_api, path)
         _problem(response, 500, "internal_error")
         assert scope.current_content not in response.text
@@ -447,6 +621,24 @@ def test_corrupt_legacy_mirror_fails_closed(file_set_api: FileSetApi) -> None:
         response = _get(file_set_api, path)
         _problem(response, 500, "internal_error")
         assert scope.historical_content not in response.text
+
+
+def test_missing_current_revision_is_storage_error_not_page_absence(
+    file_set_api: FileSetApi,
+) -> None:
+    database = file_set_api.engine.url.database
+    assert database is not None
+    scope = file_set_api.scope
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute(
+            "UPDATE pages SET current_revision_id = ? WHERE page_id = ?",
+            ("rev_" + "f" * 32, scope.first_page_id),
+        )
+        connection.commit()
+    base = _base(file_set_api)
+    _problem(_get(file_set_api, base.split("/revisions/", 1)[0]), 500, "internal_error")
+    assert _get(file_set_api, base).status_code == 200
 
 
 def test_revoked_grant_is_rechecked_after_authentication(file_set_api: FileSetApi) -> None:

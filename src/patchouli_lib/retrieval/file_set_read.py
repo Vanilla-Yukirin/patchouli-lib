@@ -1,4 +1,4 @@
-"""Exact, authorization-scoped reads of historical Page file snapshots.
+"""Authorization-scoped reads of current and historical Page file snapshots.
 
 Both a legacy Markdown Revision and a file_set_v1 Revision are presented as
 one complete flat file set. This service never interprets or renders content.
@@ -16,6 +16,8 @@ from patchouli_lib.auth.schemas import AuthenticatedCaller, CallerKind, CallerRe
 from patchouli_lib.auth.service import Clock, utc_microseconds
 from patchouli_lib.content.file_manifest import FileManifest, build_file_manifest
 from patchouli_lib.content.models import Revision, RevisionFileSet
+from patchouli_lib.content.schemas import PageRecord, StrongPageETag
+from patchouli_lib.content.service import page_current_etag
 from patchouli_lib.identifiers import validate_page_id, validate_revision_id
 from patchouli_lib.retrieval.repository import RetrievalRepository
 from patchouli_lib.retrieval.schemas import (
@@ -55,6 +57,14 @@ class _VerifiedSnapshot:
     manifest: FileManifest = field(repr=False)
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class FileSetCurrentRead:
+    """Verified current manifest and its Page-state concurrency token."""
+
+    manifest: FileSetRevisionManifestView
+    etag: StrongPageETag
+
+
 class FileSetReadService:
     """Read exact revisions while rechecking current caller and grant state."""
 
@@ -78,6 +88,38 @@ class FileSetReadService:
         revision_id: str,
     ) -> FileSetRevisionManifestView:
         snapshot = self._snapshot(library_id, section_id, page_id, revision_id)
+        return self._manifest_view(snapshot)
+
+    def current_files(
+        self,
+        library_id: str,
+        section_id: str,
+        page_id: str,
+    ) -> FileSetCurrentRead:
+        """Read the current pointer, complete file set and ETag in one snapshot."""
+
+        page = self._visible_page(library_id, section_id, page_id)
+        try:
+            snapshot = self._verified_snapshot(page, page.current_revision_id)
+        except FileSetReadNotFoundError:
+            # The Page exists, so a missing current Revision is storage corruption.
+            raise FileSetReadPersistenceError from None
+        if snapshot.revision_number != page.current_revision_number:
+            raise FileSetReadPersistenceError
+        try:
+            etag = page_current_etag(
+                page.page_uid,
+                page.current_revision_id,
+                page.current_revision_number,
+                page.occurred_at,
+                page.updated_at,
+            )
+        except ValueError:
+            raise FileSetReadPersistenceError from None
+        return FileSetCurrentRead(manifest=self._manifest_view(snapshot), etag=etag)
+
+    @staticmethod
+    def _manifest_view(snapshot: _VerifiedSnapshot) -> FileSetRevisionManifestView:
         return FileSetRevisionManifestView(
             page_id=snapshot.page_id,
             revision_id=snapshot.revision_id,
@@ -114,6 +156,16 @@ class FileSetReadService:
         page_id: str,
         revision_id: str,
     ) -> _VerifiedSnapshot:
+        page = self._visible_page(library_id, section_id, page_id)
+        validate_revision_id(revision_id)
+        return self._verified_snapshot(page, revision_id)
+
+    def _visible_page(
+        self,
+        library_id: str,
+        section_id: str,
+        page_id: str,
+    ) -> PageRecord:
         caller = self._require_current_agent()
         if library_id != caller.library_id:
             raise FileSetReadNotFoundError
@@ -123,11 +175,13 @@ class FileSetReadService:
         if SectionAction.PAGE_READ not in actions:
             raise FileSetReadAuthorizationError
         validate_page_id(page_id)
-        validate_revision_id(revision_id)
         page = self._repository.get_page(library_id, section_id, page_id)
         if page is None:
             raise FileSetReadNotFoundError
+        return page
 
+    def _verified_snapshot(self, page: PageRecord, revision_id: str) -> _VerifiedSnapshot:
+        library_id = page.library_id
         revision = self._connection.execute(
             select(
                 Revision.revision_id,

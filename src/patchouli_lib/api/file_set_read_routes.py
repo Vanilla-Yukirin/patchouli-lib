@@ -1,4 +1,4 @@
-"""Draft protected routes for exact historical Page file-set reads.
+"""Draft protected routes for current and exact historical Page file-set reads.
 
 This router is not registered by the application until the unified file-set
 HTTP contract and its migration gates are reviewed. It has no write routes.
@@ -34,6 +34,7 @@ from patchouli_lib.identifiers import (
 )
 from patchouli_lib.library.schemas import OpaqueId
 from patchouli_lib.retrieval.file_set_read import (
+    FileSetCurrentRead,
     FileSetReadAuthenticationError,
     FileSetReadAuthorizationError,
     FileSetReadNotFoundError,
@@ -141,6 +142,28 @@ def create_file_set_read_router(
         "/libraries/{library_id}/sections/{section_id}/pages/{page_id}"
         "/revisions/{revision_id}/files"
     )
+
+    @router.get("/libraries/{library_id}/sections/{section_id}/pages/{page_id}")
+    async def get_current_page_files(
+        library_id: str,
+        section_id: str,
+        page_id: str,
+        request: Request,
+    ) -> JSONResponse:
+        context = await anyio.to_thread.run_sync(
+            partial(authenticate, request), abandon_on_cancel=False
+        )
+        scoped_library_id = _scope_id(library_id)
+        scoped_section_id = _scope_id(section_id)
+        current: FileSetCurrentRead = await _read(
+            engine,
+            context,
+            lambda service: service.current_files(scoped_library_id, scoped_section_id, page_id),
+            clock=clock,
+        )
+        headers = _headers(request)
+        headers["ETag"] = current.etag
+        return JSONResponse(content=current.manifest.model_dump(mode="json"), headers=headers)
 
     @router.get(base)
     async def list_revision_files(
