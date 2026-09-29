@@ -20,6 +20,7 @@ from patchouli_lib.backup import (
     verify_backup_bundle,
 )
 from patchouli_lib.backup.manifest import (
+    AGENT_TOKEN_VALUES_SCHEMA_REVISION,
     LIBRARY_POLICY_SCHEMA_REVISION,
     MANIFEST_FILENAME,
     SUPPORTED_SCHEMA_REVISION,
@@ -109,13 +110,19 @@ def test_expired_value_does_not_invalidate_historical_backup(
     assert validate_database(database).schema_revision == SUPPORTED_SCHEMA_REVISION
 
 
-def test_0014_bundle_remains_explicitly_verifiable_and_restorable(
-    complete_engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "schema_revision", (LIBRARY_POLICY_SCHEMA_REVISION, AGENT_TOKEN_VALUES_SCHEMA_REVISION)
+)
+def test_prior_bundle_remains_explicitly_verifiable_and_restorable(
+    complete_engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    schema_revision: str,
 ) -> None:
     source_database = complete_engine.url.database
     assert source_database is not None
     source_path = Path(source_database)
-    command.downgrade(_config(source_path, monkeypatch), LIBRARY_POLICY_SCHEMA_REVISION)
+    command.downgrade(_config(source_path, monkeypatch), schema_revision)
 
     bundle = tmp_path / "library-policy-bundle"
     bundle.mkdir()
@@ -134,7 +141,7 @@ def test_0014_bundle_remains_explicitly_verifiable_and_restorable(
         sha256=hashlib.sha256(data).hexdigest(),
         created_at="2026-09-29T12:34:56.123456Z",
         app_version=APP_VERSION,
-        schema_revision=LIBRARY_POLICY_SCHEMA_REVISION,
+        schema_revision=schema_revision,
         sqlite_version=sqlite3.sqlite_version,
         source_journal_mode=journal_mode,
         artifact_identity="synthetic/library-policy@immutable",
@@ -146,7 +153,7 @@ def test_0014_bundle_remains_explicitly_verifiable_and_restorable(
         verify_backup_bundle(
             bundle,
             app_version=APP_VERSION,
-            schema_revision=LIBRARY_POLICY_SCHEMA_REVISION,
+            schema_revision=schema_revision,
         )
         == manifest
     )
@@ -155,11 +162,11 @@ def test_0014_bundle_remains_explicitly_verifiable_and_restorable(
         bundle,
         restored,
         app_version=APP_VERSION,
-        schema_revision=LIBRARY_POLICY_SCHEMA_REVISION,
+        schema_revision=schema_revision,
     )
     assert (
-        validate_database(restored, schema_revision=LIBRARY_POLICY_SCHEMA_REVISION).schema_revision
-        == LIBRARY_POLICY_SCHEMA_REVISION
+        validate_database(restored, schema_revision=schema_revision).schema_revision
+        == schema_revision
     )
     with closing(sqlite3.connect(restored)) as connection:
         assert connection.execute("SELECT count(*) FROM auth_credentials").fetchone() == (3,)

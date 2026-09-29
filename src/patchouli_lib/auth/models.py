@@ -5,6 +5,7 @@ from sqlalchemy import (
     CheckConstraint,
     ForeignKeyConstraint,
     Index,
+    Integer,
     LargeBinary,
     String,
     Text,
@@ -432,6 +433,36 @@ class AdminStructureAuditEvent(Base):
     occurred_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
+class MasterIdentity(Base):
+    """The one human administrator, separate from operator bearer callers."""
+
+    __tablename__ = "admin_master_identity"
+    __table_args__ = (
+        CheckConstraint("slot = 1", name="ck_admin_master_identity_singleton"),
+        CheckConstraint(
+            "length(identity_id) = 32 AND identity_id NOT GLOB '*[^0-9a-f]*'",
+            name="ck_admin_master_identity_id",
+        ),
+        CheckConstraint(
+            "typeof(token_verifier) = 'text' AND length(token_verifier) BETWEEN 1 AND 256 "
+            "AND token_verifier LIKE 'pbkdf2_sha256$%'",
+            name="ck_admin_master_identity_verifier",
+        ),
+        CheckConstraint(
+            "session_generation >= 1 AND created_at >= 0 AND updated_at >= created_at",
+            name="ck_admin_master_identity_state",
+        ),
+        UniqueConstraint("identity_id", name="uq_admin_master_identity_id"),
+    )
+
+    slot: Mapped[int] = mapped_column(Integer, primary_key=True)
+    identity_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    token_verifier: Mapped[str] = mapped_column(String(256), nullable=False)
+    session_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
 class BootstrapMarker(Base):
     __tablename__ = "operator_bootstrap_markers"
     __table_args__ = (
@@ -483,5 +514,6 @@ __all__ = [
     "BootstrapMarker",
     "Caller",
     "Credential",
+    "MasterIdentity",
     "SectionGrant",
 ]

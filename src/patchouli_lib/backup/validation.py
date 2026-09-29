@@ -13,9 +13,11 @@ from urllib.parse import quote
 
 from pydantic import Field
 
+from patchouli_lib.admin.passwords import parse_password_hash
 from patchouli_lib.auth.tokens import InvalidTokenError, parse_token, verify_token
 from patchouli_lib.backup.errors import BackupDatabaseError
 from patchouli_lib.backup.manifest import (
+    AGENT_TOKEN_VALUES_SCHEMA_REVISION,
     FILE_SET_SCHEMA_REVISION,
     INTERMEDIATE_SCHEMA_REVISION,
     LEGACY_SCHEMA_REVISION,
@@ -379,6 +381,12 @@ _EXPECTED_SQL_HASHES_0015: Final = _EXPECTED_SQL_HASHES_0014 | {
         "c65d2ee5c3cdba8d1d59c3a0900ab3cdb7ce4b256de1c61e2e97ac2a3e996313"
     ),
 }
+_EXPECTED_SQL_HASHES_0016: Final = _EXPECTED_SQL_HASHES_0015 | {
+    # Generated from an empty Alembic 0016 database with _canonical_schema_sql.
+    ("table", "admin_master_identity"): (
+        "b71ede2b5ef3092872e5e652ca1e0995ae05d8d9770c134d97c6874e053ae50f"
+    ),
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
     PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
@@ -388,10 +396,16 @@ _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LIFECYCLE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0012,
     FILE_SET_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0013,
     LIBRARY_POLICY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0014,
-    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0015,
+    AGENT_TOKEN_VALUES_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0015,
+    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0016,
 }
 _FILE_SET_REVISIONS: Final = frozenset(
-    {FILE_SET_SCHEMA_REVISION, LIBRARY_POLICY_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}
+    {
+        FILE_SET_SCHEMA_REVISION,
+        LIBRARY_POLICY_SCHEMA_REVISION,
+        AGENT_TOKEN_VALUES_SCHEMA_REVISION,
+        SUPPORTED_SCHEMA_REVISION,
+    }
 )
 _LIFECYCLE_REVISIONS: Final = _FILE_SET_REVISIONS | {LIFECYCLE_SCHEMA_REVISION}
 _OCCURRENCE_REVISIONS: Final = _LIFECYCLE_REVISIONS | {OCCURRENCE_SCHEMA_REVISION}
@@ -1226,6 +1240,38 @@ def _require_agent_token_values(connection: sqlite3.Connection) -> None:
             raise BackupDatabaseError
 
 
+def _require_master_identity(connection: sqlite3.Connection) -> None:
+    """Validate the optional verifier-only identity without exposing its value."""
+
+    rows = connection.execute(
+        "SELECT slot, identity_id, token_verifier, session_generation, created_at, updated_at "
+        "FROM admin_master_identity"
+    ).fetchall()
+    if len(rows) > 1:
+        raise BackupDatabaseError
+    if not rows:
+        return
+    slot, identity_id, verifier, generation, created_at, updated_at = rows[0]
+    if (
+        slot != 1
+        or not isinstance(identity_id, str)
+        or len(identity_id) != 32
+        or any(character not in "0123456789abcdef" for character in identity_id)
+        or not isinstance(verifier, str)
+        or type(generation) is not int
+        or generation < 1
+        or type(created_at) is not int
+        or created_at < 0
+        or type(updated_at) is not int
+        or updated_at < created_at
+    ):
+        raise BackupDatabaseError
+    try:
+        parse_password_hash(verifier)
+    except ValueError:
+        raise BackupDatabaseError from None
+
+
 def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) -> None:
     invalid_bootstrap = _one_integer(
         connection,
@@ -1248,7 +1294,11 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
     if invalid_grants:
         raise BackupDatabaseError
 
-    if schema_revision in {LIBRARY_POLICY_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
+    if schema_revision in {
+        LIBRARY_POLICY_SCHEMA_REVISION,
+        AGENT_TOKEN_VALUES_SCHEMA_REVISION,
+        SUPPORTED_SCHEMA_REVISION,
+    }:
         invalid_library_policies = _one_integer(
             connection,
             "SELECT count(*) FROM auth_credential_library_policies AS p "
@@ -1261,8 +1311,11 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         if invalid_library_policies:
             raise BackupDatabaseError
 
-    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+    if schema_revision in {AGENT_TOKEN_VALUES_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
         _require_agent_token_values(connection)
+
+    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+        _require_master_identity(connection)
 
     rotations: dict[str, tuple[str, str, str | None, int | None, int | None, int]] = {}
     for (
