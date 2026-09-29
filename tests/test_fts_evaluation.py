@@ -27,7 +27,8 @@ def _run_evaluation(output_format: str) -> str:
         capture_output=True,
         text=True,
         encoding="utf-8",
-        timeout=30,
+        # Bound the offline evaluator if it hangs; this is not a search latency SLA.
+        timeout=90,
     )
     return result.stdout
 
