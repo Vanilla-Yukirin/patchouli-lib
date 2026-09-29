@@ -14,7 +14,12 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from patchouli_lib.api.contracts import build_api_v1_path
 from patchouli_lib.auth.repository import AuthRepository
-from patchouli_lib.auth.schemas import AuditOutcome, NewAuditEvent, SectionAction
+from patchouli_lib.auth.schemas import (
+    AuditOutcome,
+    AuthenticatedCaller,
+    NewAuditEvent,
+    SectionAction,
+)
 from patchouli_lib.auth.service import AuthenticationService, utc_microseconds
 from patchouli_lib.content.models import MAX_OCCURRENCE_MICROSECONDS, MIN_OCCURRENCE_MICROSECONDS
 from patchouli_lib.content.repository import ContentRepository
@@ -605,6 +610,41 @@ class ArchiveService:
             section_id=page.section_id,
             action=SectionAction.ARCHIVE_WRITE,
         )
+        return self._transition_page_lifecycle_authorized(
+            page, authenticated, command, idempotency, action=action, operation_at=operation_at
+        )
+
+    def restore_page_as_operator(
+        self,
+        token_value: str,
+        command: PageLifecycleCommand,
+        idempotency: ArchiveIdempotencyKey,
+    ) -> OriginalResponse | ReplayResponse:
+        """Restore an Archive Page for the admin UI without broadening Agent API access."""
+
+        self._require_transaction()
+        operation_at = self._operation_time()
+        authenticated = AuthenticationService(
+            self._auth_repository,
+            clock=lambda: operation_at,
+        ).require_operator(token_value, library_id=command.library_id)
+        page = self._content.get_page(command.library_id, command.page_id)
+        if page is None or page.page_type != "archive":
+            raise ArchiveNotFoundError
+        return self._transition_page_lifecycle_authorized(
+            page, authenticated, command, idempotency, action="restore", operation_at=operation_at
+        )
+
+    def _transition_page_lifecycle_authorized(
+        self,
+        page: PageRecord,
+        authenticated: AuthenticatedCaller,
+        command: PageLifecycleCommand,
+        idempotency: ArchiveIdempotencyKey,
+        *,
+        action: LifecycleAction,
+        operation_at: int,
+    ) -> OriginalResponse | ReplayResponse:
         caller = TransactionValidatedCaller(
             library_id=command.library_id,
             caller_id=authenticated.caller.id,

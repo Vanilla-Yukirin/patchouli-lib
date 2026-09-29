@@ -8,6 +8,7 @@ from patchouli_lib.auth.schemas import (
     MAX_RFC3339_TIMESTAMP_MICROSECONDS,
     SectionAction,
 )
+from patchouli_lib.content.schemas import StrongPageETag
 from patchouli_lib.library.schemas import BoundedText, OpaqueId, ResourceName
 
 CredentialTtlSeconds = Annotated[
@@ -102,6 +103,35 @@ class PageTagFormInput(AdminActionInput):
         return value
 
 
+class RestoreArchiveFormInput(AdminActionInput):
+    """One request's operator credential and conditional restore form values."""
+
+    expected_etag: StrongPageETag
+    idempotency_key: Annotated[str, Field(min_length=1, max_length=256)]
+    operator_token: SecretStr = Field(min_length=1, max_length=256, repr=False)
+
+    @field_validator("expected_etag", "idempotency_key", mode="before")
+    @classmethod
+    def reject_padded_precondition(cls, value: object) -> object:
+        if isinstance(value, str) and value != value.strip():
+            raise ValueError("Conditional restore values must not contain padding.")
+        return value
+
+    @field_validator("expected_etag")
+    @classmethod
+    def require_current_etag(cls, value: str) -> str:
+        if not value.startswith('"page-v2-'):
+            raise ValueError("A current Page ETag is required.")
+        return value
+
+    @field_validator("operator_token", mode="before")
+    @classmethod
+    def reject_padded_operator_token(cls, value: object) -> object:
+        if isinstance(value, str) and value != value.strip():
+            raise ValueError("Operator credential must not contain whitespace.")
+        return value
+
+
 __all__ = [
     "BootstrapInput",
     "ProvisionAgentInput",
@@ -109,4 +139,5 @@ __all__ = [
     "RevokeAgentCredentialInput",
     "TagFormInput",
     "PageTagFormInput",
+    "RestoreArchiveFormInput",
 ]

@@ -26,6 +26,9 @@ _TAG_TOKEN_HELP = (
     "Enter this Library's Operator token for each Tag change. "
     "It is not saved in the browser session."
 )
+_RESTORE_TOKEN_HELP = (
+    "Enter this Library's Operator token for this restore. It is not saved in the browser session."
+)
 
 STYLESHEET = """
 :root {
@@ -198,6 +201,15 @@ _ZH_CN: dict[str, str] = {
     "This view shows metadata only; page contents remain unavailable here.": (
         "此处仅显示元数据，不提供已删除页面的正文。"
     ),
+    "Restore page": "恢复页面",
+    "Restore this page and its complete revision history.": "恢复此页面及其完整历史版本。",
+    _RESTORE_TOKEN_HELP: ("本次恢复需输入此知识库的管理员令牌；令牌不会保存在浏览器会话中。"),
+    "The page changed since this form was opened. Reload the trash detail and try again.": (
+        "打开表单后页面已发生变化。请重新打开回收站详情后再试。"
+    ),
+    "The page has already been restored.": "此页面已经恢复。",
+    "The restore request conflicts with a previous request.": "恢复请求与之前的请求冲突。",
+    "The requested Archive page was not found.": "未找到指定的 Archive 页面。",
     "Tagged pages": "标记的页面",
     "No tags yet.": "暂无标签。",
     "No tagged pages yet.": "暂无已标记的页面。",
@@ -1062,7 +1074,13 @@ def trash_directory_page(
     )
 
 
-def trash_detail_page(csrf_token: str, view: TrashPageView, *, locale: AdminLocale = "en") -> str:
+def trash_detail_page(
+    csrf_token: str,
+    view: TrashPageView,
+    *,
+    locale: AdminLocale = "en",
+    restore_key: str,
+) -> str:
     library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
     section_path = f"{library_path}/sections/{escape(view.section.id, quote=True)}"
     base = f"{section_path}/trash/{escape(view.page.id, quote=True)}"
@@ -1083,6 +1101,27 @@ def trash_detail_page(csrf_token: str, view: TrashPageView, *, locale: AdminLoca
         f"<dt>{localize(locale, 'Current revision')}</dt>"
         f"<dd>{view.page.revision_number}</dd></dl>"
     )
+    if view.restore_etag is not None:
+        body += (
+            '<section class="card"><h2>'
+            + localize(locale, "Restore page")
+            + "</h2>"
+            + '<p class="section-help">'
+            + localize(locale, "Restore this page and its complete revision history.")
+            + "</p>"
+            + '<p class="section-help">'
+            + localize(locale, _RESTORE_TOKEN_HELP)
+            + "</p>"
+            + f'<form method="post" action="{base}/restore" autocomplete="off">'
+            + _csrf(escape(csrf_token, quote=True))
+            + '<input type="hidden" name="expected_etag" '
+            + f'value="{escape(view.restore_etag, quote=True)}">'
+            + '<input type="hidden" name="idempotency_key" '
+            + f'value="{escape(restore_key, quote=True)}">'
+            + _secret("operator_token", "Current operator credential", locale)
+            + f'<button type="submit">{localize(locale, "Restore page")}</button>'
+            + "</form></section>"
+        )
     return _browser_document(
         csrf_token,
         locale,
@@ -1095,6 +1134,25 @@ def trash_detail_page(csrf_token: str, view: TrashPageView, *, locale: AdminLoca
             (view.section.name, section_path),
             (localize(locale, "Trash"), f"{section_path}/trash"),
         ),
+    )
+
+
+def restore_error_page(
+    csrf_token: str,
+    library_id: str,
+    section_id: str,
+    message: str,
+    *,
+    locale: AdminLocale = "en",
+) -> str:
+    section_path = (
+        f"/admin/libraries/{escape(library_id, quote=True)}"
+        f"/sections/{escape(section_id, quote=True)}"
+    )
+    body = _notice(localize(locale, message), error=True)
+    body += f'<p><a href="{section_path}/trash">{localize(locale, "Trash")}</a></p>'
+    return _browser_document(
+        csrf_token, locale, localize(locale, "Restore page"), section_path, body
     )
 
 

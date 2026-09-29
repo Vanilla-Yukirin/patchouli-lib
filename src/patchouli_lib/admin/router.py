@@ -10,6 +10,7 @@ from collections.abc import Callable
 from ipaddress import IPv6Address
 from typing import Final, cast
 from urllib.parse import parse_qsl, urlsplit
+from uuid import uuid4
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
@@ -23,6 +24,7 @@ from patchouli_lib.admin.contracts import (
     PageTagFormInput,
     ProvisionAgentInput,
     RecoverOperatorInput,
+    RestoreArchiveFormInput,
     RevokeAgentCredentialInput,
     TagFormInput,
 )
@@ -42,6 +44,7 @@ from patchouli_lib.admin.pages import (
     login_page,
     operations_page,
     page_preview_page,
+    restore_error_page,
     section_page,
     tag_detail_page,
     tag_directory_page,
@@ -54,6 +57,12 @@ from patchouli_lib.admin.service import AdminActionService, DeliveredCredential
 from patchouli_lib.admin.session import AdminSession, AdminSessionCodec
 from patchouli_lib.auth.service import AuthenticationError, AuthorizationError
 from patchouli_lib.config import Settings
+from patchouli_lib.content.service import (
+    ArchiveLifecycleUnchangedError,
+    ArchiveNotFoundError,
+    ArchivePreconditionFailedError,
+)
+from patchouli_lib.idempotency.service import IdempotencyConflictError
 from patchouli_lib.library.schemas import CreateBookInput, CreateLibraryInput, CreateSectionInput
 from patchouli_lib.library.service import (
     LibrarySeedConflictError,
@@ -79,6 +88,9 @@ _LOCALE_COOKIE_MAX_AGE: Final[int] = 31_536_000
 _TAG_FLASH_MAX_AGE: Final[int] = 60
 _MAX_FORM_BYTES: Final[int] = 16_384
 _MAX_FORM_FIELDS: Final[int] = 32
+_RESTORE_STALE_MESSAGE: Final[str] = (
+    "The page changed since this form was opened. Reload the trash detail and try again."
+)
 _SECURITY_HEADERS: Final[dict[str, str]] = {
     "Cache-Control": "no-store, max-age=0",
     "Pragma": "no-cache",
@@ -660,9 +672,61 @@ def create_admin_router(
     def trash_detail(request: Request, library_id: str, section_id: str, page_id: str) -> Response:
         def render(csrf: str, locale: AdminLocale) -> str | None:
             view = read_model.get_trash_page(library_id, section_id, page_id)
-            return None if view is None else trash_detail_page(csrf, view, locale=locale)
+            return (
+                None
+                if view is None
+                else trash_detail_page(csrf, view, locale=locale, restore_key=uuid4().hex)
+            )
 
         return protected_page(request, render)
+
+    @router.post("/libraries/{library_id}/sections/{section_id}/trash/{page_id}/restore")
+    async def restore_trash_page(
+        request: Request, library_id: str, section_id: str, page_id: str
+    ) -> Response:
+        locale = locale_for(request)
+        if not _same_origin_submission(request):
+            return forbidden(request)
+        session = current_session(request)
+        if session is None:
+            return html(
+                login_page(locale=locale, message="Sign in again."),
+                locale=locale,
+                status_code=401,
+            )
+        try:
+            values = await _read_form(
+                request,
+                allowed_fields=frozenset(RestoreArchiveFormInput.model_fields) | {"csrf_token"},
+            )
+            _require_csrf(values, session)
+            submitted = RestoreArchiveFormInput.model_validate(values)
+            await run_in_threadpool(
+                service.restore_archive_page, library_id, section_id, page_id, submitted
+            )
+        except _FormError as exc:
+            status, message = exc.status_code, exc.safe_message
+        except (ValidationError, ValueError):
+            status, message = 422, "Check the submitted fields and try again."
+        except (AuthenticationError, AuthorizationError):
+            status, message = 403, "The operator credential was rejected."
+        except ArchiveNotFoundError:
+            status, message = 404, "The requested Archive page was not found."
+        except ArchivePreconditionFailedError:
+            status, message = 412, _RESTORE_STALE_MESSAGE
+        except ArchiveLifecycleUnchangedError:
+            status, message = 409, "The page has already been restored."
+        except IdempotencyConflictError:
+            status, message = 409, "The restore request conflicts with a previous request."
+        except Exception:
+            status, message = 500, "The action could not be completed."
+        else:
+            return redirect(f"/admin/libraries/{library_id}/sections/{section_id}")
+        return html(
+            restore_error_page(session.csrf_token, library_id, section_id, message, locale=locale),
+            locale=locale,
+            status_code=status,
+        )
 
     @router.post("/libraries/{library_id}/sections/{section_id}/books")
     async def create_book(request: Request, library_id: str, section_id: str) -> Response:

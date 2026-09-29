@@ -11,6 +11,7 @@ from patchouli_lib.admin.contracts import (
     PageTagFormInput,
     ProvisionAgentInput,
     RecoverOperatorInput,
+    RestoreArchiveFormInput,
     RevokeAgentCredentialInput,
     TagFormInput,
 )
@@ -24,7 +25,14 @@ from patchouli_lib.auth.schemas import (
 )
 from patchouli_lib.auth.service import AuthenticationService, utc_microseconds
 from patchouli_lib.content.models import Page
+from patchouli_lib.content.schemas import ArchiveIdempotencyKey, PageLifecycleCommand
+from patchouli_lib.content.service import ArchiveService
 from patchouli_lib.database import immediate_transaction
+from patchouli_lib.idempotency.schemas import (
+    OriginalResponse,
+    ReplayResponse,
+    digest_idempotency_key,
+)
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import (
     BookRecord,
@@ -340,6 +348,31 @@ class AdminActionService:
                 tag_id=request.tag_id,
                 attach=request.operation == "attach",
                 request_id=self._request_id_factory(),
+            )
+
+    def restore_archive_page(
+        self,
+        library_id: str,
+        section_id: str,
+        page_id: str,
+        request: RestoreArchiveFormInput,
+    ) -> OriginalResponse | ReplayResponse:
+        """Restore through the Archive domain service with a request-only Operator token."""
+
+        command = PageLifecycleCommand(
+            library_id=library_id,
+            section_id=section_id,
+            page_id=page_id,
+            expected_etag=request.expected_etag,
+            request_id=f"req_{uuid4().hex}",
+        )
+        idempotency = ArchiveIdempotencyKey(
+            key_digest=digest_idempotency_key(request.idempotency_key)
+        )
+        token = request.operator_token.get_secret_value()
+        with immediate_transaction(self._engine) as connection:
+            return ArchiveService(connection, clock=self._clock).restore_page_as_operator(
+                token, command, idempotency
             )
 
 

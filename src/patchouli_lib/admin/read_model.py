@@ -11,6 +11,7 @@ from sqlalchemy.sql import Select
 
 from patchouli_lib.auth.models import AuditEvent, Caller
 from patchouli_lib.content.models import Page, Revision, RevisionFile
+from patchouli_lib.content.service import page_current_etag
 from patchouli_lib.library.models import Book, Library, Section
 from patchouli_lib.tags.models import PageTag, Tag
 
@@ -73,6 +74,7 @@ class TrashPageView:
     library: LibraryItem
     section: SectionItem
     page: TrashItem
+    restore_etag: str | None
 
 
 @dataclass(frozen=True)
@@ -251,7 +253,9 @@ class AdminReadModel:
                 return None
             row = (
                 connection.execute(
-                    _trash_query(library_id).where(
+                    _trash_query(library_id)
+                    .add_columns(Page.page_uid, Page.current_revision_id, Page.updated_at)
+                    .where(
                         Page.section_id == section_id,
                         Page.page_id == page_id,
                         Page.deleted_at.is_not(None),
@@ -260,7 +264,20 @@ class AdminReadModel:
                 .mappings()
                 .one_or_none()
             )
-            return None if row is None else TrashPageView(library, section, _trash_item(row))
+            if row is None:
+                return None
+            etag = (
+                page_current_etag(
+                    row["page_uid"],
+                    row["current_revision_id"],
+                    row["current_revision_number"],
+                    row["occurred_at"],
+                    row["updated_at"],
+                )
+                if row["page_type"] == "archive"
+                else None
+            )
+            return TrashPageView(library, section, _trash_item(row), etag)
 
     def list_callers(self) -> tuple[CallerItem, ...]:
         """List identity metadata, never credential verifiers or raw tokens."""
