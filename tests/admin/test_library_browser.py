@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, insert, update
+from sqlalchemy import Engine, event, insert, update
 
 from patchouli_lib.admin.passwords import hash_password
 from patchouli_lib.admin.read_model import AdminReadModel
 from patchouli_lib.app import create_app
-from patchouli_lib.auth.models import AuditEvent, Caller, Credential
+from patchouli_lib.auth.models import AuditEvent, Caller, Credential, SectionGrant
 from patchouli_lib.config import Settings
 from patchouli_lib.content.models import Page, Revision, RevisionFile
 from patchouli_lib.content.repository import ContentRepository
@@ -19,6 +19,7 @@ from patchouli_lib.content.schemas import MarkdownContent, NewPage, NewPageIdent
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.identifiers import PAGE_ID_SCHEME, generate_page_id, page_id_registry_digest
 from patchouli_lib.identifiers.page_ids import parse_occurrence_time
+from patchouli_lib.library.models import Section
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import LibraryStructureSeed, NewLibrary
 from patchouli_lib.library.service import LibrarySeedService
@@ -223,6 +224,221 @@ def test_identity_browser_is_protected_and_shows_metadata_only(
     assert f"/admin/libraries/{library_id}/callers/{caller_id}" in page.text
     assert "现有凭据无法从校验值还原" in page.text
     assert 'aria-current="page"' in page.text
+    detail = client.get(f"/admin/libraries/{library_id}/callers/{caller_id}?lang=zh-CN")
+    assert detail.status_code == 200
+    assert "此身份暂无凭据。" in detail.text
+    assert "此身份暂无分区授权。" in detail.text
+
+
+def test_caller_detail_scopes_safe_credential_metadata_and_existing_grants(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    library_id, section_id, _ = _seed_structure(engine)
+    other_library, _, _ = _seed_structure(engine, prefix="4", label="Other")
+    second_section = "9" * 32
+    caller_id = "8" * 32
+    credential_ids = ("a" * 32, "b" * 32, "c" * 32, "d" * 32, "e" * 32)
+    detail_path = f"/admin/libraries/{library_id}/callers/{caller_id}"
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            insert(Section),
+            {
+                "id": second_section,
+                "library_id": library_id,
+                "name": "Second <script> section",
+                "description": "Synthetic section",
+                "created_at": 1_000_000,
+                "updated_at": 1_000_000,
+            },
+        )
+        connection.execute(
+            insert(Caller),
+            {
+                "id": caller_id,
+                "library_id": library_id,
+                "kind": "agent",
+                "name": "Device <script>",
+                "description": "Synthetic <img src=x onerror=alert(1)>",
+                "policy_version": 1,
+                "created_at": 1_000_000,
+                "updated_at": 1_000_000,
+            },
+        )
+        connection.execute(
+            insert(Credential),
+            [
+                {
+                    "id": cid,
+                    "library_id": library_id,
+                    "caller_id": caller_id,
+                    "selector": marker * 22,
+                    "token_version": 1,
+                    "verifier": marker.encode() * 32,
+                    "created_at": 1_000_000,
+                    "updated_at": updated,
+                    "expires_at": expiry,
+                    "last_used_at": used,
+                    "revoked_at": revoked,
+                    "rotated_at": rotated,
+                    "rotated_to_credential_id": target,
+                }
+                for cid, marker, updated, expiry, used, revoked, rotated, target in (
+                    (
+                        credential_ids[0],
+                        "x",
+                        2_000_000,
+                        4_102_444_800_000_000,
+                        2_000_000,
+                        None,
+                        None,
+                        None,
+                    ),
+                    (credential_ids[1], "y", 1_000_000, 2_000_000, None, None, None, None),
+                    (
+                        credential_ids[2],
+                        "z",
+                        3_000_000,
+                        4_102_444_800_000_000,
+                        None,
+                        3_000_000,
+                        None,
+                        None,
+                    ),
+                    (
+                        credential_ids[3],
+                        "w",
+                        4_000_000,
+                        4_102_444_800_000_000,
+                        None,
+                        4_000_000,
+                        4_000_000,
+                        credential_ids[0],
+                    ),
+                )
+            ],
+        )
+        connection.execute(
+            insert(Credential),
+            {
+                "id": credential_ids[4],
+                "library_id": library_id,
+                "caller_id": caller_id,
+                "selector": "v" * 22,
+                "token_version": 1,
+                "verifier": b"v" * 32,
+                "created_at": 4_000_000_000_000_000,
+                "updated_at": 4_000_000_000_000_000,
+                "expires_at": 4_102_444_800_000_000,
+            },
+        )
+        connection.execute(
+            insert(SectionGrant),
+            [
+                {
+                    "library_id": library_id,
+                    "caller_id": caller_id,
+                    "section_id": grant_section,
+                    "action": action,
+                    "created_at": 1_000_000,
+                }
+                for grant_section, action in (
+                    (section_id, "section:query"),
+                    (section_id, "page:read"),
+                    (second_section, "archive:write"),
+                )
+            ],
+        )
+
+    anonymous = client.get(detail_path)
+    assert anonymous.status_code == 303
+    assert anonymous.headers["location"] == "/admin/login"
+    assert anonymous.headers["cache-control"] == "no-store, max-age=0"
+    _login(client)
+    selected_sql: list[str] = []
+
+    def capture_select(
+        _connection: object, _cursor: object, statement: str, *_args: object
+    ) -> None:
+        if "FROM auth_credentials" in statement:
+            selected_sql.append(statement)
+
+    event.listen(engine, "before_cursor_execute", capture_select)
+    try:
+        english = client.get(f"{detail_path}?lang=en")
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_select)
+    assert english.status_code == 200
+    assert english.headers["cache-control"] == "no-store, max-age=0"
+    assert len(selected_sql) == 1
+    assert "selector" not in selected_sql[0]
+    assert "verifier" not in selected_sql[0]
+    assert "Existing credentials" in english.text
+    assert "Current Section grants" in english.text
+    assert "single-Library, Section-level grants" in english.text
+    for credential_id in credential_ids:
+        assert credential_id in english.text
+    assert "Credential active" in english.text
+    assert "Credential not yet active" in english.text
+    future_credential = english.text.split(f"<code>{credential_ids[4]}</code>", 1)[1].split(
+        "</li>", 1
+    )[0]
+    assert "Credential not yet active" in future_credential
+    assert "Credential active" not in future_credential
+    assert "Credential expired" in english.text
+    assert "Credential revoked" in english.text
+    assert "Credential rotated" in english.text
+    assert "Last used" in english.text
+    assert "Never used" in english.text
+    assert "Not revoked" in english.text
+    assert english.text.count("<time datetime=") >= 7
+    assert english.text.count("section:query") == 1
+    assert english.text.count("page:read") == 1
+    assert english.text.count("archive:write") == 1
+    assert "Second &lt;script&gt; section" in english.text
+    assert "Second <script> section" not in english.text
+    assert "Synthetic &lt;img src=x onerror=alert(1)&gt;" in english.text
+    assert "Synthetic <img src=x onerror=alert(1)>" not in english.text
+    for secret in (
+        "x" * 22,
+        "y" * 22,
+        "z" * 22,
+        "w" * 22,
+        "v" * 22,
+        "x" * 32,
+        "y" * 32,
+        "z" * 32,
+        "w" * 32,
+        "v" * 32,
+    ):
+        assert secret not in english.text
+
+    chinese = client.get(f"{detail_path}?lang=zh-CN")
+    assert chinese.status_code == 200
+    assert "现有凭据" in chinese.text
+    assert "当前分区授权" in chinese.text
+    assert "凭据有效" in chinese.text
+    assert "凭据尚未生效" in chinese.text
+    assert "凭据已过期" in chinese.text
+    assert "凭据已撤销" in chinese.text
+    assert "凭据已轮转" in chinese.text
+    assert "最后使用时间" in chinese.text
+    assert "单知识库、分区级授权" in chinese.text
+    assert chinese.headers["cache-control"] == "no-store, max-age=0"
+
+    foreign = client.get(f"/admin/libraries/{other_library}/callers/{caller_id}")
+    assert foreign.status_code == 404
+    assert all(credential_id not in foreign.text for credential_id in credential_ids)
+    assert foreign.headers["cache-control"] == "no-store, max-age=0"
+
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            update(Caller)
+            .where(Caller.library_id == library_id, Caller.id == caller_id)
+            .values(disabled_at=3_000_000, updated_at=3_000_000)
+        )
+    disabled = client.get(f"{detail_path}?lang=en")
+    assert "Credential blocked by disabled identity" in disabled.text
 
 
 def test_browser_requires_session_and_empty_state(browser: tuple[TestClient, Engine]) -> None:

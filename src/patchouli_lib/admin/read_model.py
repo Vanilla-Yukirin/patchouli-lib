@@ -9,7 +9,7 @@ from sqlalchemy import Connection, Engine, and_, func, or_, select
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.sql import Select
 
-from patchouli_lib.auth.models import AuditEvent, Caller
+from patchouli_lib.auth.models import AuditEvent, Caller, Credential, SectionGrant
 from patchouli_lib.content.models import Page, Revision, RevisionFile
 from patchouli_lib.content.service import page_current_etag
 from patchouli_lib.library.models import Book, Library, Section
@@ -187,6 +187,25 @@ class CallerView:
     description: str
     kind: str
     disabled_at: int | None
+    credentials: tuple[CredentialItem, ...]
+    section_grants: tuple[SectionGrantItem, ...]
+
+
+@dataclass(frozen=True)
+class CredentialItem:
+    id: str
+    created_at: int
+    expires_at: int
+    last_used_at: int | None
+    revoked_at: int | None
+    rotated_at: int | None
+
+
+@dataclass(frozen=True)
+class SectionGrantItem:
+    section_id: str
+    section_name: str
+    action: str
 
 
 @dataclass(frozen=True)
@@ -462,6 +481,45 @@ class AdminReadModel:
             )
             if row is None:
                 return None
+            credential_rows = (
+                connection.execute(
+                    select(
+                        Credential.id,
+                        Credential.created_at,
+                        Credential.expires_at,
+                        Credential.last_used_at,
+                        Credential.revoked_at,
+                        Credential.rotated_at,
+                    )
+                    .where(Credential.library_id == library_id, Credential.caller_id == caller_id)
+                    .order_by(Credential.created_at.desc(), Credential.id.desc())
+                )
+                .mappings()
+                .all()
+            )
+            grant_rows = (
+                connection.execute(
+                    select(
+                        SectionGrant.section_id,
+                        Section.name.label("section_name"),
+                        SectionGrant.action,
+                    )
+                    .join(
+                        Section,
+                        and_(
+                            Section.id == SectionGrant.section_id,
+                            Section.library_id == SectionGrant.library_id,
+                        ),
+                    )
+                    .where(
+                        SectionGrant.library_id == library_id,
+                        SectionGrant.caller_id == caller_id,
+                    )
+                    .order_by(Section.name, SectionGrant.section_id, SectionGrant.action)
+                )
+                .mappings()
+                .all()
+            )
             return CallerView(
                 row["library_id"],
                 row["id"],
@@ -469,6 +527,8 @@ class AdminReadModel:
                 row["description"],
                 row["kind"],
                 row["disabled_at"],
+                tuple(CredentialItem(**credential) for credential in credential_rows),
+                tuple(SectionGrantItem(**grant) for grant in grant_rows),
             )
 
     def get_library(self, library_id: str) -> LibraryView | None:

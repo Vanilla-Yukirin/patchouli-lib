@@ -31,6 +31,11 @@ _TAG_TOKEN_HELP = (
 _RESTORE_TOKEN_HELP = (
     "Enter this Library's Operator token for this restore. It is not saved in the browser session."
 )
+_GRANT_SCOPE_HELP = (
+    "These are existing single-Library, Section-level grants; "
+    "they are not cross-Library permissions."
+)
+_CREDENTIAL_META_HELP = "Token values cannot be shown again; this page contains metadata only."
 
 STYLESHEET = """
 :root {
@@ -258,6 +263,25 @@ _ZH_CN: dict[str, str] = {
     "Identity description": "身份说明",
     "Identity disabled": "身份已停用",
     "Identity active": "身份有效",
+    "Existing credentials": "现有凭据",
+    "Credential active": "凭据有效",
+    "Credential not yet active": "凭据尚未生效",
+    "Credential expired": "凭据已过期",
+    "Credential revoked": "凭据已撤销",
+    "Credential rotated": "凭据已轮转",
+    "Credential blocked by disabled identity": "身份已停用，凭据不可用",
+    "Expires": "到期时间",
+    "Last used": "最后使用时间",
+    "Revoked": "撤销时间",
+    "Rotated": "轮转时间",
+    "Never used": "尚未使用",
+    "Not revoked": "未撤销",
+    "Not rotated": "未轮转",
+    "No credentials for this identity.": "此身份暂无凭据。",
+    "Current Section grants": "当前分区授权",
+    "No Section grants for this identity.": "此身份暂无分区授权。",
+    _GRANT_SCOPE_HELP: ("这里展示的是现有的单知识库、分区级授权，不是跨知识库权限。"),
+    _CREDENTIAL_META_HELP: ("这里仅展示元数据；现有 Token 明文无法再次显示。"),
     "Status": "状态",
     "Back to activity": "返回近况",
     "Occurred": "发生时间",
@@ -640,13 +664,80 @@ def _content_activity_timeline(
 
 def caller_page(csrf_token: str, view: CallerView, *, locale: AdminLocale = "en") -> str:
     status = "Identity disabled" if view.disabled_at is not None else "Identity active"
+    now_micros = int(datetime.now(UTC).timestamp() * 1_000_000)
+    credentials = []
+    for item in view.credentials:
+        if item.rotated_at is not None:
+            credential_status = "Credential rotated"
+        elif item.revoked_at is not None:
+            credential_status = "Credential revoked"
+        elif view.disabled_at is not None:
+            credential_status = "Credential blocked by disabled identity"
+        elif item.expires_at <= now_micros:
+            credential_status = "Credential expired"
+        elif item.created_at > now_micros:
+            credential_status = "Credential not yet active"
+        else:
+            credential_status = "Credential active"
+        last_used = (
+            _time(item.last_used_at)
+            if item.last_used_at is not None
+            else localize(locale, "Never used")
+        )
+        revoked = (
+            _time(item.revoked_at)
+            if item.revoked_at is not None
+            else localize(locale, "Not revoked")
+        )
+        rotated = (
+            _time(item.rotated_at)
+            if item.rotated_at is not None
+            else localize(locale, "Not rotated")
+        )
+        credentials.append(
+            "<li><dl>"
+            f"<dt>{localize(locale, 'Credential ID')}</dt><dd><code>{escape(item.id)}</code></dd>"
+            f"<dt>{localize(locale, 'Status')}</dt><dd>{localize(locale, credential_status)}</dd>"
+            f"<dt>{localize(locale, 'Created')}</dt><dd>{_time(item.created_at)}</dd>"
+            f"<dt>{localize(locale, 'Expires')}</dt><dd>{_time(item.expires_at)}</dd>"
+            f"<dt>{localize(locale, 'Last used')}</dt>"
+            f"<dd>{last_used}</dd>"
+            f"<dt>{localize(locale, 'Revoked')}</dt>"
+            f"<dd>{revoked}</dd>"
+            f"<dt>{localize(locale, 'Rotated')}</dt>"
+            f"<dd>{rotated}</dd>"
+            "</dl></li>"
+        )
+    credential_list = (
+        f'<ul class="item-list">{"".join(credentials)}</ul>'
+        if credentials
+        else f"<p>{localize(locale, 'No credentials for this identity.')}</p>"
+    )
+    grants = "".join(
+        "<li>"
+        f"<strong>{escape(item.section_name)}</strong> "
+        f"(<code>{escape(item.section_id)}</code>) — <code>{escape(item.action)}</code>"
+        "</li>"
+        for item in view.section_grants
+    )
+    grant_list = (
+        f'<ul class="item-list">{grants}</ul>'
+        if grants
+        else f"<p>{localize(locale, 'No Section grants for this identity.')}</p>"
+    )
     body = (
-        "<dl>"
+        '<dl class="card">'
         f"<dt>{localize(locale, 'Identity kind')}</dt><dd>{escape(view.kind)}</dd>"
         f"<dt>{localize(locale, 'Identity description')}</dt>"
         f"<dd>{escape(view.description)}</dd>"
         f"<dt>{localize(locale, 'Status')}</dt><dd>{localize(locale, status)}</dd>"
         "</dl>"
+        f'<section class="card"><h2>{localize(locale, "Existing credentials")}</h2>'
+        f'<p class="section-help">{localize(locale, _CREDENTIAL_META_HELP)}</p>'
+        f"{credential_list}</section>"
+        f'<section class="card"><h2>{localize(locale, "Current Section grants")}</h2>'
+        f'<p class="section-help">{localize(locale, _GRANT_SCOPE_HELP)}</p>'
+        f"{grant_list}</section>"
         f'<p><a href="/admin">{localize(locale, "Back to activity")}</a></p>'
     )
     return _browser_document(
