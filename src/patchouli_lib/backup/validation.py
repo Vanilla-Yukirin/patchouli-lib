@@ -24,6 +24,7 @@ from patchouli_lib.backup.manifest import (
     LEGACY_SCHEMA_REVISION,
     LIBRARY_POLICY_SCHEMA_REVISION,
     LIFECYCLE_SCHEMA_REVISION,
+    MASTER_AUDIT_SCHEMA_REVISION,
     MASTER_IDENTITY_SCHEMA_REVISION,
     OCCURRENCE_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
@@ -440,6 +441,27 @@ _EXPECTED_SQL_HASHES_0018: Final = _EXPECTED_SQL_HASHES_0017 | {
         "287d1c6b1766e5f682fdc182052dd24fb6755b1deff8b36621c6ccb62857acbc"
     ),
 }
+_EXPECTED_SQL_HASHES_0019: Final = _EXPECTED_SQL_HASHES_0018 | {
+    # Generated from an empty Alembic 0019 database with _canonical_schema_sql.
+    ("table", "page_lifecycle_events"): (
+        "3fd8f2a2d0d52e8447d9d5761b7ee8a7de8bde0f1edbb839ca392152230882d7"
+    ),
+    ("table", "page_lifecycle_guards"): (
+        "3337688aa38ce231e930b6dd06206d5d2f01f9a400451076369b3d3c0a6f0450"
+    ),
+    ("trigger", "trg_page_lifecycle_guards_safe_delete"): (
+        "41d71e7471b5a74fc63418e78298715b7aff263d6d34a4ac592283b8af6720b6"
+    ),
+    ("trigger", "trg_page_lifecycle_events_validate_insert"): (
+        "00c561140529fea90464c204ddaa9dad496e2c7939c52ca99c6db7e1735e08f3"
+    ),
+    ("trigger", "trg_pages_lifecycle_record"): (
+        "7a3f8d607a77032e4df947ffe392b9370319e97f27dd9632cb82e9b3465a6b14"
+    ),
+    ("trigger", "trg_page_lifecycle_guards_master_audit"): (
+        "4670af1144747e77b01dbe6eb6087a9906d00693a7bae577786ebc04c4c5809d"
+    ),
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
     PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
@@ -452,7 +474,8 @@ _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     AGENT_TOKEN_VALUES_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0015,
     MASTER_IDENTITY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0016,
     ACTOR_HOME_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0017,
-    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0018,
+    MASTER_AUDIT_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0018,
+    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0019,
 }
 _FILE_SET_REVISIONS: Final = frozenset(
     {
@@ -461,6 +484,7 @@ _FILE_SET_REVISIONS: Final = frozenset(
         AGENT_TOKEN_VALUES_SCHEMA_REVISION,
         MASTER_IDENTITY_SCHEMA_REVISION,
         ACTOR_HOME_SCHEMA_REVISION,
+        MASTER_AUDIT_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }
 )
@@ -821,7 +845,7 @@ def _require_occurrence_graph(
     return initials
 
 
-def _require_lifecycle_graph(connection: sqlite3.Connection) -> None:
+def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: str) -> None:
     """Rebuild each 0012 Page clock across Revisions, corrections, and trash events."""
 
     if _one_integer(connection, "SELECT count(*) FROM page_lifecycle_guards"):
@@ -910,10 +934,13 @@ def _require_lifecycle_graph(connection: sqlite3.Connection) -> None:
             (corrected_at, "correction", (sequence, old, new, number))
         )
 
+    master_column = (
+        "master_audit_event_id" if schema_revision == SUPPORTED_SCHEMA_REVISION else "NULL"
+    )
     for row in connection.execute(
         "SELECT library_id, page_uid, sequence, action, section_id, old_deleted_at, "
         "old_updated_at, changed_at, at_revision_number, occurred_at_at_event, "
-        "actor_caller_id, request_id FROM page_lifecycle_events "
+        f"actor_caller_id, request_id, {master_column} FROM page_lifecycle_events "
         "ORDER BY library_id, page_uid, sequence"
     ):
         (
@@ -929,6 +956,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection) -> None:
             occurrence,
             actor,
             request_id,
+            master_audit_event_id,
         ) = row
         key = (library_id, page_uid)
         if (
@@ -941,33 +969,55 @@ def _require_lifecycle_graph(connection: sqlite3.Connection) -> None:
             or type(changed_at) is not int
             or type(number) is not int
             or type(occurrence) is not int
-            or type(actor) is not str
             or type(request_id) is not str
         ):
             raise BackupDatabaseError
-        try:
-            timestamp = canonical_utc_wire(changed_at)
-        except ValueError:
-            raise BackupDatabaseError from None
-        method, route = (
-            ("DELETE", DELETE_PAGE_ROUTE_TEMPLATE)
-            if action == "delete"
-            else ("POST", RESTORE_PAGE_ROUTE_TEMPLATE)
-        )
-        replays = connection.execute(
-            "SELECT response_body FROM idempotency_records WHERE library_id = ? "
-            "AND caller_id = ? AND method = ? AND route_template = ? "
-            "AND original_request_id = ? AND original_request_timestamp = ?",
-            (library_id, actor, method, route, request_id, timestamp),
-        ).fetchall()
-        if len(replays) != 1 or type(replays[0][0]) is not bytes:
-            raise BackupDatabaseError
-        try:
-            replay_body = PageLifecycleResponseBody.model_validate_json(replays[0][0])
-        except ValueError:
-            raise BackupDatabaseError from None
-        if replay_body.section_id != section_id or replay_body.page_id != pages[key][1]:
-            raise BackupDatabaseError
+        if master_audit_event_id is not None:
+            if (
+                schema_revision != SUPPORTED_SCHEMA_REVISION
+                or type(master_audit_event_id) is not str
+                or actor is not None
+                or action != "restore"
+            ):
+                raise BackupDatabaseError
+            audit = connection.execute(
+                "SELECT action, target_type, target_id, occurred_at "
+                "FROM admin_master_audit_events WHERE id = ?",
+                (master_audit_event_id,),
+            ).fetchone()
+            if audit != (
+                "content.archive.restore",
+                "page",
+                f"{library_id}:{page_uid.hex()}",
+                changed_at,
+            ):
+                raise BackupDatabaseError
+        else:
+            if type(actor) is not str:
+                raise BackupDatabaseError
+            try:
+                timestamp = canonical_utc_wire(changed_at)
+            except ValueError:
+                raise BackupDatabaseError from None
+            method, route = (
+                ("DELETE", DELETE_PAGE_ROUTE_TEMPLATE)
+                if action == "delete"
+                else ("POST", RESTORE_PAGE_ROUTE_TEMPLATE)
+            )
+            replays = connection.execute(
+                "SELECT response_body FROM idempotency_records WHERE library_id = ? "
+                "AND caller_id = ? AND method = ? AND route_template = ? "
+                "AND original_request_id = ? AND original_request_timestamp = ?",
+                (library_id, actor, method, route, request_id, timestamp),
+            ).fetchall()
+            if len(replays) != 1 or type(replays[0][0]) is not bytes:
+                raise BackupDatabaseError
+            try:
+                replay_body = PageLifecycleResponseBody.model_validate_json(replays[0][0])
+            except ValueError:
+                raise BackupDatabaseError from None
+            if replay_body.section_id != section_id or replay_body.page_id != pages[key][1]:
+                raise BackupDatabaseError
         operations.setdefault(key, []).append(
             (
                 changed_at,
@@ -1329,7 +1379,7 @@ def _require_master_identity(connection: sqlite3.Connection) -> None:
         raise BackupDatabaseError from None
 
 
-def _require_master_audit(connection: sqlite3.Connection) -> None:
+def _require_master_audit(connection: sqlite3.Connection, schema_revision: str) -> None:
     """Validate immutable master action metadata without reading any secrets."""
 
     rows = connection.execute(
@@ -1376,9 +1426,27 @@ def _require_master_audit(connection: sqlite3.Connection) -> None:
             or any(character not in "0123456789abcdef" for character in target_id)
         ):
             raise BackupDatabaseError
+        if schema_revision == SUPPORTED_SCHEMA_REVISION and action == "content.archive.restore":
+            linked_events = connection.execute(
+                "SELECT library_id, page_uid, changed_at FROM page_lifecycle_events "
+                "WHERE master_audit_event_id = ? LIMIT 2",
+                (event_id,),
+            ).fetchall()
+            if len(linked_events) != 1:
+                raise BackupDatabaseError
+            library_id, page_uid, changed_at = linked_events[0]
+            if (
+                type(library_id) is not str
+                or type(page_uid) is not bytes
+                or type(changed_at) is not int
+                or target_type != "page"
+                or target_id != f"{library_id}:{page_uid.hex()}"
+                or occurred_at != changed_at
+            ):
+                raise BackupDatabaseError
 
 
-def _require_actor_home_graph(connection: sqlite3.Connection) -> None:
+def _require_actor_home_graph(connection: sqlite3.Connection, schema_revision: str) -> None:
     """Keep each history row's content target separate from its actor identity.
 
     SQLite's foreign-key check proves the declared relationships. These joins
@@ -1394,13 +1462,26 @@ def _require_actor_home_graph(connection: sqlite3.Connection) -> None:
         ("page_lifecycle_events", "actor_caller_id"),
         ("page_lifecycle_guards", "actor_caller_id"),
     ):
+        if schema_revision == SUPPORTED_SCHEMA_REVISION and table in {
+            "page_lifecycle_events",
+            "page_lifecycle_guards",
+        }:
+            invalid_predicate = (
+                "target.id IS NULL OR "
+                "(history.master_audit_event_id IS NULL AND actor.id IS NULL) OR "
+                "(history.master_audit_event_id IS NOT NULL AND "
+                "(history.actor_caller_id IS NOT NULL OR "
+                "history.actor_home_library_id IS NOT NULL))"
+            )
+        else:
+            invalid_predicate = "target.id IS NULL OR actor.id IS NULL"
         invalid = _one_integer(
             connection,
             f"SELECT count(*) FROM {table} AS history "
             "LEFT JOIN libraries AS target ON target.id = history.library_id "
             f"LEFT JOIN auth_callers AS actor ON actor.id = history.{actor_column} "
             "AND actor.library_id = history.actor_home_library_id "
-            "WHERE target.id IS NULL OR actor.id IS NULL",
+            f"WHERE {invalid_predicate}",
         )
         if invalid:
             raise BackupDatabaseError
@@ -1445,6 +1526,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         AGENT_TOKEN_VALUES_SCHEMA_REVISION,
         MASTER_IDENTITY_SCHEMA_REVISION,
         ACTOR_HOME_SCHEMA_REVISION,
+        MASTER_AUDIT_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         invalid_library_policies = _one_integer(
@@ -1463,6 +1545,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         AGENT_TOKEN_VALUES_SCHEMA_REVISION,
         MASTER_IDENTITY_SCHEMA_REVISION,
         ACTOR_HOME_SCHEMA_REVISION,
+        MASTER_AUDIT_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_agent_token_values(connection)
@@ -1470,15 +1553,20 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
     if schema_revision in {
         MASTER_IDENTITY_SCHEMA_REVISION,
         ACTOR_HOME_SCHEMA_REVISION,
+        MASTER_AUDIT_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_master_identity(connection)
 
-    if schema_revision in {ACTOR_HOME_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
-        _require_actor_home_graph(connection)
+    if schema_revision in {
+        ACTOR_HOME_SCHEMA_REVISION,
+        MASTER_AUDIT_SCHEMA_REVISION,
+        SUPPORTED_SCHEMA_REVISION,
+    }:
+        _require_actor_home_graph(connection, schema_revision)
 
-    if schema_revision == SUPPORTED_SCHEMA_REVISION:
-        _require_master_audit(connection)
+    if schema_revision in {MASTER_AUDIT_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
+        _require_master_audit(connection, schema_revision)
 
     rotations: dict[str, tuple[str, str, str | None, int | None, int | None, int]] = {}
     for (
@@ -2228,7 +2316,7 @@ def _validate_connection(
         raise BackupDatabaseError
     _require_page_graph(connection, schema_revision)
     if schema_revision in _LIFECYCLE_REVISIONS:
-        _require_lifecycle_graph(connection)
+        _require_lifecycle_graph(connection, schema_revision)
     if schema_revision not in {
         LEGACY_SCHEMA_REVISION,
         PREVIOUS_SCHEMA_REVISION,

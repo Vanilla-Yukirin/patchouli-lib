@@ -11,9 +11,13 @@ from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, func, insert, select, update
 
+from patchouli_lib.admin.master_audit import MasterAuditRepository
+from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.passwords import hash_password
+from patchouli_lib.admin.read_model import AdminReadModel
+from patchouli_lib.admin.service import AdminActionService
 from patchouli_lib.app import create_app
-from patchouli_lib.auth.models import AuditEvent, Caller, Credential
+from patchouli_lib.auth.models import AuditEvent, Caller, Credential, MasterAuditEvent
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import OperatorBootstrap
 from patchouli_lib.auth.service import utc_microseconds
@@ -32,6 +36,7 @@ from patchouli_lib.operator.service import OperatorBootstrapService
 
 _ORIGIN = "https://browser.example.invalid"
 _PASSWORD = "synthetic browser password"
+_MASTER_TOKEN = "synthetic master token for isolated trash tests"
 
 
 @pytest.fixture
@@ -58,6 +63,15 @@ def browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[T
 def _login(client: TestClient) -> None:
     response = client.post(
         "/admin/login", data={"password": _PASSWORD}, headers={"Origin": _ORIGIN}
+    )
+    assert response.status_code == 303
+
+
+def _login_master(client: TestClient, engine: Engine) -> None:
+    with immediate_transaction(engine) as connection:
+        MasterTokenRepository(connection).initialize_from_local_cli(_MASTER_TOKEN, now=1_000)
+    response = client.post(
+        "/admin/login", data={"password": _MASTER_TOKEN}, headers={"Origin": _ORIGIN}
     )
     assert response.status_code == 303
 
@@ -196,6 +210,19 @@ def _restore_form(client: TestClient, detail: str, operator: str) -> dict[str, s
         assert match is not None
         values[name] = unescape(match.group(1))
     values["operator_token"] = operator
+    return values
+
+
+def _master_restore_form(client: TestClient, detail: str) -> dict[str, str]:
+    response = client.get(detail)
+    assert response.status_code == 200
+    assert 'name="operator_token"' not in response.text
+    assert 'name="idempotency_key"' not in response.text
+    values: dict[str, str] = {}
+    for name in ("csrf_token", "expected_etag"):
+        match = search(rf'name="{name}" value="([^"]+)"', response.text)
+        assert match is not None
+        values[name] = unescape(match.group(1))
     return values
 
 
@@ -506,3 +533,146 @@ def test_restore_rejects_duplicate_fields_and_rolls_back_audit_failure(
             )
         )
     assert restores == 0
+
+
+def test_master_restore_uses_only_session_and_preserves_page_history(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    scope = _seed(engine, "1")
+    other = _seed(engine, "4")
+    page_id = _page(engine, scope, 1, deleted_at=3_000_000)
+    _, section_trash, detail = _paths(scope, page_id)
+    _login_master(client, engine)
+    values = _master_restore_form(client, detail)
+    assert values["expected_etag"].startswith('"page-v2-')
+    assert (
+        client.post(
+            detail + "/restore",
+            data=values,
+            headers={"Origin": "https://wrong.example.invalid"},
+        ).status_code
+        == 403
+    )
+    assert _restore(client, detail, {**values, "csrf_token": "wrong"}).status_code == 403
+    assert _restore(client, detail, {**values, "operator_token": "unexpected"}).status_code == 422
+    assert (
+        _restore(
+            client,
+            detail,
+            {**values, "expected_etag": '"page-v2-' + "0" * 64 + '"'},
+        ).status_code
+        == 412
+    )
+    wrong_section = detail.replace(f"/sections/{scope[1]}/", f"/sections/{other[1]}/")
+    assert _restore(client, wrong_section, values).status_code == 404
+
+    restored = _restore(client, detail, values)
+    assert restored.status_code == 303
+    assert restored.headers["location"] == section_trash.removesuffix("/trash")
+    assert _restore(client, detail, values).status_code == 412
+    with engine.connect() as connection:
+        page = ContentRepository(connection).get_page(scope[0], page_id)
+        assert page is not None and page.deleted_at is None
+        revisions = connection.scalar(
+            select(func.count()).select_from(Revision).where(Revision.page_uid == page.page_uid)
+        )
+        event = (
+            connection.execute(
+                select(PageLifecycleEvent.__table__).where(
+                    PageLifecycleEvent.page_uid == page.page_uid,
+                    PageLifecycleEvent.action == "restore",
+                )
+            )
+            .mappings()
+            .one()
+        )
+        audit = (
+            connection.execute(
+                select(MasterAuditEvent.__table__).where(
+                    MasterAuditEvent.id == event["master_audit_event_id"]
+                )
+            )
+            .mappings()
+            .one()
+        )
+        current_etag = page_current_etag(
+            page.page_uid,
+            page.current_revision_id,
+            page.current_revision_number,
+            page.occurred_at,
+            page.updated_at,
+        )
+    assert revisions == 1
+    assert event["actor_caller_id"] is None
+    assert event["actor_home_library_id"] is None
+    assert audit["action"] == "content.archive.restore"
+    assert audit["target_type"] == "page"
+    assert audit["target_id"] == f"{scope[0]}:{page.page_uid.hex()}"
+    assert audit["occurred_at"] == event["changed_at"]
+    activity = AdminReadModel(engine).recent_content_activity()
+    restored_activity = [item for item in activity if item.action == "content.archive.restore"]
+    assert len(restored_activity) == 1
+    assert restored_activity[0].actor_id is None
+    assert restored_activity[0].actor_name == "Administrator"
+    assert restored_activity[0].page_id == page_id
+    assert _restore(client, detail, {**values, "expected_etag": current_etag}).status_code == 409
+
+
+def test_master_restore_rolls_back_when_audit_fails(
+    browser: tuple[TestClient, Engine], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, engine = browser
+    scope = _seed(engine, "1")
+    page_id = _page(engine, scope, 1, deleted_at=3_000_000)
+    _, _, detail = _paths(scope, page_id)
+    _login_master(client, engine)
+    values = _master_restore_form(client, detail)
+
+    def reject_audit(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("synthetic audit failure")
+
+    monkeypatch.setattr(MasterAuditRepository, "add_success", reject_audit)
+    failed = _restore(client, detail, values)
+    assert failed.status_code == 500
+    with engine.connect() as connection:
+        page = ContentRepository(connection).get_page(scope[0], page_id)
+        assert page is not None and page.deleted_at is not None
+        assert (
+            connection.scalar(
+                select(func.count())
+                .select_from(PageLifecycleEvent)
+                .where(
+                    PageLifecycleEvent.page_uid == page.page_uid,
+                    PageLifecycleEvent.action == "restore",
+                )
+            )
+            == 0
+        )
+
+
+def test_master_restore_rechecks_session_after_rotation(
+    browser: tuple[TestClient, Engine], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, engine = browser
+    scope = _seed(engine, "1")
+    page_id = _page(engine, scope, 1, deleted_at=3_000_000)
+    _, _, detail = _paths(scope, page_id)
+    _login_master(client, engine)
+    values = _master_restore_form(client, detail)
+    original = AdminActionService.restore_archive_page_as_master
+
+    def rotate_before_write(self: AdminActionService, *args: object, **kwargs: object) -> None:
+        with immediate_transaction(engine) as connection:
+            MasterTokenRepository(connection).rotate(
+                _MASTER_TOKEN, "replacement master token for trash tests", now=2_000
+            )
+        original(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(AdminActionService, "restore_archive_page_as_master", rotate_before_write)
+    response = _restore(client, detail, values)
+    assert response.status_code == 401
+    assert "Sign in" in response.text
+    with engine.connect() as connection:
+        page = ContentRepository(connection).get_page(scope[0], page_id)
+        assert page is not None and page.deleted_at is not None

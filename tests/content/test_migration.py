@@ -232,6 +232,7 @@ def test_page_content_migration_upgrade_check_downgrade_upgrade(
                 "trg_page_lifecycle_guards_validate_insert",
                 "trg_page_lifecycle_guards_no_update",
                 "trg_page_lifecycle_guards_safe_delete",
+                "trg_page_lifecycle_guards_master_audit",
                 "trg_pages_canonical_identifier_on_insert",
                 "trg_pages_occurrence_require_guard",
                 "trg_pages_occurrence_record",
@@ -246,7 +247,7 @@ def test_page_content_migration_upgrade_check_downgrade_upgrade(
                 "trg_pages_stable_identity",
             }
             assert first.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == (
-                "20260929_0018"
+                "20260930_0019"
             )
     finally:
         engine.dispose()

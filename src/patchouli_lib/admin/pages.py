@@ -1691,6 +1691,7 @@ def trash_detail_page(
     *,
     locale: AdminLocale = "en",
     restore_key: str,
+    master_mode: bool = False,
 ) -> str:
     library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
     section_path = f"{library_path}/sections/{escape(view.section.id, quote=True)}"
@@ -1713,6 +1714,18 @@ def trash_detail_page(
         f"<dd>{view.page.revision_number}</dd></dl>"
     )
     if view.restore_etag is not None:
+        credential_fields = (
+            ""
+            if master_mode
+            else (
+                '<p class="section-help">'
+                + localize(locale, _RESTORE_TOKEN_HELP)
+                + "</p>"
+                + '<input type="hidden" name="idempotency_key" '
+                + f'value="{escape(restore_key, quote=True)}">'
+                + _secret("operator_token", "Current operator credential", locale)
+            )
+        )
         body += (
             '<section class="card"><h2>'
             + localize(locale, "Restore page")
@@ -1720,16 +1733,11 @@ def trash_detail_page(
             + '<p class="section-help">'
             + localize(locale, "Restore this page and its complete revision history.")
             + "</p>"
-            + '<p class="section-help">'
-            + localize(locale, _RESTORE_TOKEN_HELP)
-            + "</p>"
             + f'<form method="post" action="{base}/restore" autocomplete="off">'
             + _csrf(escape(csrf_token, quote=True))
             + '<input type="hidden" name="expected_etag" '
             + f'value="{escape(view.restore_etag, quote=True)}">'
-            + '<input type="hidden" name="idempotency_key" '
-            + f'value="{escape(restore_key, quote=True)}">'
-            + _secret("operator_token", "Current operator credential", locale)
+            + credential_fields
             + f'<button type="submit">{localize(locale, "Restore page")}</button>'
             + "</form></section>"
         )

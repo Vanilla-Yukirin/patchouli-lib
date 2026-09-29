@@ -282,10 +282,11 @@ class ContentRepository:
         page: PageRecord,
         *,
         action: Literal["delete", "restore"],
-        actor_caller_id: str,
-        actor_home_library_id: str,
+        actor_caller_id: str | None,
+        actor_home_library_id: str | None,
         request_id: str,
         changed_at: int,
+        master_audit_event_id: str | None = None,
     ) -> tuple[PageRecord, PageLifecycleEventRecord]:
         """Apply one guarded tombstone transition within the caller's write transaction."""
 
@@ -320,6 +321,7 @@ class ContentRepository:
             occurred_at_at_event=page.occurred_at,
             actor_caller_id=actor_caller_id,
             actor_home_library_id=actor_home_library_id,
+            master_audit_event_id=master_audit_event_id,
             request_id=request_id,
         )
         self._connection.execute(insert(PageLifecycleGuard), expected_event.model_dump())

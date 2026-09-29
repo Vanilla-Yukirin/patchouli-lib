@@ -23,6 +23,7 @@ from patchouli_lib.admin.contracts import (
     BootstrapInput,
     MasterPageTagFormInput,
     MasterProvisionAgentInput,
+    MasterRestoreArchiveFormInput,
     MasterRotateAgentCredentialInput,
     MasterSetAgentLibraryGrantsInput,
     MasterTagFormInput,
@@ -1212,7 +1213,13 @@ def create_admin_router(
             return (
                 None
                 if view is None
-                else trash_detail_page(csrf, view, locale=locale, restore_key=uuid4().hex)
+                else trash_detail_page(
+                    csrf,
+                    view,
+                    locale=locale,
+                    restore_key=uuid4().hex,
+                    master_mode=isinstance(current_session(request), MasterAdminSession),
+                )
             )
 
         return protected_page(request, render)
@@ -1232,22 +1239,39 @@ def create_admin_router(
                 status_code=401,
             )
         try:
-            values = await _read_form(
-                request,
-                allowed_fields=frozenset(RestoreArchiveFormInput.model_fields) | {"csrf_token"},
+            fields = (
+                MasterRestoreArchiveFormInput.model_fields
+                if isinstance(session, MasterAdminSession)
+                else RestoreArchiveFormInput.model_fields
             )
+            values = await _read_form(request, allowed_fields=frozenset(fields) | {"csrf_token"})
             _require_csrf(values, session)
             if isinstance(session, MasterAdminSession):
-                return master_write_forbidden(request, session)
-            submitted = RestoreArchiveFormInput.model_validate(values)
-            await run_in_threadpool(
-                service.restore_archive_page, library_id, section_id, page_id, submitted
-            )
+                submitted_master = MasterRestoreArchiveFormInput.model_validate(values)
+                await run_in_threadpool(
+                    service.restore_archive_page_as_master,
+                    library_id,
+                    section_id,
+                    page_id,
+                    submitted_master,
+                    master_session=session,
+                )
+            else:
+                submitted = RestoreArchiveFormInput.model_validate(values)
+                await run_in_threadpool(
+                    service.restore_archive_page, library_id, section_id, page_id, submitted
+                )
         except _FormError as exc:
             status, message = exc.status_code, exc.safe_message
         except (ValidationError, ValueError):
             status, message = 422, "Check the submitted fields and try again."
-        except (AuthenticationError, AuthorizationError):
+        except AuthenticationError:
+            status, message = (
+                (401, "Sign in again.")
+                if isinstance(session, MasterAdminSession)
+                else (403, "The operator credential was rejected.")
+            )
+        except AuthorizationError:
             status, message = 403, "The operator credential was rejected."
         except ArchiveNotFoundError:
             status, message = 404, "The requested Archive page was not found."
@@ -1261,6 +1285,14 @@ def create_admin_router(
             status, message = 500, "The action could not be completed."
         else:
             return redirect(f"/admin/libraries/{library_id}/sections/{section_id}")
+        if current_session(request) is None:
+            login_response = html(
+                login_page(locale=locale, message="Sign in again."),
+                locale=locale,
+                status_code=401,
+            )
+            _clear_cookie(login_response, secure=secure_cookie(request))
+            return login_response
         return html(
             restore_error_page(session.csrf_token, library_id, section_id, message, locale=locale),
             locale=locale,

@@ -521,7 +521,12 @@ class AdminReadModel:
                     )
                     .where(
                         MasterAuditEvent.action.in_(
-                            ("tag.create", "tag.page.attach", "tag.page.detach")
+                            (
+                                "content.archive.restore",
+                                "tag.create",
+                                "tag.page.attach",
+                                "tag.page.detach",
+                            )
                         )
                     )
                     .order_by(MasterAuditEvent.occurred_at.desc(), MasterAuditEvent.id.desc())
@@ -532,7 +537,30 @@ class AdminReadModel:
             )
             for event in master_events:
                 parts = event["target_id"].split(":")
-                if event["action"] == "tag.create":
+                if event["action"] == "content.archive.restore":
+                    if event["target_type"] != "page" or len(parts) != 2:
+                        continue
+                    library_id, page_uid_hex = parts
+                    if not all(_lower_hex_id(value) for value in parts):
+                        continue
+                    tag_id = None
+                    page = (
+                        connection.execute(
+                            select(
+                                Page.section_id,
+                                Page.book_id,
+                                Page.page_id,
+                                Page.title,
+                                Page.deleted_at,
+                            ).where(
+                                Page.library_id == library_id,
+                                Page.page_uid == bytes.fromhex(page_uid_hex),
+                            )
+                        )
+                        .mappings()
+                        .one_or_none()
+                    )
+                elif event["action"] == "tag.create":
                     if event["target_type"] != "tag" or len(parts) != 2:
                         continue
                     library_id, tag_id = parts
@@ -561,7 +589,9 @@ class AdminReadModel:
                         .mappings()
                         .one_or_none()
                     )
-                if not _lower_hex_id(library_id) or not _lower_hex_id(tag_id):
+                if not _lower_hex_id(library_id) or (
+                    tag_id is not None and not _lower_hex_id(tag_id)
+                ):
                     continue
                 tag = (
                     connection.execute(
@@ -571,6 +601,8 @@ class AdminReadModel:
                     )
                     .mappings()
                     .one_or_none()
+                    if tag_id is not None
+                    else None
                 )
                 items.append(
                     (

@@ -224,7 +224,11 @@ def test_empty_upgrade_and_downgrade_match_models(
             PageLifecycleGuard,
         ):
             actual = {column["name"] for column in inspector.get_columns(model.__tablename__)}
-            assert actual == set(model.__table__.columns.keys())
+            expected = set(model.__table__.columns.keys())
+            if model in (PageLifecycleEvent, PageLifecycleGuard):
+                # Master audit linkage is introduced after actor-home in 0019.
+                expected.remove("master_audit_event_id")
+            assert actual == expected
             foreign_keys = inspector.get_foreign_keys(model.__tablename__)
             if model.__tablename__ == "auth_audit_events":
                 actor_table = "auth_credentials"

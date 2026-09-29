@@ -140,14 +140,12 @@ class PageTagFormInput(MasterPageTagFormInput):
         return value
 
 
-class RestoreArchiveFormInput(AdminActionInput):
-    """One request's operator credential and conditional restore form values."""
+class MasterRestoreArchiveFormInput(AdminActionInput):
+    """Conditional restore submitted by the authenticated master session."""
 
     expected_etag: StrongPageETag
-    idempotency_key: Annotated[str, Field(min_length=1, max_length=256)]
-    operator_token: SecretStr = Field(min_length=1, max_length=256, repr=False)
 
-    @field_validator("expected_etag", "idempotency_key", mode="before")
+    @field_validator("expected_etag", mode="before")
     @classmethod
     def reject_padded_precondition(cls, value: object) -> object:
         if isinstance(value, str) and value != value.strip():
@@ -159,6 +157,20 @@ class RestoreArchiveFormInput(AdminActionInput):
     def require_current_etag(cls, value: str) -> str:
         if not value.startswith('"page-v2-'):
             raise ValueError("A current Page ETag is required.")
+        return value
+
+
+class RestoreArchiveFormInput(MasterRestoreArchiveFormInput):
+    """Legacy one-request Operator credential and idempotent restore values."""
+
+    idempotency_key: Annotated[str, Field(min_length=1, max_length=256)]
+    operator_token: SecretStr = Field(min_length=1, max_length=256, repr=False)
+
+    @field_validator("idempotency_key", mode="before")
+    @classmethod
+    def reject_padded_idempotency_key(cls, value: object) -> object:
+        if isinstance(value, str) and value != value.strip():
+            raise ValueError("Conditional restore values must not contain padding.")
         return value
 
     @field_validator("operator_token", mode="before")
@@ -178,6 +190,7 @@ __all__ = [
     "MasterTagFormInput",
     "PageTagFormInput",
     "MasterPageTagFormInput",
+    "MasterRestoreArchiveFormInput",
     "RestoreArchiveFormInput",
     "MasterLibraryGrantInput",
     "MasterProvisionAgentInput",

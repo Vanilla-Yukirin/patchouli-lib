@@ -261,8 +261,9 @@ class PageLifecycleEventRecord(ContentSchema):
     changed_at: StoredTimestamp
     at_revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
     occurred_at_at_event: OccurrenceMicros
-    actor_caller_id: OpaqueId
-    actor_home_library_id: OpaqueId
+    actor_caller_id: OpaqueId | None
+    actor_home_library_id: OpaqueId | None
+    master_audit_event_id: OpaqueId | None = None
     request_id: RequestId
 
     @model_validator(mode="after")
@@ -271,6 +272,14 @@ class PageLifecycleEventRecord(ContentSchema):
             raise ValueError("Page lifecycle time must strictly advance.")
         if (self.action == "delete") != (self.old_deleted_at is None):
             raise ValueError("Page lifecycle action does not match the prior state.")
+        caller_actor = self.actor_caller_id is not None and self.actor_home_library_id is not None
+        master_actor = self.master_audit_event_id is not None
+        if caller_actor == master_actor or (
+            (self.actor_caller_id is None) != (self.actor_home_library_id is None)
+        ):
+            raise ValueError("Page lifecycle event needs exactly one actor kind.")
+        if master_actor and self.action != "restore":
+            raise ValueError("Master session cannot perform this Page lifecycle action.")
         canonical_utc_wire(self.changed_at)
         return self
 

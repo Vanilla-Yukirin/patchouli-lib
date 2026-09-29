@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from time import time
@@ -11,6 +12,7 @@ from patchouli_lib.admin.contracts import (
     BootstrapInput,
     MasterPageTagFormInput,
     MasterProvisionAgentInput,
+    MasterRestoreArchiveFormInput,
     MasterRotateAgentCredentialInput,
     MasterSetAgentLibraryGrantsInput,
     MasterTagFormInput,
@@ -49,14 +51,23 @@ from patchouli_lib.auth.service import (
     utc_microseconds,
 )
 from patchouli_lib.content.models import Page
+from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import ArchiveIdempotencyKey, PageLifecycleCommand
-from patchouli_lib.content.service import ArchiveService
+from patchouli_lib.content.service import (
+    ArchiveLifecycleUnchangedError,
+    ArchiveNotFoundError,
+    ArchivePersistenceError,
+    ArchivePreconditionFailedError,
+    ArchiveService,
+    page_current_etag,
+)
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.idempotency.schemas import (
     OriginalResponse,
     ReplayResponse,
     digest_idempotency_key,
 )
+from patchouli_lib.identifiers import canonical_utc_wire
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import (
     BookRecord,
@@ -850,8 +861,72 @@ class AdminActionService:
         )
         token = request.operator_token.get_secret_value()
         with immediate_transaction(self._engine) as connection:
+            if MasterTokenRepository(connection).has_identity():
+                raise AuthenticationError
             return ArchiveService(connection, clock=self._clock).restore_page_as_operator(
                 token, command, idempotency
+            )
+
+    def restore_archive_page_as_master(
+        self,
+        library_id: str,
+        section_id: str,
+        page_id: str,
+        request: MasterRestoreArchiveFormInput,
+        *,
+        master_session: MasterAdminSession,
+    ) -> None:
+        """Restore a tombstoned Archive Page as the actual master identity."""
+
+        with immediate_transaction(self._engine) as connection:
+            self._require_current_admin_session(
+                connection, master_session, master_session.audit_fingerprint()
+            )
+            content = ContentRepository(connection)
+            page = content.get_page(library_id, page_id)
+            if (
+                page is None
+                or page.page_type != "archive"
+                or not hmac.compare_digest(page.section_id, section_id)
+            ):
+                raise ArchiveNotFoundError
+            current_etag = page_current_etag(
+                page.page_uid,
+                page.current_revision_id,
+                page.current_revision_number,
+                page.occurred_at,
+                page.updated_at,
+            )
+            if not hmac.compare_digest(request.expected_etag, current_etag):
+                raise ArchivePreconditionFailedError
+            if page.deleted_at is None:
+                raise ArchiveLifecycleUnchangedError
+            if page.updated_at >= (1 << 63) - 1:
+                raise ArchivePersistenceError
+            changed_at = max(self._clock(), page.updated_at + 1)
+            try:
+                canonical_utc_wire(changed_at)
+            except ValueError:
+                raise ArchivePersistenceError from None
+            event_id = uuid4().hex
+            MasterAuditRepository(connection).add_success(
+                identity_id=master_session.identity_id,
+                session_generation=master_session.session_generation,
+                session_fingerprint=master_session.audit_fingerprint(),
+                action="content.archive.restore",
+                target_type="page",
+                target_id=f"{library_id}:{page.page_uid.hex()}",
+                occurred_at=changed_at,
+                event_id=event_id,
+            )
+            content.transition_page_lifecycle(
+                page,
+                action="restore",
+                actor_caller_id=None,
+                actor_home_library_id=None,
+                master_audit_event_id=event_id,
+                request_id=f"req_{uuid4().hex}",
+                changed_at=changed_at,
             )
 
 

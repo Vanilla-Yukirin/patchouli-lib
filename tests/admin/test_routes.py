@@ -424,13 +424,16 @@ def test_initialized_master_token_login_retires_legacy_web_login_but_not_operato
     assert 'action="/admin/agents/provision"' not in setup.text
     assert admin_web.client.get("/api/v1/auth/whoami").status_code == 401
     assert _post(admin_web.client, "/admin/logout", data={"csrf_token": "wrong"}).status_code == 403
-    for path, fields in (
-        ("/admin/bootstrap", _bootstrap_data(csrf)),
-        ("/admin/libraries/x/sections/y/trash/z/restore", {"csrf_token": csrf}),
-    ):
-        rejected = _post(admin_web.client, path, data=fields)
-        assert rejected.status_code == 403
-        assert "not available to Master Token sessions yet" in rejected.text
+    rejected = _post(admin_web.client, "/admin/bootstrap", data=_bootstrap_data(csrf))
+    assert rejected.status_code == 403
+    assert "not available to Master Token sessions yet" in rejected.text
+    # Master restore now exists, but still requires a current Page ETag.
+    missing_etag = _post(
+        admin_web.client,
+        "/admin/libraries/x/sections/y/trash/z/restore",
+        data={"csrf_token": csrf},
+    )
+    assert missing_etag.status_code == 422
     tag_path = f"/admin/libraries/{library_id}/tags"
     assert (
         _post(

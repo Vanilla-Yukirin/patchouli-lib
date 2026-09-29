@@ -26,8 +26,12 @@ def test_upgrade_and_empty_downgrade_match_model_schema(
         inspector = inspect(engine)
         for model in (PageLifecycleEvent, PageLifecycleGuard):
             actual = {column["name"] for column in inspector.get_columns(model.__tablename__)}
-            # This test intentionally inspects 0012; actor home was added in 0017.
-            expected_0012 = set(model.__table__.columns.keys()) - {"actor_home_library_id"}
+            # This test intentionally inspects 0012; actor home and master audit
+            # linkage were added by later revisions.
+            expected_0012 = set(model.__table__.columns.keys()) - {
+                "actor_home_library_id",
+                "master_audit_event_id",
+            }
             assert actual == expected_0012
         with engine.connect() as connection:
             trigger_names = {

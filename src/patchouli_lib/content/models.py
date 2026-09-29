@@ -285,6 +285,19 @@ class PageLifecycleEvent(Base):
             name="fk_page_lifecycle_events_actor",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["master_audit_event_id"],
+            ["admin_master_audit_events.id"],
+            name="fk_page_lifecycle_events_master_audit",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "(actor_caller_id IS NOT NULL AND actor_home_library_id IS NOT NULL "
+            "AND master_audit_event_id IS NULL) OR "
+            "(actor_caller_id IS NULL AND actor_home_library_id IS NULL "
+            "AND master_audit_event_id IS NOT NULL)",
+            name="ck_page_lifecycle_events_actor_kind",
+        ),
         CheckConstraint(
             "sequence BETWEEN 1 AND 9223372036854775807",
             name="ck_page_lifecycle_events_sequence",
@@ -315,7 +328,7 @@ class PageLifecycleEvent(Base):
     )
 
     library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
-    actor_home_library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+    actor_home_library_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
     page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
     sequence: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     action: Mapped[str] = mapped_column(String(8), nullable=False)
@@ -325,7 +338,8 @@ class PageLifecycleEvent(Base):
     changed_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     at_revision_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
     occurred_at_at_event: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    actor_caller_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+    actor_caller_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
+    master_audit_event_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
     request_id: Mapped[str] = mapped_column(String(36), nullable=False)
 
 
@@ -351,6 +365,19 @@ class PageLifecycleGuard(Base):
             ["auth_callers.id", "auth_callers.library_id"],
             name="fk_page_lifecycle_guards_actor",
             ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["master_audit_event_id"],
+            ["admin_master_audit_events.id"],
+            name="fk_page_lifecycle_guards_master_audit",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "(actor_caller_id IS NOT NULL AND actor_home_library_id IS NOT NULL "
+            "AND master_audit_event_id IS NULL) OR "
+            "(actor_caller_id IS NULL AND actor_home_library_id IS NULL "
+            "AND master_audit_event_id IS NOT NULL)",
+            name="ck_page_lifecycle_guards_actor_kind",
         ),
         ForeignKeyConstraint(
             ["library_id", "page_uid", "sequence"],
@@ -393,7 +420,7 @@ class PageLifecycleGuard(Base):
     )
 
     library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
-    actor_home_library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+    actor_home_library_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
     page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
     sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     action: Mapped[str] = mapped_column(String(8), nullable=False)
@@ -403,7 +430,8 @@ class PageLifecycleGuard(Base):
     changed_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     at_revision_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
     occurred_at_at_event: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    actor_caller_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+    actor_caller_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
+    master_audit_event_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
     request_id: Mapped[str] = mapped_column(String(36), nullable=False)
 
 

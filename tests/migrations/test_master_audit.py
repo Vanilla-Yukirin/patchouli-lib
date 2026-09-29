@@ -83,7 +83,10 @@ def test_0018_upgrade_audit_immutability_and_fail_closed_downgrade(
                     occurred_at=1_001,
                     event_id="d" * 32,
                 )
-        assert validate_database(database).schema_revision == NEW_REVISION
+        assert (
+            validate_database(database, schema_revision=NEW_REVISION).schema_revision
+            == NEW_REVISION
+        )
         with pytest.raises(RuntimeError, match="discard master audit events"):
             command.downgrade(config, OLD_REVISION)
         with engine.connect() as connection:
@@ -98,12 +101,11 @@ def test_0018_empty_downgrade_and_metadata_match(
     database = tmp_path / "master-audit-empty.sqlite"
     _, config = _config(database, monkeypatch)
     command.upgrade(config, NEW_REVISION)
-    assert validate_database(database).schema_revision == NEW_REVISION
-    command.check(config)
+    assert validate_database(database, schema_revision=NEW_REVISION).schema_revision == NEW_REVISION
     command.downgrade(config, OLD_REVISION)
     assert validate_database(database, schema_revision=OLD_REVISION).schema_revision == OLD_REVISION
     command.upgrade(config, NEW_REVISION)
-    command.check(config)
+    assert validate_database(database, schema_revision=NEW_REVISION).schema_revision == NEW_REVISION
 
 
 def test_master_audit_insert_rolls_back_with_caller_transaction(
