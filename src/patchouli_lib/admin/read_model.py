@@ -56,6 +56,7 @@ class BookItem:
     id: str
     name: str
     summary: str
+    updated_at: int
 
 
 @dataclass(frozen=True)
@@ -841,7 +842,7 @@ class AdminReadModel:
             if library is None or section is None:
                 return None
             rows = connection.execute(
-                select(Book.id, Book.name, Book.summary)
+                select(Book.id, Book.name, Book.summary, Book.updated_at)
                 .where(Book.library_id == library_id, Book.section_id == section_id)
                 .order_by(Book.name, Book.id)
             ).mappings()
@@ -1168,7 +1169,7 @@ def _get_book(
 ) -> BookItem | None:
     row = (
         connection.execute(
-            select(Book.id, Book.name, Book.summary).where(
+            select(Book.id, Book.name, Book.summary, Book.updated_at).where(
                 Book.library_id == library_id,
                 Book.section_id == section_id,
                 Book.id == book_id,
@@ -1191,7 +1192,7 @@ def _section_item(row: RowMapping) -> SectionItem:
 
 
 def _book_item(row: RowMapping) -> BookItem:
-    return BookItem(row["id"], row["name"], row["summary"])
+    return BookItem(row["id"], row["name"], row["summary"], row["updated_at"])
 
 
 def _page_item(row: RowMapping) -> PageItem:

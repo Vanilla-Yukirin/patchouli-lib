@@ -1,4 +1,4 @@
-from sqlalchemy import Connection, insert, select
+from sqlalchemy import Connection, insert, select, update
 
 from patchouli_lib.library.models import Book, Library, Section
 from patchouli_lib.library.schemas import (
@@ -80,3 +80,21 @@ class LibraryRepository:
         values = book.model_dump()
         self._connection.execute(insert(Book), values)
         return BookRecord.model_validate(values)
+
+    def update_book_metadata(
+        self,
+        book: BookRecord,
+        *,
+        expected_updated_at: int,
+    ) -> bool:
+        result = self._connection.execute(
+            update(Book)
+            .where(
+                Book.id == book.id,
+                Book.library_id == book.library_id,
+                Book.section_id == book.section_id,
+                Book.updated_at == expected_updated_at,
+            )
+            .values(name=book.name, summary=book.summary, updated_at=book.updated_at)
+        )
+        return result.rowcount == 1

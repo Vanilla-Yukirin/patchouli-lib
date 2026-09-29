@@ -16,6 +16,7 @@ from patchouli_lib.library.schemas import (
     NewSection,
     SectionRecord,
     SeededLibraryStructure,
+    UpdateBookInput,
 )
 
 IdFactory = Callable[[], str]
@@ -27,6 +28,10 @@ class LibrarySeedConflictError(RuntimeError):
 
 
 class LibraryStructureNotFoundError(RuntimeError):
+    pass
+
+
+class LibraryStructureVersionConflictError(RuntimeError):
     pass
 
 
@@ -224,3 +229,29 @@ class LibraryStructureService:
                 updated_at=now,
             )
         )
+
+    def update_book(
+        self, library_id: str, section_id: str, book_id: str, request: UpdateBookInput
+    ) -> tuple[BookRecord, bool]:
+        current = self._repository.get_book(library_id, section_id, book_id)
+        if current is None:
+            raise LibraryStructureNotFoundError("Book was not found in this Section.")
+        if current.updated_at != request.expected_updated_at:
+            raise LibraryStructureVersionConflictError("Book changed since the form was opened.")
+        if current.name == request.name and current.summary == request.summary:
+            return current, False
+        same_name = self._repository.find_book_by_name(library_id, section_id, request.name)
+        if same_name is not None and same_name.id != book_id:
+            raise LibrarySeedConflictError("Book name already exists in this Section.")
+        updated = current.model_copy(
+            update={
+                "name": request.name,
+                "summary": request.summary,
+                "updated_at": max(self._clock(), current.updated_at + 1),
+            }
+        )
+        if not self._repository.update_book_metadata(
+            updated, expected_updated_at=request.expected_updated_at
+        ):
+            raise LibraryStructureVersionConflictError("Book changed since the form was opened.")
+        return updated, True

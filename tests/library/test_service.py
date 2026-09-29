@@ -9,11 +9,19 @@ from sqlalchemy.exc import IntegrityError
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.library.models import Book, Library, Section
 from patchouli_lib.library.repository import LibraryRepository
-from patchouli_lib.library.schemas import CreateLibraryInput, LibraryStructureSeed
+from patchouli_lib.library.schemas import (
+    CreateBookInput,
+    CreateLibraryInput,
+    CreateSectionInput,
+    LibraryStructureSeed,
+    UpdateBookInput,
+)
 from patchouli_lib.library.service import (
     LibrarySeedConflictError,
     LibrarySeedService,
+    LibraryStructureNotFoundError,
     LibraryStructureService,
+    LibraryStructureVersionConflictError,
 )
 
 SYNTHETIC_SEED = LibraryStructureSeed(
@@ -182,3 +190,91 @@ def test_seed_schema_rejects_blank_or_oversized_names() -> None:
             section_name="s" * 201,
             book_name="Example Book",
         )
+
+
+def test_book_metadata_edit_preserves_identity_and_has_monotonic_version(
+    library_engine: Engine,
+) -> None:
+    with immediate_transaction(library_engine) as connection:
+        original = (
+            LibrarySeedService(
+                LibraryRepository(connection),
+                id_factory=_id_factory("1" * 32, "2" * 32, "3" * 32),
+                clock=lambda: 1_000_000,
+            )
+            .seed(SYNTHETIC_SEED)
+            .book
+        )
+        service = LibraryStructureService(LibraryRepository(connection), clock=lambda: 1)
+        request = UpdateBookInput(
+            name="Renamed", summary="New summary", expected_updated_at=original.updated_at
+        )
+        updated, changed = service.update_book(
+            original.library_id, original.section_id, original.id, request
+        )
+        assert changed
+        assert updated.id == original.id
+        assert updated.library_id == original.library_id
+        assert updated.section_id == original.section_id
+        assert updated.created_at == original.created_at
+        assert updated.updated_at == original.updated_at + 1
+        assert (
+            LibraryRepository(connection).get_book(
+                original.library_id, original.section_id, original.id
+            )
+            == updated
+        )
+        no_change, changed = service.update_book(
+            original.library_id,
+            original.section_id,
+            original.id,
+            UpdateBookInput(
+                name=updated.name, summary=updated.summary, expected_updated_at=updated.updated_at
+            ),
+        )
+        assert not changed and no_change == updated
+        with pytest.raises(LibraryStructureVersionConflictError):
+            service.update_book(original.library_id, original.section_id, original.id, request)
+        with pytest.raises(LibraryStructureNotFoundError):
+            service.update_book(original.library_id, "f" * 32, original.id, request)
+
+
+def test_book_edit_name_unique_only_within_its_section(library_engine: Engine) -> None:
+    with immediate_transaction(library_engine) as connection:
+        seeded = LibrarySeedService(
+            LibraryRepository(connection),
+            id_factory=_id_factory("1" * 32, "2" * 32, "3" * 32),
+            clock=lambda: 1_000_000,
+        ).seed(SYNTHETIC_SEED)
+        service = LibraryStructureService(LibraryRepository(connection), clock=lambda: 2_000_000)
+        competing = service.create_book(
+            seeded.library.id, seeded.section.id, CreateBookInput(name="Competitor")
+        )
+        other_section = service.create_section(
+            seeded.library.id, CreateSectionInput(name="Other Section")
+        )
+        service.create_book(
+            seeded.library.id, other_section.id, CreateBookInput(name="Allowed Name")
+        )
+        with pytest.raises(LibrarySeedConflictError):
+            service.update_book(
+                seeded.library.id,
+                seeded.section.id,
+                seeded.book.id,
+                UpdateBookInput(
+                    name=competing.name,
+                    summary=seeded.book.summary,
+                    expected_updated_at=seeded.book.updated_at,
+                ),
+            )
+        renamed, changed = service.update_book(
+            seeded.library.id,
+            seeded.section.id,
+            seeded.book.id,
+            UpdateBookInput(
+                name="Allowed Name",
+                summary=seeded.book.summary,
+                expected_updated_at=seeded.book.updated_at,
+            ),
+        )
+        assert changed and renamed.name == "Allowed Name"

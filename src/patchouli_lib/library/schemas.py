@@ -75,6 +75,12 @@ class CreateBookInput(LibrarySchema):
     summary: BoundedText = ""
 
 
+class UpdateBookInput(LibrarySchema):
+    name: ResourceName
+    summary: BoundedText
+    expected_updated_at: TimestampMicros
+
+
 class CreatedResources(LibrarySchema):
     library: bool
     section: bool

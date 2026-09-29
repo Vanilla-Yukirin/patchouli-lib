@@ -283,6 +283,11 @@ _ZH_CN: dict[str, str] = {
     "Agent name": "Agent 名称",
     "Book name": "书籍名称",
     "Book summary": "书籍摘要",
+    "Edit Book": "编辑书籍",
+    "Save Book": "保存书籍",
+    "The Book changed since this form was opened. Reload and try again.": (
+        "打开表单后书籍已发生变化，请刷新后重试。"
+    ),
     "Breadcrumb": "当前位置",
     "Caller ID": "调用方 ID",
     "Check the submitted fields and try again.": "请检查填写内容后重试。",
@@ -1840,6 +1845,8 @@ def book_page(
     view: BookView,
     *,
     locale: AdminLocale = "en",
+    master_mode: bool = False,
+    message: str | None = None,
 ) -> str:
     library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
     section_path = f"{library_path}/sections/{escape(view.section.id, quote=True)}"
@@ -1856,6 +1863,23 @@ def book_page(
         if view.pages
         else f'<p class="card">{localize(locale, "No pages yet.")}</p>'
     )
+    if master_mode:
+        body += (
+            f'<section class="card"><h2>{localize(locale, "Edit Book")}</h2>'
+            f'<form method="post" action="{base}" autocomplete="off">'
+            f"{_csrf(escape(csrf_token, quote=True))}"
+            f'<input type="hidden" name="expected_updated_at" value="{view.book.updated_at}">'
+            f'<label for="book-name">{localize(locale, "Book name")}</label>'
+            f'<input id="book-name" name="name" type="text" maxlength="200" '
+            f'value="{escape(view.book.name, quote=True)}" required>'
+            f'<label for="book-summary">{localize(locale, "Book summary")}</label>'
+            f'<textarea id="book-summary" name="summary" maxlength="4000" rows="3">'
+            f"{escape(view.book.summary)}</textarea>"
+            f'<button type="submit">{localize(locale, "Save Book")}</button>'
+            "</form></section>"
+        )
+    if message is not None:
+        body = _notice(localize(locale, message), error=True) + body
     return _browser_document(
         csrf_token,
         locale,

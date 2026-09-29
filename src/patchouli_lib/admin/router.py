@@ -81,10 +81,16 @@ from patchouli_lib.content.service import (
 )
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.idempotency.service import IdempotencyConflictError
-from patchouli_lib.library.schemas import CreateBookInput, CreateLibraryInput, CreateSectionInput
+from patchouli_lib.library.schemas import (
+    CreateBookInput,
+    CreateLibraryInput,
+    CreateSectionInput,
+    UpdateBookInput,
+)
 from patchouli_lib.library.service import (
     LibrarySeedConflictError,
     LibraryStructureNotFoundError,
+    LibraryStructureVersionConflictError,
 )
 from patchouli_lib.operator.service import (
     BootstrapAlreadyCompletedError,
@@ -105,6 +111,9 @@ _TAG_FLASH_COOKIE: Final[str] = "patchouli_admin_tag_result"
 _LOCALE_COOKIE_MAX_AGE: Final[int] = 31_536_000
 _TAG_FLASH_MAX_AGE: Final[int] = 60
 _MAX_FORM_BYTES: Final[int] = 16_384
+# 4,000 four-byte Unicode characters and a 200-character name can require
+# over 50 KiB once percent-encoded; this exception is only for Book editing.
+_MAX_BOOK_EDIT_FORM_BYTES: Final[int] = 65_536
 _MAX_FORM_FIELDS: Final[int] = 32
 _MAX_AGENT_PROVISION_FORM_FIELDS: Final[int] = 256
 _RESTORE_STALE_MESSAGE: Final[str] = (
@@ -1347,9 +1356,84 @@ def create_admin_router(
     def book_detail(request: Request, library_id: str, section_id: str, book_id: str) -> Response:
         def render(csrf: str, locale: AdminLocale) -> str | None:
             view = read_model.get_book(library_id, section_id, book_id)
-            return None if view is None else book_page(csrf, view, locale=locale)
+            return (
+                None
+                if view is None
+                else book_page(
+                    csrf,
+                    view,
+                    locale=locale,
+                    master_mode=isinstance(current_session(request), MasterAdminSession),
+                )
+            )
 
         return protected_page(request, render)
+
+    @router.post("/libraries/{library_id}/sections/{section_id}/books/{book_id}")
+    async def update_book(
+        request: Request, library_id: str, section_id: str, book_id: str
+    ) -> Response:
+        locale = locale_for(request)
+        if not _same_origin_submission(request):
+            return forbidden(request)
+        session = current_session(request)
+        if session is None:
+            return html(
+                login_page(locale=locale, message="Sign in again."), locale=locale, status_code=401
+            )
+        if not isinstance(session, MasterAdminSession):
+            return forbidden(request, "A master session is required.")
+        try:
+            values = await _read_form(
+                request,
+                allowed_fields=frozenset(UpdateBookInput.model_fields) | {"csrf_token"},
+                max_bytes=_MAX_BOOK_EDIT_FORM_BYTES,
+            )
+            _require_csrf(values, session)
+            submitted = UpdateBookInput.model_validate(values)
+            await run_in_threadpool(
+                service.update_book_as_master,
+                library_id,
+                section_id,
+                book_id,
+                submitted,
+                master_session=session,
+            )
+        except _FormError as exc:
+            status, message = exc.status_code, exc.safe_message
+        except (ValidationError, ValueError):
+            status, message = 422, "Check the submitted fields and try again."
+        except AuthenticationError:
+            status, message = 401, "Sign in again."
+        except LibraryStructureNotFoundError:
+            status, message = 404, "The requested local resource was not found."
+        except LibraryStructureVersionConflictError:
+            status, message = (
+                409,
+                "The Book changed since this form was opened. Reload and try again.",
+            )
+        except (LibrarySeedConflictError, IntegrityError):
+            status, message = 409, "The action conflicts with current local state."
+        except Exception:
+            status, message = 500, "The action could not be completed."
+        else:
+            return redirect(f"/admin/libraries/{library_id}/sections/{section_id}/books/{book_id}")
+        view = read_model.get_book(library_id, section_id, book_id)
+        if status == 401:
+            response = html(
+                login_page(locale=locale, message=message), locale=locale, status_code=status
+            )
+            _clear_cookie(response, secure=secure_cookie(request))
+            return response
+        return html(
+            browser_not_found_page(session.csrf_token, locale=locale)
+            if view is None
+            else book_page(
+                session.csrf_token, view, locale=locale, master_mode=True, message=message
+            ),
+            locale=locale,
+            status_code=404 if view is None else status,
+        )
 
     @router.get("/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages/{page_id}")
     def page_detail(
@@ -1690,6 +1774,7 @@ async def _read_form(
     allowed_fields: frozenset[str],
     repeatable_fields: frozenset[str] = frozenset(),
     max_fields: int = _MAX_FORM_FIELDS,
+    max_bytes: int = _MAX_FORM_BYTES,
 ) -> FormValues:
     content_type = request.headers.get("content-type", "").partition(";")[0].strip().casefold()
     if content_type != "application/x-www-form-urlencoded":
@@ -1700,11 +1785,11 @@ async def _read_form(
             content_length = int(raw_length)
         except ValueError:
             raise _FormError(400, "The submitted form is invalid.") from None
-        if content_length > _MAX_FORM_BYTES:
+        if content_length > max_bytes:
             raise _FormError(413, "The submitted form is too large.")
     body = bytearray()
     async for chunk in request.stream():
-        _extend_form_body(body, chunk)
+        _extend_form_body(body, chunk, max_bytes=max_bytes)
     try:
         decoded = body.decode("utf-8")
         pairs = parse_qsl(
@@ -1732,8 +1817,8 @@ async def _read_form(
     return values
 
 
-def _extend_form_body(body: bytearray, chunk: bytes) -> None:
-    if len(body) + len(chunk) > _MAX_FORM_BYTES:
+def _extend_form_body(body: bytearray, chunk: bytes, *, max_bytes: int = _MAX_FORM_BYTES) -> None:
+    if len(body) + len(chunk) > max_bytes:
         raise _FormError(413, "The submitted form is too large.")
     body.extend(chunk)
 
