@@ -190,6 +190,11 @@ def test_application_registers_exact_agent_access_routes(tmp_path: Path) -> None
             ),
             (
                 "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}"
+                "/revisions",
+                "GET",
+            ),
+            (
+                "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}"
                 "/revisions/{revision_id}/files",
                 "GET",
             ),
