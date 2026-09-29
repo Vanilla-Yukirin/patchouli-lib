@@ -6,6 +6,12 @@ from typing import Literal
 
 from sqlalchemy import Connection, and_, func, insert, or_, select, update
 
+from patchouli_lib.content.file_manifest import (
+    MAX_FILES_PER_PAGE,
+    MAX_PAGE_BYTES,
+    FileManifest,
+    build_file_manifest,
+)
 from patchouli_lib.content.models import (
     Page,
     PageIdCollisionCounter,
@@ -16,6 +22,10 @@ from patchouli_lib.content.models import (
     PageOccurrenceCorrectionGuard,
     PageSource,
     Revision,
+    RevisionFile,
+    RevisionFileSeal,
+    RevisionFileSealGuard,
+    RevisionFileSet,
 )
 from patchouli_lib.content.schemas import (
     NewPage,
@@ -349,6 +359,209 @@ class ContentRepository:
         values = revision.model_dump()
         self._connection.execute(insert(Revision), values)
         return RevisionRecord.model_validate(values)
+
+    def get_current_file_manifest(self, page: PageRecord) -> FileManifest:
+        """Read and verify the exact sealed current Revision, including legacy data."""
+
+        identity = (
+            Revision.library_id == page.library_id,
+            Revision.page_uid == page.page_uid,
+            Revision.revision_id == page.current_revision_id,
+            Revision.revision_number == page.current_revision_number,
+        )
+        row = self._connection.execute(
+            select(
+                Revision.content_md,
+                Revision.content_size_bytes,
+                Revision.content_sha256,
+                RevisionFileSet.storage_format,
+                RevisionFileSet.file_count,
+                RevisionFileSet.total_size_bytes,
+                RevisionFileSet.snapshot_sha256,
+            )
+            .join(
+                RevisionFileSet,
+                (RevisionFileSet.library_id == Revision.library_id)
+                & (RevisionFileSet.page_uid == Revision.page_uid)
+                & (RevisionFileSet.revision_id == Revision.revision_id)
+                & (RevisionFileSet.revision_number == Revision.revision_number),
+            )
+            .where(*identity)
+        ).one_or_none()
+        if row is None:
+            raise RuntimeError("Current Revision file manifest is missing.")
+        seal = self._connection.execute(
+            select(RevisionFileSeal.revision_id).where(
+                RevisionFileSeal.library_id == page.library_id,
+                RevisionFileSeal.page_uid == page.page_uid,
+                RevisionFileSeal.revision_id == page.current_revision_id,
+                RevisionFileSeal.revision_number == page.current_revision_number,
+            )
+        ).scalar_one_or_none()
+        guard = self._connection.execute(
+            select(RevisionFileSealGuard.revision_id).where(
+                RevisionFileSealGuard.library_id == page.library_id,
+                RevisionFileSealGuard.page_uid == page.page_uid,
+                RevisionFileSealGuard.revision_id == page.current_revision_id,
+                RevisionFileSealGuard.revision_number == page.current_revision_number,
+            )
+        ).scalar_one_or_none()
+        if seal is None or guard is None:
+            raise RuntimeError("Current Revision file seal is missing.")
+        rows = self._connection.execute(
+            select(
+                RevisionFile.filename,
+                RevisionFile.content_bytes,
+                RevisionFile.size_bytes,
+                RevisionFile.content_sha256,
+            )
+            .where(
+                RevisionFile.library_id == page.library_id,
+                RevisionFile.page_uid == page.page_uid,
+                RevisionFile.revision_id == page.current_revision_id,
+                RevisionFile.revision_number == page.current_revision_number,
+            )
+            .order_by(RevisionFile.filename)
+            .limit(MAX_FILES_PER_PAGE + 1)
+        )
+        stored_files: list[tuple[str, bytes, int, bytes]] = []
+        observed_size = 0
+        for filename, content, size, digest in rows:
+            if (
+                len(stored_files) >= MAX_FILES_PER_PAGE
+                or type(content) is not bytes
+                or observed_size + len(content) > MAX_PAGE_BYTES
+            ):
+                raise RuntimeError("Current Revision file set exceeds its bounds.")
+            observed_size += len(content)
+            stored_files.append((filename, content, size, digest))
+        try:
+            manifest = build_file_manifest(
+                (filename, content) for filename, content, _size, _digest in stored_files
+            )
+        except (TypeError, ValueError, OverflowError, UnicodeError) as exc:
+            raise RuntimeError("Current Revision file bytes are invalid.") from exc
+        if (
+            len(manifest.files) != row.file_count
+            or manifest.total_size_bytes != row.total_size_bytes
+            or any(
+                (entry.name, entry.content_size_bytes, entry.content_sha256)
+                != (filename, size, digest)
+                for entry, (filename, _content, size, digest) in zip(
+                    manifest.files, stored_files, strict=True
+                )
+            )
+        ):
+            raise RuntimeError("Current Revision file metadata is inconsistent.")
+        if row.storage_format == "legacy_markdown":
+            if (
+                len(manifest.files) != 1
+                or manifest.files[0].name != "content.md"
+                or manifest.files[0].content != row.content_md
+                or manifest.files[0].content_size_bytes != row.content_size_bytes
+                or manifest.files[0].content_sha256 != row.content_sha256
+                or row.snapshot_sha256 is not None
+            ):
+                raise RuntimeError("Current legacy Revision mirror is inconsistent.")
+        elif row.storage_format == "file_set_v1":
+            if (
+                row.content_md is not None
+                or row.content_size_bytes is not None
+                or row.content_sha256 is not None
+                or row.snapshot_sha256 != manifest.snapshot_sha256
+            ):
+                raise RuntimeError("Current Revision file snapshot is inconsistent.")
+        else:
+            raise RuntimeError("Current Revision file format is unsupported.")
+        return manifest
+
+    def add_file_set_revision(
+        self,
+        page: PageRecord,
+        *,
+        revision_id: str,
+        created_at: int,
+        manifest: FileManifest,
+    ) -> None:
+        """Append one new-format snapshot; caller must advance Page in the same transaction."""
+
+        number = page.current_revision_number + 1
+        key = {
+            "library_id": page.library_id,
+            "page_uid": page.page_uid,
+            "revision_id": revision_id,
+            "revision_number": number,
+        }
+        self._connection.execute(
+            insert(Revision),
+            key
+            | {
+                "content_md": None,
+                "content_size_bytes": None,
+                "content_sha256": None,
+                "created_at": created_at,
+            },
+        )
+        self._connection.execute(
+            insert(RevisionFileSet),
+            key
+            | {
+                "storage_format": "file_set_v1",
+                "file_count": len(manifest.files),
+                "total_size_bytes": manifest.total_size_bytes,
+                "snapshot_sha256": manifest.snapshot_sha256,
+            },
+        )
+        self._connection.execute(
+            insert(RevisionFile),
+            [
+                key
+                | {
+                    "filename": entry.name,
+                    "content_bytes": entry.content,
+                    "size_bytes": entry.content_size_bytes,
+                    "content_sha256": entry.content_sha256,
+                }
+                for entry in manifest.files
+            ],
+        )
+        self._connection.execute(insert(RevisionFileSeal), key)
+
+    def advance_file_set_current_revision(
+        self,
+        page: PageRecord,
+        *,
+        revision_id: str,
+        updated_at: int,
+    ) -> PageRecord | None:
+        """Advance an unchanged Page using its exact prior identity and clock."""
+
+        statement = (
+            update(Page)
+            .where(
+                Page.library_id == page.library_id,
+                Page.page_uid == page.page_uid,
+                Page.current_revision_id == page.current_revision_id,
+                Page.current_revision_number == page.current_revision_number,
+                Page.occurred_at == page.occurred_at,
+                Page.updated_at == page.updated_at,
+                Page.deleted_at.is_(None),
+            )
+            .values(
+                current_revision_id=revision_id,
+                current_revision_number=page.current_revision_number + 1,
+                updated_at=updated_at,
+            )
+        )
+        if self._connection.execute(statement).rowcount != 1:
+            return None
+        return page.model_copy(
+            update={
+                "current_revision_id": revision_id,
+                "current_revision_number": page.current_revision_number + 1,
+                "updated_at": updated_at,
+            }
+        )
 
     def add_identifier(self, identifier: NewPageIdentifier) -> PageIdentifierRecord:
         values = identifier.model_dump()
