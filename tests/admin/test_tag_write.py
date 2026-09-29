@@ -1,4 +1,4 @@
-"""Browser Tag writes require both the admin session and a live Operator token."""
+"""Browser Tag writes use a master session or a pre-master Operator token."""
 
 from __future__ import annotations
 
@@ -11,13 +11,17 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import Engine, func, select, update
 
-from patchouli_lib.admin.contracts import BootstrapInput, ProvisionAgentInput
+from patchouli_lib.admin.contracts import BootstrapInput, MasterTagFormInput, ProvisionAgentInput
+from patchouli_lib.admin.master_audit import MasterAuditRepository
+from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.passwords import hash_password
 from patchouli_lib.admin.service import AdminActionService
+from patchouli_lib.admin.session import MasterAdminSession
 from patchouli_lib.app import create_app
-from patchouli_lib.auth.models import AuditEvent, Caller, Credential
+from patchouli_lib.auth.models import AuditEvent, Caller, Credential, MasterAuditEvent
 from patchouli_lib.auth.schemas import SectionAction
 from patchouli_lib.config import Settings
+from patchouli_lib.content.models import Page
 from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import MarkdownContent, NewPage, NewPageIdentifier, NewRevision
 from patchouli_lib.database import immediate_transaction
@@ -30,6 +34,7 @@ from patchouli_lib.tags.service import TagService
 _ORIGIN = "https://admin.example.invalid"
 _PASSWORD = "synthetic browser password"
 _PASSWORD_HASH = hash_password(_PASSWORD, salt_factory=lambda size: b"t" * size, iterations=300_000)
+_MASTER_TOKEN = "synthetic master token for isolated Tag form tests"
 
 
 @pytest.fixture
@@ -56,6 +61,22 @@ def _login(client: TestClient) -> str:
         == 303
     )
     response = client.get("/admin/libraries")
+    match = re.search(r'name="csrf_token" value="([^"]+)"', response.text)
+    assert match is not None
+    return match.group(1)
+
+
+def _login_master(client: TestClient, engine: Engine) -> str:
+    with immediate_transaction(engine) as connection:
+        MasterTokenRepository(connection).initialize_from_local_cli(_MASTER_TOKEN, now=1_000)
+    assert (
+        client.post(
+            "/admin/login", data={"password": _MASTER_TOKEN}, headers={"Origin": _ORIGIN}
+        ).status_code
+        == 303
+    )
+    response = client.get("/admin/libraries")
+    assert response.status_code == 200
     match = re.search(r'name="csrf_token" value="([^"]+)"', response.text)
     assert match is not None
     return match.group(1)
@@ -140,7 +161,9 @@ def _post(client: TestClient, path: str, csrf: str, **fields: str):  # type: ign
     return client.post(path, data={"csrf_token": csrf, **fields}, headers={"Origin": _ORIGIN})
 
 
-def _count(engine: Engine, table: type[Tag] | type[PageTag] | type[AuditEvent]) -> int:
+def _count(
+    engine: Engine, table: type[Tag] | type[PageTag] | type[AuditEvent] | type[MasterAuditEvent]
+) -> int:
     with engine.connect() as connection:
         return connection.scalar(select(func.count()).select_from(table)) or 0
 
@@ -459,3 +482,213 @@ def test_tag_write_rolls_back_when_audit_fails(
     assert response.status_code == 500
     assert operator not in response.text
     assert _count(engine, Tag) == 0
+
+
+def test_master_tag_creation_needs_no_operator_token_and_is_audited(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    library, _, _, operator = _seed(engine, suffix="One")
+    other_library, _, _, _ = _seed(engine, suffix="Two")
+    csrf = _login_master(client, engine)
+    base = f"/admin/libraries/{library}/tags"
+    directory = client.get(base + "?lang=zh-CN")
+    assert directory.status_code == 200
+    assert "当前主 Token 会话可以更改标签" in directory.text
+    assert 'name="operator_token"' not in directory.text
+    rejected = _post(client, base, csrf, name="Private", operator_token=operator)
+    assert rejected.status_code == 422
+    assert operator not in rejected.text
+    assert _count(engine, Tag) == 0
+
+    created = _post(client, base, csrf, name="Shared")
+    assert created.status_code == 303
+    tag_id = created.headers["location"].rsplit("/", 1)[1]
+    duplicate = _post(client, base, csrf, name="Shared")
+    assert duplicate.status_code == 303
+    assert duplicate.headers["location"] == created.headers["location"]
+    second = _post(client, f"/admin/libraries/{other_library}/tags", csrf, name="Shared")
+    assert second.status_code == 303
+    second_tag_id = second.headers["location"].rsplit("/", 1)[1]
+    assert second_tag_id != tag_id
+    assert _count(engine, Tag) == 2
+    with engine.connect() as connection:
+        legacy_tag_events = connection.scalars(
+            select(AuditEvent.action).where(AuditEvent.action.like("tag.%"))
+        ).all()
+    assert legacy_tag_events == []
+    with engine.connect() as connection:
+        events = connection.execute(
+            select(
+                MasterAuditEvent.action, MasterAuditEvent.target_type, MasterAuditEvent.target_id
+            )
+        ).all()
+    assert events.count(("tag.create", "tag", f"{library}:{tag_id}")) == 1
+    assert events.count(("tag.create", "tag", f"{other_library}:{second_tag_id}")) == 1
+    home = client.get("/admin?lang=zh-CN")
+    assert home.status_code == 200
+    assert home.text.count("创建了标签") == 2
+    assert home.text.count("管理员 创建了标签") == 2
+    assert f"/admin/libraries/{library}/tags/{tag_id}" in home.text
+    assert f"/admin/libraries/{other_library}/tags/{second_tag_id}" in home.text
+
+
+def test_master_page_tag_scopes_page_and_tag_and_audits_only_changes(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    library, section, book, _ = _seed(engine, suffix="One")
+    other_library, other_section, other_book, _ = _seed(engine, suffix="Two")
+    page_id = _seed_page(engine, library, section, book)
+    other_page = _seed_page(engine, other_library, other_section, other_book, title="Other Page")
+    csrf = _login_master(client, engine)
+    created = _post(client, f"/admin/libraries/{library}/tags", csrf, name="Important")
+    assert created.status_code == 303
+    tag_id = created.headers["location"].rsplit("/", 1)[1]
+    other_created = _post(client, f"/admin/libraries/{other_library}/tags", csrf, name="Other")
+    other_tag_id = other_created.headers["location"].rsplit("/", 1)[1]
+    page_base = f"/admin/libraries/{library}/sections/{section}/books/{book}/pages/{page_id}"
+    page = client.get(page_base + "?lang=zh-CN")
+    assert page.status_code == 200
+    assert 'name="operator_token"' not in page.text
+    assert "当前主 Token 会话可以更改标签" in page.text
+
+    for path, candidate_tag in (
+        (page_base, other_tag_id),
+        (
+            f"/admin/libraries/{library}/sections/{section}/books/{other_book}/pages/{page_id}",
+            tag_id,
+        ),
+        (f"/admin/libraries/{library}/sections/{section}/books/{book}/pages/{other_page}", tag_id),
+    ):
+        response = _post(client, path + "/tags", csrf, tag_id=candidate_tag, operation="attach")
+        assert response.status_code == 404
+    assert _count(engine, PageTag) == 0
+
+    path = page_base + "/tags"
+    attached = _post(client, path, csrf, tag_id=tag_id, operation="attach")
+    assert attached.status_code == 303
+    repeated = _post(client, path, csrf, tag_id=tag_id, operation="attach")
+    assert repeated.status_code == 303
+    removed = _post(client, path, csrf, tag_id=tag_id, operation="detach")
+    assert removed.status_code == 303
+    repeated_remove = _post(client, path, csrf, tag_id=tag_id, operation="detach")
+    assert repeated_remove.status_code == 303
+    assert _count(engine, PageTag) == 0
+    with engine.connect() as connection:
+        page_uid = connection.scalar(
+            select(Page.page_uid).where(Page.library_id == library, Page.page_id == page_id)
+        )
+        events = connection.execute(
+            select(
+                MasterAuditEvent.action, MasterAuditEvent.target_type, MasterAuditEvent.target_id
+            )
+        ).all()
+    assert page_uid is not None
+    target = f"{library}:{page_uid.hex()}:{tag_id}"
+    assert events.count(("tag.page.attach", "page_tag", target)) == 1
+    assert events.count(("tag.page.detach", "page_tag", target)) == 1
+    with engine.connect() as connection:
+        legacy_tag_events = connection.scalars(
+            select(AuditEvent.action).where(AuditEvent.action.like("tag.%"))
+        ).all()
+    assert legacy_tag_events == []
+    home = client.get("/admin?lang=zh-CN")
+    assert home.status_code == 200
+    assert home.text.count("关联了标签") == 1
+    assert home.text.count("移除了标签") == 1
+    assert page_base in home.text
+    assert f"/admin/libraries/{library}/tags/{tag_id}" in home.text
+
+
+def test_master_tag_forms_reject_origin_csrf_and_stale_session(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    library, _, _, _ = _seed(engine, suffix="One")
+    csrf = _login_master(client, engine)
+    path = f"/admin/libraries/{library}/tags"
+    assert client.post(path, data={"csrf_token": csrf, "name": "No"}).status_code == 403
+    assert _post(client, path, "wrong", name="No").status_code == 403
+    assert _count(engine, Tag) == 0
+    with immediate_transaction(engine) as connection:
+        state = MasterTokenRepository(connection).rotate(
+            _MASTER_TOKEN, "replacement master token for Tag form tests", now=2_000
+        )
+    assert state is not None
+    stale = _post(client, path, csrf, name="No")
+    assert stale.status_code == 401
+    assert "No tags yet." not in stale.text
+    assert _count(engine, Tag) == 0
+
+
+def test_legacy_tag_write_stops_after_master_setup(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    library, _, _, operator = _seed(engine, suffix="One")
+    csrf = _login(client)
+    with immediate_transaction(engine) as connection:
+        MasterTokenRepository(connection).initialize_from_local_cli(_MASTER_TOKEN, now=1_000)
+    path = f"/admin/libraries/{library}/tags"
+    response = _post(client, path, csrf, name="No", operator_token=operator)
+    assert response.status_code == 401
+    assert _count(engine, Tag) == 0
+
+
+def test_master_rotation_during_tag_submit_does_not_render_private_content(
+    browser: tuple[TestClient, Engine], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, engine = browser
+    library, _, _, _ = _seed(engine, suffix="One")
+    csrf = _login_master(client, engine)
+    path = f"/admin/libraries/{library}/tags"
+    assert _post(client, path, csrf, name="Existing private tag").status_code == 303
+    original = AdminActionService.create_tag_as_master
+
+    def rotate_before_write(
+        service: AdminActionService,
+        target_library: str,
+        request: MasterTagFormInput,
+        *,
+        master_session: MasterAdminSession,
+    ) -> tuple[str, bool]:
+        with immediate_transaction(engine) as connection:
+            state = MasterTokenRepository(connection).rotate(
+                _MASTER_TOKEN, "replacement master token for Tag form tests", now=2_000
+            )
+        assert state is not None
+        return original(service, target_library, request, master_session=master_session)
+
+    monkeypatch.setattr(AdminActionService, "create_tag_as_master", rotate_before_write)
+    response = _post(client, path, csrf, name="Must not appear")
+    assert response.status_code == 401
+    assert "Existing private tag" not in response.text
+    assert "Must not appear" not in response.text
+    assert "Sign in" in response.text
+    assert _count(engine, Tag) == 1
+
+
+def test_master_tag_write_rolls_back_when_audit_fails(
+    browser: tuple[TestClient, Engine], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, engine = browser
+    library, section, book, _ = _seed(engine, suffix="One")
+    page_id = _seed_page(engine, library, section, book)
+    csrf = _login_master(client, engine)
+    created = _post(client, f"/admin/libraries/{library}/tags", csrf, name="Audited")
+    assert created.status_code == 303
+    tag_id = created.headers["location"].rsplit("/", 1)[1]
+
+    def reject_audit(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("synthetic audit failure")
+
+    monkeypatch.setattr(MasterAuditRepository, "add_success", reject_audit)
+    new_tag = _post(client, f"/admin/libraries/{library}/tags", csrf, name="Must rollback")
+    assert new_tag.status_code == 500
+    assert _count(engine, Tag) == 1
+    page_path = f"/admin/libraries/{library}/sections/{section}/books/{book}/pages/{page_id}"
+    attached = _post(client, page_path + "/tags", csrf, tag_id=tag_id, operation="attach")
+    assert attached.status_code == 500
+    assert _count(engine, PageTag) == 0
+    assert _count(engine, MasterAuditEvent) == 1

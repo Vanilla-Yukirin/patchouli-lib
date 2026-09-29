@@ -30,6 +30,7 @@ _TAG_TOKEN_HELP = (
     "Enter this Library's Operator token for each Tag change. "
     "It is not saved in the browser session."
 )
+_MASTER_TAG_HELP = "Your master session can change Tags without another token."
 _RESTORE_TOKEN_HELP = (
     "Enter this Library's Operator token for this restore. It is not saved in the browser session."
 )
@@ -335,6 +336,7 @@ _ZH_CN: dict[str, str] = {
     "Remove tag": "移除标签",
     "Create a Tag in this Library first.": "请先在本知识库创建标签。",
     _TAG_TOKEN_HELP: "每次更改标签都需输入本知识库的管理员令牌；令牌不会保存在管理会话中。",
+    _MASTER_TAG_HELP: "当前主 Token 会话可以更改标签，无需再次填写令牌。",
     "Tag created.": "标签已创建。",
     "Tag already exists; nothing changed.": "标签已存在，没有改动。",
     "Tag attached.": "标签已关联。",
@@ -344,6 +346,7 @@ _ZH_CN: dict[str, str] = {
     "The requested Tag or page was not found.": "未找到指定标签或页面。",
     "Created": "创建时间",
     "Content activity": "内容近况",
+    "Administrator": "管理员",
     "Created a page": "创建了页面",
     "Revised a page": "更新了页面",
     "Corrected a page's occurrence time": "更正了页面的发生时间",
@@ -756,11 +759,14 @@ def _content_activity_timeline(
 ) -> str:
     entries: list[str] = []
     for item in activities:
-        actor_path = (
-            f"/admin/libraries/{escape(item.actor_home_library_id, quote=True)}/callers/"
-            f"{escape(item.actor_id, quote=True)}"
-        )
-        actor = f'<a href="{actor_path}">{escape(item.actor_name)}</a>'
+        if item.actor_home_library_id is None or item.actor_id is None:
+            actor = escape(localize(locale, item.actor_name))
+        else:
+            actor_path = (
+                f"/admin/libraries/{escape(item.actor_home_library_id, quote=True)}/callers/"
+                f"{escape(item.actor_id, quote=True)}"
+            )
+            actor = f'<a href="{actor_path}">{escape(item.actor_name)}</a>'
         tag = escape(item.tag_name or localize(locale, "Tag no longer available"))
         if item.tag_id is not None:
             tag_path = (
@@ -1499,6 +1505,7 @@ def tag_directory_page(
     locale: AdminLocale = "en",
     message: str | None = None,
     error: bool = False,
+    master_mode: bool = False,
 ) -> str:
     library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
     base = f"{library_path}/tags"
@@ -1508,6 +1515,7 @@ def tag_directory_page(
         f"{localize(locale, 'Created')}: {_time(item.created_at)}</p></li>"
         for item in view.tags
     )
+    tag_help = _MASTER_TAG_HELP if master_mode else _TAG_TOKEN_HELP
     body = (
         f'<ul class="item-list">{cards}</ul>'
         if view.tags
@@ -1519,11 +1527,11 @@ def tag_directory_page(
         + '<section class="card"><h2>'
         + localize(locale, "Create Tag")
         + "</h2>"
-        + f'<p class="section-help">{localize(locale, _TAG_TOKEN_HELP)}</p>'
+        + f'<p class="section-help">{localize(locale, tag_help)}</p>'
         + f'<form method="post" action="{base}" autocomplete="off">'
         + _csrf(escape(csrf_token, quote=True))
         + _text("name", "Tag name", locale, max_length=100)
-        + _secret("operator_token", "Current operator credential", locale)
+        + ("" if master_mode else _secret("operator_token", "Current operator credential", locale))
         + f'<button type="submit">{localize(locale, "Create Tag")}</button>'
         + "</form></section>"
     )
@@ -1801,6 +1809,7 @@ def page_preview_page(
     locale: AdminLocale = "en",
     message: str | None = None,
     error: bool = False,
+    master_mode: bool = False,
 ) -> str:
     library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
     section_path = f"{library_path}/sections/{escape(view.section.id, quote=True)}"
@@ -1859,16 +1868,21 @@ def page_preview_page(
         for item in view.tag_choices
     )
     if current and view.tag_choices:
+        tag_help = _MASTER_TAG_HELP if master_mode else _TAG_TOKEN_HELP
         body += (
             '<section class="card"><h2>'
             + localize(locale, "Manage page tags")
             + "</h2>"
-            + f'<p class="section-help">{localize(locale, _TAG_TOKEN_HELP)}</p>'
+            + f'<p class="section-help">{localize(locale, tag_help)}</p>'
             + f'<form method="post" action="{base}/tags" autocomplete="off">'
             + _csrf(escape(csrf_token, quote=True))
             + f'<label for="tag_id">{localize(locale, "Choose a tag")}</label>'
             + f'<select id="tag_id" name="tag_id" required>{tag_choices}</select>'
-            + _secret("operator_token", "Current operator credential", locale)
+            + (
+                ""
+                if master_mode
+                else _secret("operator_token", "Current operator credential", locale)
+            )
             + '<button type="submit" name="operation" value="attach">'
             + f"{localize(locale, 'Attach tag')}</button> "
             + '<button type="submit" name="operation" value="detach">'

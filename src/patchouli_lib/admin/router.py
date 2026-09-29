@@ -21,9 +21,11 @@ from starlette.concurrency import run_in_threadpool
 
 from patchouli_lib.admin.contracts import (
     BootstrapInput,
+    MasterPageTagFormInput,
     MasterProvisionAgentInput,
     MasterRotateAgentCredentialInput,
     MasterSetAgentLibraryGrantsInput,
+    MasterTagFormInput,
     PageTagFormInput,
     ProvisionAgentInput,
     RecoverOperatorInput,
@@ -449,9 +451,10 @@ def create_admin_router(
     async def tag_action(
         request: Request,
         *,
-        allowed_fields: frozenset[str],
-        action: Callable[[FormValues], tuple[str, str]],
-        render: Callable[[str, AdminLocale, str | None, bool], str | None],
+        legacy_fields: frozenset[str],
+        master_fields: frozenset[str],
+        action: Callable[[FormValues, AdminSession], tuple[str, str]],
+        render: Callable[[str, AdminLocale, str | None, bool, AdminSession], str | None],
     ) -> Response:
         locale = locale_for(request)
         if not _same_origin_submission(request):
@@ -464,16 +467,21 @@ def create_admin_router(
                 status_code=401,
             )
         try:
-            values = await _read_form(request, allowed_fields=allowed_fields | {"csrf_token"})
+            fields = master_fields if isinstance(session, MasterAdminSession) else legacy_fields
+            values = await _read_form(request, allowed_fields=fields | {"csrf_token"})
             _require_csrf(values, session)
-            if isinstance(session, MasterAdminSession):
-                return master_write_forbidden(request, session)
-            location, result = await run_in_threadpool(action, values)
+            location, result = await run_in_threadpool(action, values, session)
         except _FormError as exc:
             status, message = exc.status_code, exc.safe_message
         except (ValidationError, ValueError, TagValidationError):
             status, message = 422, "Check the submitted fields and try again."
-        except (AuthenticationError, AuthorizationError, TagAuthorizationError):
+        except AuthenticationError:
+            status, message = (
+                (401, "Sign in again.")
+                if isinstance(session, MasterAdminSession)
+                else (403, "The operator credential was rejected.")
+            )
+        except (AuthorizationError, TagAuthorizationError):
             status, message = 403, "The operator credential was rejected."
         except TagNotFoundError:
             status, message = 404, "The requested Tag or page was not found."
@@ -503,7 +511,15 @@ def create_admin_router(
                 samesite="strict",
             )
             return response
-        page = render(session.csrf_token, locale, message, True)
+        if current_session(request) is None:
+            login_response = html(
+                login_page(locale=locale, message="Sign in again."),
+                locale=locale,
+                status_code=401,
+            )
+            _clear_cookie(login_response, secure=secure_cookie(request))
+            return login_response
+        page = render(session.csrf_token, locale, message, True, session)
         return html(
             page if page is not None else browser_not_found_page(session.csrf_token, locale=locale),
             locale=locale,
@@ -732,30 +748,58 @@ def create_admin_router(
     def library_tags(request: Request, library_id: str) -> Response:
         def render(csrf: str, locale: AdminLocale) -> str | None:
             view = read_model.list_library_tags(library_id)
-            return None if view is None else tag_directory_page(csrf, view, locale=locale)
+            return (
+                None
+                if view is None
+                else tag_directory_page(
+                    csrf,
+                    view,
+                    locale=locale,
+                    master_mode=isinstance(current_session(request), MasterAdminSession),
+                )
+            )
 
         return protected_page(request, render)
 
     @router.post("/libraries/{library_id}/tags")
     async def create_library_tag(request: Request, library_id: str) -> Response:
-        def action(values: FormValues) -> tuple[str, str]:
-            tag_id, created = service.create_tag(library_id, TagFormInput.model_validate(values))
+        def action(values: FormValues, session: AdminSession) -> tuple[str, str]:
+            if isinstance(session, MasterAdminSession):
+                tag_id, created = service.create_tag_as_master(
+                    library_id,
+                    MasterTagFormInput.model_validate(values),
+                    master_session=session,
+                )
+            else:
+                tag_id, created = service.create_tag(
+                    library_id, TagFormInput.model_validate(values)
+                )
             return (
                 f"/admin/libraries/{library_id}/tags/{tag_id}",
                 "created" if created else "existing",
             )
 
-        def render(csrf: str, locale: AdminLocale, message: str | None, error: bool) -> str | None:
+        def render(
+            csrf: str, locale: AdminLocale, message: str | None, error: bool, session: AdminSession
+        ) -> str | None:
             view = read_model.list_library_tags(library_id)
             return (
                 None
                 if view is None
-                else tag_directory_page(csrf, view, locale=locale, message=message, error=error)
+                else tag_directory_page(
+                    csrf,
+                    view,
+                    locale=locale,
+                    message=message,
+                    error=error,
+                    master_mode=isinstance(session, MasterAdminSession),
+                )
             )
 
         return await tag_action(
             request,
-            allowed_fields=frozenset(TagFormInput.model_fields),
+            legacy_fields=frozenset(TagFormInput.model_fields),
+            master_fields=frozenset(MasterTagFormInput.model_fields),
             action=action,
             render=render,
         )
@@ -1269,6 +1313,7 @@ def create_admin_router(
                     csrf,
                     view,
                     locale=locale,
+                    master_mode=isinstance(current_session(request), MasterAdminSession),
                     message=result_message(
                         request,
                         {
@@ -1293,9 +1338,20 @@ def create_admin_router(
             f"/admin/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages/{page_id}"
         )
 
-        def action(values: FormValues) -> tuple[str, str]:
-            submitted = PageTagFormInput.model_validate(values)
-            changed = service.set_page_tag(library_id, section_id, book_id, page_id, submitted)
+        def action(values: FormValues, session: AdminSession) -> tuple[str, str]:
+            if isinstance(session, MasterAdminSession):
+                submitted = MasterPageTagFormInput.model_validate(values)
+                changed = service.set_page_tag_as_master(
+                    library_id,
+                    section_id,
+                    book_id,
+                    page_id,
+                    submitted,
+                    master_session=session,
+                )
+            else:
+                submitted = PageTagFormInput.model_validate(values)
+                changed = service.set_page_tag(library_id, section_id, book_id, page_id, submitted)
             result = (
                 ("attached" if changed else "already-attached")
                 if submitted.operation == "attach"
@@ -1303,17 +1359,27 @@ def create_admin_router(
             )
             return base, result
 
-        def render(csrf: str, locale: AdminLocale, message: str | None, error: bool) -> str | None:
+        def render(
+            csrf: str, locale: AdminLocale, message: str | None, error: bool, session: AdminSession
+        ) -> str | None:
             view = read_model.get_page(library_id, section_id, book_id, page_id)
             return (
                 None
                 if view is None
-                else page_preview_page(csrf, view, locale=locale, message=message, error=error)
+                else page_preview_page(
+                    csrf,
+                    view,
+                    locale=locale,
+                    message=message,
+                    error=error,
+                    master_mode=isinstance(session, MasterAdminSession),
+                )
             )
 
         return await tag_action(
             request,
-            allowed_fields=frozenset(PageTagFormInput.model_fields),
+            legacy_fields=frozenset(PageTagFormInput.model_fields),
+            master_fields=frozenset(MasterPageTagFormInput.model_fields),
             action=action,
             render=render,
         )
@@ -1332,7 +1398,16 @@ def create_admin_router(
     ) -> Response:
         def render(csrf: str, locale: AdminLocale) -> str | None:
             view = read_model.get_page(library_id, section_id, book_id, page_id, revision_number)
-            return None if view is None else page_preview_page(csrf, view, locale=locale)
+            return (
+                None
+                if view is None
+                else page_preview_page(
+                    csrf,
+                    view,
+                    locale=locale,
+                    master_mode=isinstance(current_session(request), MasterAdminSession),
+                )
+            )
 
         return protected_page(request, render)
 

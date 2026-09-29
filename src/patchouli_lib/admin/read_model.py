@@ -20,6 +20,7 @@ from patchouli_lib.auth.models import (
     Credential,
     CredentialLibraryGrant,
     CredentialLibraryPolicy,
+    MasterAuditEvent,
     SectionGrant,
 )
 from patchouli_lib.content.models import Page, Revision, RevisionFile
@@ -28,6 +29,10 @@ from patchouli_lib.library.models import Book, Library, Section
 from patchouli_lib.tags.models import PageTag, Tag
 
 _MAX_FILE_SET_PREVIEW_BYTES = 64 * 1024
+
+
+def _lower_hex_id(value: str) -> bool:
+    return len(value) == 32 and all(character in "0123456789abcdef" for character in value)
 
 
 @dataclass(frozen=True)
@@ -179,8 +184,8 @@ class RevisionItem:
 @dataclass(frozen=True)
 class ContentActivityItem:
     library_id: str
-    actor_home_library_id: str
-    actor_id: str
+    actor_home_library_id: str | None
+    actor_id: str | None
     actor_name: str
     action: str
     occurred_at: int
@@ -356,9 +361,12 @@ class AdminReadModel:
         if not 1 <= limit <= 50:
             raise ValueError("Activity limit must be between 1 and 50.")
         with self._engine.connect() as connection:
+            # Keep the two audit streams and their linked content in one snapshot.
+            connection.exec_driver_sql("BEGIN")
             events = (
                 connection.execute(
                     select(
+                        AuditEvent.id,
                         AuditEvent.library_id,
                         AuditEvent.actor_home_library_id,
                         AuditEvent.actor_caller_id,
@@ -398,7 +406,7 @@ class AdminReadModel:
                 .mappings()
                 .all()
             )
-            items: list[ContentActivityItem] = []
+            items: list[tuple[int, str, ContentActivityItem]] = []
             for event in events:
                 action = event["action"]
                 resource_type = event["resource_type"]
@@ -481,24 +489,113 @@ class AdminReadModel:
                     else None
                 )
                 items.append(
-                    ContentActivityItem(
-                        library_id=event["library_id"],
-                        actor_home_library_id=event["actor_home_library_id"],
-                        actor_id=event["actor_caller_id"],
-                        actor_name=event["actor_name"],
-                        action=action,
-                        occurred_at=event["occurred_at"],
-                        page_title=None if page is None else page["title"],
-                        section_id=None if page is None else page["section_id"],
-                        book_id=None if page is None else page["book_id"],
-                        page_id=None if page is None else page["page_id"],
-                        revision_number=None if page is None else revision_number,
-                        page_deleted=page is not None and page["deleted_at"] is not None,
-                        tag_id=None if tag is None else tag["id"],
-                        tag_name=None if tag is None else tag["display_name"],
+                    (
+                        event["occurred_at"],
+                        event["id"],
+                        ContentActivityItem(
+                            library_id=event["library_id"],
+                            actor_home_library_id=event["actor_home_library_id"],
+                            actor_id=event["actor_caller_id"],
+                            actor_name=event["actor_name"],
+                            action=action,
+                            occurred_at=event["occurred_at"],
+                            page_title=None if page is None else page["title"],
+                            section_id=None if page is None else page["section_id"],
+                            book_id=None if page is None else page["book_id"],
+                            page_id=None if page is None else page["page_id"],
+                            revision_number=None if page is None else revision_number,
+                            page_deleted=page is not None and page["deleted_at"] is not None,
+                            tag_id=None if tag is None else tag["id"],
+                            tag_name=None if tag is None else tag["display_name"],
+                        ),
                     )
                 )
-            return tuple(items)
+            master_events = (
+                connection.execute(
+                    select(
+                        MasterAuditEvent.id,
+                        MasterAuditEvent.action,
+                        MasterAuditEvent.target_type,
+                        MasterAuditEvent.target_id,
+                        MasterAuditEvent.occurred_at,
+                    )
+                    .where(
+                        MasterAuditEvent.action.in_(
+                            ("tag.create", "tag.page.attach", "tag.page.detach")
+                        )
+                    )
+                    .order_by(MasterAuditEvent.occurred_at.desc(), MasterAuditEvent.id.desc())
+                    .limit(limit)
+                )
+                .mappings()
+                .all()
+            )
+            for event in master_events:
+                parts = event["target_id"].split(":")
+                if event["action"] == "tag.create":
+                    if event["target_type"] != "tag" or len(parts) != 2:
+                        continue
+                    library_id, tag_id = parts
+                    page = None
+                else:
+                    if event["target_type"] != "page_tag" or len(parts) != 3:
+                        continue
+                    library_id, page_uid_hex, tag_id = parts
+                    if not all(
+                        _lower_hex_id(value) for value in (library_id, page_uid_hex, tag_id)
+                    ):
+                        continue
+                    page = (
+                        connection.execute(
+                            select(
+                                Page.section_id,
+                                Page.book_id,
+                                Page.page_id,
+                                Page.title,
+                                Page.deleted_at,
+                            ).where(
+                                Page.library_id == library_id,
+                                Page.page_uid == bytes.fromhex(page_uid_hex),
+                            )
+                        )
+                        .mappings()
+                        .one_or_none()
+                    )
+                if not _lower_hex_id(library_id) or not _lower_hex_id(tag_id):
+                    continue
+                tag = (
+                    connection.execute(
+                        select(Tag.id, Tag.display_name).where(
+                            Tag.library_id == library_id, Tag.id == tag_id
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                items.append(
+                    (
+                        event["occurred_at"],
+                        event["id"],
+                        ContentActivityItem(
+                            library_id=library_id,
+                            actor_home_library_id=None,
+                            actor_id=None,
+                            actor_name="Administrator",
+                            action=event["action"],
+                            occurred_at=event["occurred_at"],
+                            page_title=None if page is None else page["title"],
+                            section_id=None if page is None else page["section_id"],
+                            book_id=None if page is None else page["book_id"],
+                            page_id=None if page is None else page["page_id"],
+                            revision_number=None,
+                            page_deleted=page is not None and page["deleted_at"] is not None,
+                            tag_id=None if tag is None else tag["id"],
+                            tag_name=None if tag is None else tag["display_name"],
+                        ),
+                    )
+                )
+            items.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+            return tuple(item for _, _, item in items[:limit])
 
     def get_caller(self, library_id: str, caller_id: str) -> CallerView | None:
         with self._engine.connect() as connection:

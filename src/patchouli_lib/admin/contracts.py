@@ -109,8 +109,11 @@ class RevokeAgentCredentialInput(AdminActionInput):
         return value
 
 
-class TagFormInput(AdminActionInput):
+class MasterTagFormInput(AdminActionInput):
     name: Annotated[str, Field(min_length=1, max_length=100)]
+
+
+class TagFormInput(MasterTagFormInput):
     operator_token: SecretStr = Field(min_length=1, max_length=256, repr=False)
 
     @field_validator("operator_token", mode="before")
@@ -121,9 +124,12 @@ class TagFormInput(AdminActionInput):
         return value
 
 
-class PageTagFormInput(AdminActionInput):
+class MasterPageTagFormInput(AdminActionInput):
     tag_id: OpaqueId
     operation: Literal["attach", "detach"]
+
+
+class PageTagFormInput(MasterPageTagFormInput):
     operator_token: SecretStr = Field(min_length=1, max_length=256, repr=False)
 
     @field_validator("operator_token", mode="before")
@@ -169,7 +175,9 @@ __all__ = [
     "RecoverOperatorInput",
     "RevokeAgentCredentialInput",
     "TagFormInput",
+    "MasterTagFormInput",
     "PageTagFormInput",
+    "MasterPageTagFormInput",
     "RestoreArchiveFormInput",
     "MasterLibraryGrantInput",
     "MasterProvisionAgentInput",

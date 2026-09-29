@@ -11,7 +11,7 @@ from sqlalchemy import Engine, event, insert, update
 from patchouli_lib.admin.passwords import hash_password
 from patchouli_lib.admin.read_model import AdminReadModel
 from patchouli_lib.app import create_app
-from patchouli_lib.auth.models import AuditEvent, Caller, Credential, SectionGrant
+from patchouli_lib.auth.models import AuditEvent, Caller, Credential, MasterAuditEvent, SectionGrant
 from patchouli_lib.config import Settings
 from patchouli_lib.content.file_manifest import build_file_manifest
 from patchouli_lib.content.models import (
@@ -1204,6 +1204,67 @@ def test_home_shows_cross_library_file_set_activity_with_correct_links(
     assert client.get(actor_path).status_code == 200
     assert client.get(f"{page_path}/revisions/1").status_code == 200
     assert client.get(f"{page_path}/revisions/2").status_code == 200
+
+
+def test_activity_merges_master_and_legacy_events_before_limit(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    library, section, book = _seed_structure(engine)
+    page_id = _insert_page(engine, library, section, book)
+    actor_id, credential_id = _seed_activity_actor(engine, library, "a")
+    tag_id = "9" * 32
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            insert(Tag),
+            {
+                "library_id": library,
+                "id": tag_id,
+                "display_name": "Master tag",
+                "match_key": "master tag",
+                "created_at": 3_000_000,
+            },
+        )
+        connection.execute(
+            insert(AuditEvent),
+            {
+                "id": "e" * 32,
+                "library_id": library,
+                "actor_home_library_id": library,
+                "actor_caller_id": actor_id,
+                "actor_credential_id": credential_id,
+                "action": "content.archive.create",
+                "resource_type": "page",
+                "resource_id": page_id,
+                "outcome": "succeeded",
+                "request_id": "synthetic-legacy-request",
+                "occurred_at": 3_000_000,
+            },
+        )
+        connection.execute(
+            insert(MasterAuditEvent),
+            {
+                "id": "f" * 32,
+                "identity_id": "b" * 32,
+                "session_generation": 1,
+                "session_fingerprint": b"s" * 32,
+                "action": "tag.create",
+                "target_type": "tag",
+                "target_id": f"{library}:{tag_id}",
+                "occurred_at": 3_000_000,
+            },
+        )
+
+    model = AdminReadModel(engine)
+    assert [item.action for item in model.recent_content_activity(limit=1)] == ["tag.create"]
+    assert [item.action for item in model.recent_content_activity(limit=2)] == [
+        "tag.create",
+        "content.archive.create",
+    ]
+    _login(client)
+    home = client.get("/admin?lang=zh-CN")
+    assert home.status_code == 200
+    assert home.text.index("创建了标签") < home.text.index("创建了页面")
 
 
 def test_deleted_activity_links_to_trash_without_cross_library_preview(

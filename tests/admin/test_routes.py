@@ -426,15 +426,28 @@ def test_initialized_master_token_login_retires_legacy_web_login_but_not_operato
     assert _post(admin_web.client, "/admin/logout", data={"csrf_token": "wrong"}).status_code == 403
     for path, fields in (
         ("/admin/bootstrap", _bootstrap_data(csrf)),
-        (
-            f"/admin/libraries/{library_id}/tags",
-            {"csrf_token": csrf, "name": "Synthetic Tag", "operator_token": operator_token},
-        ),
         ("/admin/libraries/x/sections/y/trash/z/restore", {"csrf_token": csrf}),
     ):
         rejected = _post(admin_web.client, path, data=fields)
         assert rejected.status_code == 403
         assert "not available to Master Token sessions yet" in rejected.text
+    tag_path = f"/admin/libraries/{library_id}/tags"
+    assert (
+        _post(
+            admin_web.client,
+            tag_path,
+            data={"csrf_token": csrf, "name": "Synthetic Tag", "operator_token": operator_token},
+        ).status_code
+        == 422
+    )
+    assert (
+        _post(
+            admin_web.client,
+            tag_path,
+            data={"csrf_token": csrf, "name": "Synthetic Tag"},
+        ).status_code
+        == 303
+    )
     assert _post(admin_web.client, "/admin/logout", data={"csrf_token": csrf}).status_code == 303
     assert admin_web.client.get("/admin").status_code == 303
 

@@ -9,9 +9,11 @@ from sqlalchemy import Connection, Engine, delete, insert, select
 
 from patchouli_lib.admin.contracts import (
     BootstrapInput,
+    MasterPageTagFormInput,
     MasterProvisionAgentInput,
     MasterRotateAgentCredentialInput,
     MasterSetAgentLibraryGrantsInput,
+    MasterTagFormInput,
     PageTagFormInput,
     ProvisionAgentInput,
     RecoverOperatorInput,
@@ -74,7 +76,8 @@ from patchouli_lib.operator.service import (
     PolicyConflictError,
     ResourceNotFoundError,
 )
-from patchouli_lib.tags.service import TagNotFoundError, TagService
+from patchouli_lib.tags.repository import TagRepository, normalize_tag_name
+from patchouli_lib.tags.service import TagNotFoundError, TagService, TagValidationError
 
 Clock = Callable[[], int]
 RequestIdFactory = Callable[[], str]
@@ -685,6 +688,8 @@ class AdminActionService:
         token = request.operator_token.get_secret_value()
         now = self._clock()
         with immediate_transaction(self._engine) as connection:
+            if MasterTokenRepository(connection).has_identity():
+                raise AuthenticationError
             AuthenticationService(AuthRepository(connection), clock=lambda: now).require_operator(
                 token, library_id=library_id
             )
@@ -695,6 +700,39 @@ class AdminActionService:
                 request_id=self._request_id_factory(),
             )
         return tag.id, created
+
+    def create_tag_as_master(
+        self, library_id: str, request: MasterTagFormInput, *, master_session: MasterAdminSession
+    ) -> tuple[str, bool]:
+        now = self._clock()
+        with immediate_transaction(self._engine) as connection:
+            self._require_current_admin_session(
+                connection, master_session, master_session.audit_fingerprint()
+            )
+            if LibraryRepository(connection).get_library(library_id) is None:
+                raise TagNotFoundError
+            try:
+                normalize_tag_name(request.name)
+            except ValueError:
+                raise TagValidationError from None
+            tags = TagRepository(connection)
+            previous = tags.find_tag(library_id=library_id, name=request.name)
+            if previous is not None:
+                return previous.id, False
+            tag = tags.add_tag(
+                library_id=library_id, tag_id=uuid4().hex, name=request.name, created_at=now
+            )
+            MasterAuditRepository(connection).add_success(
+                identity_id=master_session.identity_id,
+                session_generation=master_session.session_generation,
+                session_fingerprint=master_session.audit_fingerprint(),
+                action="tag.create",
+                target_type="tag",
+                target_id=f"{library_id}:{tag.id}",
+                occurred_at=now,
+                event_id=uuid4().hex,
+            )
+            return tag.id, True
 
     def set_page_tag(
         self,
@@ -707,6 +745,8 @@ class AdminActionService:
         token = request.operator_token.get_secret_value()
         now = self._clock()
         with immediate_transaction(self._engine) as connection:
+            if MasterTokenRepository(connection).has_identity():
+                raise AuthenticationError
             AuthenticationService(AuthRepository(connection), clock=lambda: now).require_operator(
                 token, library_id=library_id
             )
@@ -730,6 +770,64 @@ class AdminActionService:
                 attach=request.operation == "attach",
                 request_id=self._request_id_factory(),
             )
+
+    def set_page_tag_as_master(
+        self,
+        library_id: str,
+        section_id: str,
+        book_id: str,
+        page_id: str,
+        request: MasterPageTagFormInput,
+        *,
+        master_session: MasterAdminSession,
+    ) -> bool:
+        now = self._clock()
+        with immediate_transaction(self._engine) as connection:
+            self._require_current_admin_session(
+                connection, master_session, master_session.audit_fingerprint()
+            )
+            page_uid = connection.execute(
+                select(Page.page_uid).where(
+                    Page.library_id == library_id,
+                    Page.section_id == section_id,
+                    Page.book_id == book_id,
+                    Page.page_id == page_id,
+                    Page.deleted_at.is_(None),
+                )
+            ).scalar_one_or_none()
+            if page_uid is None:
+                raise TagNotFoundError
+            tags = TagRepository(connection)
+            if tags.get_tag(library_id=library_id, tag_id=request.tag_id) is None:
+                raise TagNotFoundError
+            attached = tags.has_page_tag(
+                library_id=library_id, page_uid=page_uid, tag_id=request.tag_id
+            )
+            attach = request.operation == "attach"
+            if attached == attach:
+                return False
+            if attach:
+                tags.attach_page(
+                    library_id=library_id,
+                    page_uid=page_uid,
+                    tag_id=request.tag_id,
+                    created_at=now,
+                )
+            elif not tags.detach_page(
+                library_id=library_id, page_uid=page_uid, tag_id=request.tag_id
+            ):
+                raise RuntimeError("Expected Tag association disappeared inside transaction.")
+            MasterAuditRepository(connection).add_success(
+                identity_id=master_session.identity_id,
+                session_generation=master_session.session_generation,
+                session_fingerprint=master_session.audit_fingerprint(),
+                action="tag.page.attach" if attach else "tag.page.detach",
+                target_type="page_tag",
+                target_id=f"{library_id}:{page_uid.hex()}:{request.tag_id}",
+                occurred_at=now,
+                event_id=uuid4().hex,
+            )
+            return True
 
     def restore_archive_page(
         self,
