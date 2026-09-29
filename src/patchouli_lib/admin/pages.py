@@ -757,7 +757,7 @@ def _content_activity_timeline(
     entries: list[str] = []
     for item in activities:
         actor_path = (
-            f"/admin/libraries/{escape(item.library_id, quote=True)}/callers/"
+            f"/admin/libraries/{escape(item.actor_home_library_id, quote=True)}/callers/"
             f"{escape(item.actor_id, quote=True)}"
         )
         actor = f'<a href="{actor_path}">{escape(item.actor_name)}</a>'
@@ -799,6 +799,8 @@ def _content_activity_timeline(
             action = {
                 "content.archive.create": "Created a page",
                 "content.archive.revise": "Revised a page",
+                "content.page.file_set.create": "Created a page",
+                "content.page.file_set.revise": "Revised a page",
                 "content.archive.correct_occurrence": "Corrected a page's occurrence time",
                 "content.archive.delete": "Deleted a page",
                 "content.archive.restore": "Restored a page",

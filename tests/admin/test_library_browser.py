@@ -1132,6 +1132,80 @@ def test_home_shows_only_scoped_successful_content_activity(
     assert client.get(f"/admin/libraries/{other_library}/callers/{actor_id}").status_code == 404
 
 
+def test_home_shows_cross_library_file_set_activity_with_correct_links(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    home_library, _, _ = _seed_structure(engine)
+    target_library, section, book = _seed_structure(engine, prefix="4", label="Target")
+    actor_id, credential_id = _seed_activity_actor(engine, home_library, "a")
+    page_id = _insert_page(engine, target_library, section, book, title="Target page")
+    _append_file_set_revision(
+        engine,
+        target_library,
+        page_id,
+        number=2,
+        marker="c",
+        files=(("content.md", b"# Target page\n"), ("figure.png", b"png")),
+    )
+    revision_id = "rev_" + "c" * 32
+    base = {
+        "library_id": target_library,
+        "actor_home_library_id": home_library,
+        "actor_caller_id": actor_id,
+        "actor_credential_id": credential_id,
+        "outcome": "succeeded",
+        "request_id": "synthetic-file-set-request",
+    }
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            insert(AuditEvent),
+            [
+                {
+                    **base,
+                    "id": "d" * 32,
+                    "action": "content.page.file_set.create",
+                    "resource_type": "page",
+                    "resource_id": page_id,
+                    "occurred_at": 3_000_000,
+                },
+                {
+                    **base,
+                    "id": "e" * 32,
+                    "action": "content.page.file_set.revise",
+                    "resource_type": "revision",
+                    "resource_id": revision_id,
+                    "occurred_at": 4_000_000,
+                },
+            ],
+        )
+
+    activity = AdminReadModel(engine).recent_content_activity()
+    assert [item.action for item in activity] == [
+        "content.page.file_set.revise",
+        "content.page.file_set.create",
+    ]
+    assert all(item.library_id == target_library for item in activity)
+    assert all(item.actor_home_library_id == home_library for item in activity)
+    assert [item.revision_number for item in activity] == [2, 1]
+
+    _login(client)
+    response = client.get("/admin?lang=zh-CN")
+    assert response.status_code == 200
+    actor_path = f"/admin/libraries/{home_library}/callers/{actor_id}"
+    wrong_actor_path = f"/admin/libraries/{target_library}/callers/{actor_id}"
+    page_path = f"/admin/libraries/{target_library}/sections/{section}/books/{book}/pages/{page_id}"
+    assert response.text.count(f'href="{actor_path}"') == 2
+    assert wrong_actor_path not in response.text
+    assert f'href="{page_path}/revisions/1"' in response.text
+    assert f'href="{page_path}/revisions/2"' in response.text
+    assert response.text.count("创建了页面") == 1
+    assert response.text.count("更新了页面") == 1
+    assert client.get(actor_path).status_code == 200
+    assert client.get(f"{page_path}/revisions/1").status_code == 200
+    assert client.get(f"{page_path}/revisions/2").status_code == 200
+
+
 def test_deleted_activity_links_to_trash_without_cross_library_preview(
     browser: tuple[TestClient, Engine],
 ) -> None:

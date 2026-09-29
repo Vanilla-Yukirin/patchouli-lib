@@ -179,6 +179,7 @@ class RevisionItem:
 @dataclass(frozen=True)
 class ContentActivityItem:
     library_id: str
+    actor_home_library_id: str
     actor_id: str
     actor_name: str
     action: str
@@ -359,6 +360,7 @@ class AdminReadModel:
                 connection.execute(
                     select(
                         AuditEvent.library_id,
+                        AuditEvent.actor_home_library_id,
                         AuditEvent.actor_caller_id,
                         Caller.name.label("actor_name"),
                         AuditEvent.action,
@@ -369,7 +371,7 @@ class AdminReadModel:
                     .join(
                         Caller,
                         and_(
-                            Caller.library_id == AuditEvent.library_id,
+                            Caller.library_id == AuditEvent.actor_home_library_id,
                             Caller.id == AuditEvent.actor_caller_id,
                         ),
                     )
@@ -379,6 +381,8 @@ class AdminReadModel:
                             (
                                 "content.archive.create",
                                 "content.archive.revise",
+                                "content.page.file_set.create",
+                                "content.page.file_set.revise",
                                 "content.archive.correct_occurrence",
                                 "content.archive.delete",
                                 "content.archive.restore",
@@ -402,7 +406,14 @@ class AdminReadModel:
                 tag_id: str | None = None
                 revision_number: int | None = None
                 page = None
-                if action == "content.archive.revise" and resource_type == "revision":
+                if (
+                    action
+                    in (
+                        "content.archive.revise",
+                        "content.page.file_set.revise",
+                    )
+                    and resource_type == "revision"
+                ):
                     page = (
                         connection.execute(
                             select(
@@ -438,7 +449,7 @@ class AdminReadModel:
                             page_id, tag_id = parts
                 elif resource_type == "page":
                     page_id = event["resource_id"]
-                    if action == "content.archive.create":
+                    if action in ("content.archive.create", "content.page.file_set.create"):
                         revision_number = 1
 
                 if page is None and page_id is not None:
@@ -472,6 +483,7 @@ class AdminReadModel:
                 items.append(
                     ContentActivityItem(
                         library_id=event["library_id"],
+                        actor_home_library_id=event["actor_home_library_id"],
                         actor_id=event["actor_caller_id"],
                         actor_name=event["actor_name"],
                         action=action,
