@@ -49,6 +49,7 @@ from patchouli_lib.library.schemas import (
 )
 from patchouli_lib.library.service import LibrarySeedService, LibraryStructureService
 from patchouli_lib.operator.service import (
+    CredentialLifecycleError,
     LocalOperatorRecoveryService,
     OperatorBootstrapService,
     OperatorService,
@@ -98,7 +99,7 @@ class AdminActionService:
     ) -> LibraryRecord:
         now = self._clock()
         with immediate_transaction(self._engine) as connection:
-            self._require_current_structure_session(connection, master_session, session_fingerprint)
+            self._require_current_admin_session(connection, master_session, session_fingerprint)
             result = LibraryStructureService(
                 LibraryRepository(connection), clock=lambda: now
             ).create_library(request)
@@ -124,7 +125,7 @@ class AdminActionService:
     ) -> SectionRecord:
         now = self._clock()
         with immediate_transaction(self._engine) as connection:
-            self._require_current_structure_session(connection, master_session, session_fingerprint)
+            self._require_current_admin_session(connection, master_session, session_fingerprint)
             result = LibraryStructureService(
                 LibraryRepository(connection), clock=lambda: now
             ).create_section(library_id, request)
@@ -152,7 +153,7 @@ class AdminActionService:
     ) -> BookRecord:
         now = self._clock()
         with immediate_transaction(self._engine) as connection:
-            self._require_current_structure_session(connection, master_session, session_fingerprint)
+            self._require_current_admin_session(connection, master_session, session_fingerprint)
             result = LibraryStructureService(
                 LibraryRepository(connection), clock=lambda: now
             ).create_book(library_id, section_id, request)
@@ -171,7 +172,7 @@ class AdminActionService:
         return result
 
     @staticmethod
-    def _require_current_structure_session(
+    def _require_current_admin_session(
         connection: Connection, session: MasterAdminSession | None, fingerprint: bytes
     ) -> None:
         repository = MasterTokenRepository(connection)
@@ -366,6 +367,42 @@ class AdminActionService:
                 credential_id=request.credential_id,
                 request_id=self._request_id_factory(),
             )
+
+    def revoke_agent_credential_as_master(
+        self,
+        library_id: str,
+        caller_id: str,
+        credential_id: str,
+        *,
+        master_session: MasterAdminSession,
+    ) -> bool:
+        """Revoke one exact Agent credential without impersonating an operator."""
+        now = self._clock()
+        with immediate_transaction(self._engine) as connection:
+            self._require_current_admin_session(
+                connection, master_session, master_session.audit_fingerprint()
+            )
+            repository = AuthRepository(connection)
+            caller = repository.get_caller(library_id, caller_id)
+            credential = repository.get_credential(library_id, caller_id, credential_id)
+            if caller is None or caller.kind is not CallerKind.AGENT or credential is None:
+                raise ResourceNotFoundError
+            if credential.revoked_at is not None or credential.rotated_at is not None:
+                return False
+            revoked = repository.revoke_credential(credential, revoked_at=now)
+            if revoked is None or revoked.revoked_at != now:
+                raise CredentialLifecycleError
+            MasterAuditRepository(connection).add_success(
+                identity_id=master_session.identity_id,
+                session_generation=master_session.session_generation,
+                session_fingerprint=master_session.audit_fingerprint(),
+                action="auth.agent_credential.revoke",
+                target_type="credential",
+                target_id=credential_id,
+                occurred_at=now,
+                event_id=uuid4().hex,
+            )
+        return True
 
     def create_tag(self, library_id: str, request: TagFormInput) -> tuple[str, bool]:
         token = request.operator_token.get_secret_value()

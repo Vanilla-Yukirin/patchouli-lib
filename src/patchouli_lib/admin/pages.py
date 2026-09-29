@@ -434,6 +434,10 @@ _ZH_CN: dict[str, str] = {
     "Return to administration": "返回管理面板",
     "Revoke an Agent credential": "撤销 Agent 凭据",
     "Revoke credential": "撤销凭据",
+    "Revoke this Token": "撤销这枚 Token",
+    "After revocation, this Token cannot be used or shown again.": (
+        "撤销后，这枚 Token 不能再使用或显示。"
+    ),
     "Section description": "分区说明",
     "Section name": "分区名称",
     "Sign in": "登录",
@@ -527,9 +531,39 @@ def operations_page(
     *,
     locale: AdminLocale = "en",
     message: str | None = None,
+    master_mode: bool = False,
 ) -> str:
     csrf = escape(csrf_token, quote=True)
     notice = "" if message is None else _notice(localize(locale, message), error=True)
+    if master_mode:
+        explanation = (
+            "旧版初始化、管理员恢复及 Agent 签发／撤销表单不适用于主 Token 登录。"
+            "目前可在知识库页面创建结构，并在 Agent 详情页查看或撤销指定 Token；"
+            "主 Token 下的 Agent 签发尚未接通。"
+            if locale == "zh-CN"
+            else (
+                "The legacy setup, operator recovery, and Agent provision/revoke forms "
+                "do not apply to Master Token sign-in. You can create structure from "
+                "Libraries and reveal or revoke a specific Token from Agent details. "
+                "Agent provisioning with a Master Token is not available yet."
+            )
+        )
+        content = f"""
+{_header(csrf, locale, switch_path="/admin/setup")}
+<div class="admin-shell">
+{_sidebar(locale, current="setup")}
+<main>
+  <h1>{localize(locale, "Setup and credentials")}</h1>
+  {notice}
+  <section class="card">
+    <p>{explanation}</p>
+    <p><a href="/admin/libraries">{localize(locale, "Libraries")}</a> ·
+    <a href="/admin/agents">{localize(locale, "Identities")}</a></p>
+  </section>
+</main>
+</div>
+"""
+        return _document(localize(locale, "Setup and credentials"), content, locale)
     grants = "".join(
         (
             '<label><input type="checkbox" name="grants" '
@@ -784,7 +818,7 @@ def caller_page(
     view: CallerView,
     *,
     locale: AdminLocale = "en",
-    allow_reveal: bool = False,
+    allow_master_actions: bool = False,
 ) -> str:
     status = "Identity disabled" if view.disabled_at is not None else "Identity active"
     now_micros = int(datetime.now(UTC).timestamp() * 1_000_000)
@@ -818,7 +852,11 @@ def caller_page(
             else localize(locale, "Not rotated")
         )
         reveal = ""
-        if view.kind == "agent" and allow_reveal and credential_status == "Credential active":
+        if (
+            view.kind == "agent"
+            and allow_master_actions
+            and credential_status == "Credential active"
+        ):
             if item.token_tail is None:
                 reveal = (
                     f'<p class="meta">{localize(locale, "This old Token cannot be recovered.")}</p>'
@@ -856,6 +894,29 @@ def caller_page(
                     '<code class="secret token-output" hidden></code>'
                     '<span role="status" aria-live="polite"></span></form>'
                 )
+        revoke = ""
+        if (
+            view.kind == "agent"
+            and allow_master_actions
+            and item.revoked_at is None
+            and item.rotated_at is None
+        ):
+            path = (
+                f"/admin/libraries/{view.library_id}/callers/{view.id}/credentials/{item.id}/revoke"
+            )
+            warning = localize(
+                locale, "After revocation, this Token cannot be used or shown again."
+            )
+            revoke = (
+                f"<details><summary>{localize(locale, 'Revoke this Token')}</summary>"
+                f"<p>{warning}</p>"
+                f'<p class="revoke-target">{localize(locale, "Credential ID")}: '
+                f"<code>{escape(item.id)}</code></p>"
+                f'<form method="post" action="{escape(path, quote=True)}">'
+                f"{_csrf(escape(csrf_token, quote=True))}"
+                f'<button type="submit">{localize(locale, "Revoke credential")}</button>'
+                "</form></details>"
+            )
         credentials.append(
             '<li class="credential-item">'
             '<p class="credential-summary">'
@@ -872,7 +933,7 @@ def caller_page(
             f"<dd>{revoked}</dd>"
             f"<dt>{localize(locale, 'Rotated')}</dt>"
             f"<dd>{rotated}</dd>"
-            f"</dl></details>{reveal}</li>"
+            f"</dl></details>{reveal}{revoke}</li>"
         )
     credential_list = (
         f'<ul class="item-list">{"".join(credentials)}</ul>'
@@ -914,7 +975,7 @@ def caller_page(
         f"{escape(view.id, quote=True)}",
         body,
         crumbs=((localize(locale, "Libraries"), "/admin/libraries"),),
-        script_src="/admin/reveal.js" if allow_reveal and view.kind == "agent" else None,
+        script_src="/admin/reveal.js" if allow_master_actions and view.kind == "agent" else None,
     )
 
 

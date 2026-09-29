@@ -416,7 +416,11 @@ def test_initialized_master_token_login_retires_legacy_web_login_but_not_operato
 
     encoded, csrf = _login_master(admin_web)
     assert admin_web.client.get("/admin").status_code == 200
-    assert admin_web.client.get("/admin/setup").status_code == 200
+    setup = admin_web.client.get("/admin/setup")
+    assert setup.status_code == 200
+    assert "Agent provisioning with a Master Token is not available yet." in setup.text
+    assert 'action="/admin/agents/revoke"' not in setup.text
+    assert 'action="/admin/agents/provision"' not in setup.text
     assert admin_web.client.get("/api/v1/auth/whoami").status_code == 401
     assert _post(admin_web.client, "/admin/logout", data={"csrf_token": "wrong"}).status_code == 403
     for path, fields in (
@@ -427,9 +431,9 @@ def test_initialized_master_token_login_retires_legacy_web_login_but_not_operato
         ),
         ("/admin/libraries/x/sections/y/trash/z/restore", {"csrf_token": csrf}),
     ):
-        read_only = _post(admin_web.client, path, data=fields)
-        assert read_only.status_code == 403
-        assert "read-only" in read_only.text
+        rejected = _post(admin_web.client, path, data=fields)
+        assert rejected.status_code == 403
+        assert "not available to Master Token sessions yet" in rejected.text
     assert _post(admin_web.client, "/admin/logout", data={"csrf_token": csrf}).status_code == 303
     assert admin_web.client.get("/admin").status_code == 303
 
@@ -1240,6 +1244,7 @@ def test_agent_token_reveal_requires_current_master_session_origin_and_csrf(
     assert legacy_page.status_code == 200
     assert token not in legacy_page.text
     assert "token-reveal" not in legacy_page.text
+    assert f'action="{detail_path}/credentials/{credential_id}/revoke"' not in legacy_page.text
     legacy_post = _post(admin_web.client, reveal_path, data={"csrf_token": "wrong"})
     assert legacy_post.status_code == 403
     assert token not in legacy_post.text
@@ -1255,6 +1260,10 @@ def test_agent_token_reveal_requires_current_master_session_origin_and_csrf(
     assert token not in detail.text
     assert f"plb1…{token[-4:]}" in detail.text
     assert f'action="{reveal_path}"' in detail.text
+    assert f'action="{detail_path}/credentials/{credential_id}/revoke"' in detail.text
+    assert (
+        f'<p class="revoke-target">Credential ID: <code>{credential_id}</code></p>' in detail.text
+    )
     assert 'src="/admin/reveal.js"' in detail.text
     assert "script-src 'self'" in detail.headers["content-security-policy"]
     assert "connect-src 'self'" in detail.headers["content-security-policy"]
@@ -1337,6 +1346,152 @@ def test_agent_token_reveal_requires_current_master_session_origin_and_csrf(
     )
     assert rotated.status_code == 401
     assert token not in rotated.text
+
+
+def test_master_session_revokes_exact_agent_token_with_atomic_audit(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token, library_id, caller_id, credential_id = _issue_web_agent(admin_web)
+    detail_path = f"/admin/libraries/{library_id}/callers/{caller_id}"
+    revoke_path = f"{detail_path}/credentials/{credential_id}/revoke"
+    reveal_path = f"{detail_path}/credentials/{credential_id}/reveal"
+    legacy_csrf = _login(admin_web)
+    assert _post(admin_web.client, revoke_path, data={"csrf_token": legacy_csrf}).status_code == 403
+
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    form = {"csrf_token": csrf}
+    for data, origin, status in (
+        (form, "https://other.example.invalid", 403),
+        ({"csrf_token": "wrong"}, _ORIGIN, 403),
+        ({**form, "extra": "x"}, _ORIGIN, 422),
+    ):
+        rejected = _post(admin_web.client, revoke_path, data=data, origin=origin)
+        assert rejected.status_code == status
+        assert token not in rejected.text
+    for path in (
+        f"{detail_path}/credentials/{'f' * 32}/revoke",
+        f"/admin/libraries/{'f' * 32}/callers/{caller_id}/credentials/{credential_id}/revoke",
+        f"/admin/libraries/{library_id}/callers/{'f' * 32}/credentials/{credential_id}/revoke",
+    ):
+        assert _post(admin_web.client, path, data=form).status_code == 404
+
+    with monkeypatch.context() as patcher:
+
+        def reject_audit(self: MasterAuditRepository, **kwargs: Any) -> None:
+            raise RuntimeError("synthetic audit failure")
+
+        patcher.setattr(MasterAuditRepository, "add_success", reject_audit)
+        failed = _post(admin_web.client, revoke_path, data=form)
+        assert failed.status_code == 500
+        assert token not in failed.text
+    with admin_web.engine.connect() as connection:
+        credential = AuthRepository(connection).get_credential(library_id, caller_id, credential_id)
+        assert credential is not None and credential.revoked_at is None
+        assert connection.execute(select(AgentTokenValue.credential_id)).scalars().all() == [
+            credential_id
+        ]
+        assert connection.execute(select(MasterAuditEvent.id)).all() == []
+        assert (
+            AuthenticationService(AuthRepository(connection)).authenticate(token).caller.id
+            == caller_id
+        )
+
+    revoked = _post(admin_web.client, revoke_path, data=form)
+    assert revoked.status_code == 303
+    assert revoked.headers["location"] == detail_path
+    assert token not in str(revoked.request.url)
+    assert token not in (admin_web.client.cookies.get(_SESSION_COOKIE) or "")
+    _assert_security_headers(revoked)
+    with admin_web.engine.connect() as connection:
+        credential = AuthRepository(connection).get_credential(library_id, caller_id, credential_id)
+        assert credential is not None and credential.revoked_at is not None
+        assert connection.execute(select(AgentTokenValue.credential_id)).all() == []
+        events = [
+            tuple(row)
+            for row in connection.execute(
+                select(
+                    MasterAuditEvent.action,
+                    MasterAuditEvent.target_type,
+                    MasterAuditEvent.target_id,
+                )
+            )
+        ]
+        with pytest.raises(AuthenticationError):
+            AuthenticationService(AuthRepository(connection)).authenticate(token)
+    assert events == [("auth.agent_credential.revoke", "credential", credential_id)]
+    assert _post(admin_web.client, reveal_path, data=form).status_code == 410
+    assert _post(admin_web.client, revoke_path, data=form).status_code == 303
+    with admin_web.engine.connect() as connection:
+        assert len(connection.execute(select(MasterAuditEvent.id)).all()) == 1
+
+
+def test_master_revoke_confirmation_identifies_each_of_multiple_credentials(
+    admin_web: AdminWeb,
+) -> None:
+    first_token, library_id, caller_id, first_credential_id = _issue_web_agent(admin_web)
+    with immediate_transaction(admin_web.engine) as connection:
+        repository = AuthRepository(connection)
+        caller = repository.get_caller(library_id, caller_id)
+        assert caller is not None
+        second = CredentialIssuer(repository).issue(
+            caller, expires_at=time_ns() // 1_000 + 3_600_000_000
+        )
+    second_credential_id = second.credential.id
+    detail_path = f"/admin/libraries/{library_id}/callers/{caller_id}"
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+
+    detail = admin_web.client.get(detail_path)
+    assert detail.status_code == 200
+    for credential_id in (first_credential_id, second_credential_id):
+        assert (
+            f'<p class="revoke-target">Credential ID: <code>{credential_id}</code></p>'
+            in detail.text
+        )
+        assert f'action="{detail_path}/credentials/{credential_id}/revoke"' in detail.text
+    assert first_token not in detail.text
+    assert second.value not in detail.text
+
+    revoked = _post(
+        admin_web.client,
+        f"{detail_path}/credentials/{first_credential_id}/revoke",
+        data={"csrf_token": csrf},
+    )
+    assert revoked.status_code == 303
+    with admin_web.engine.connect() as connection:
+        repository = AuthRepository(connection)
+        with pytest.raises(AuthenticationError):
+            AuthenticationService(repository).authenticate(first_token)
+        assert AuthenticationService(repository).authenticate(second.value).caller.id == caller_id
+
+
+def test_master_agent_revocation_rechecks_generation_inside_transaction(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token, library_id, caller_id, credential_id = _issue_web_agent(admin_web)
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+
+    async def rotate_before_action(action: Any, *args: Any, **kwargs: Any) -> Any:
+        with immediate_transaction(admin_web.engine) as connection:
+            assert (
+                MasterTokenRepository(connection).rotate(
+                    _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
+                )
+                is not None
+            )
+        return await starlette_run_in_threadpool(action, *args, **kwargs)
+
+    monkeypatch.setattr(admin_router, "run_in_threadpool", rotate_before_action)
+    path = f"/admin/libraries/{library_id}/callers/{caller_id}/credentials/{credential_id}/revoke"
+    assert _post(admin_web.client, path, data={"csrf_token": csrf}).status_code == 401
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(MasterAuditEvent.id)).all() == []
+        assert (
+            AuthenticationService(AuthRepository(connection)).authenticate(token).caller.id
+            == caller_id
+        )
 
 
 @pytest.mark.parametrize("state", ["revoked", "rotated", "expired", "disabled", "legacy"])

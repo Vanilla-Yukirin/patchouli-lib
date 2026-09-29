@@ -241,12 +241,12 @@ def create_admin_router(
     def master_write_forbidden(request: Request, session: MasterAdminSession) -> HTMLResponse:
         locale = locale_for(request)
         message = (
-            "主 Token 会话目前仅可查看管理页面。"
+            "此操作尚不支持主 Token 会话。"
             if locale == "zh-CN"
-            else "Master Token sessions are read-only until management authorization is available."
+            else "This action is not available to Master Token sessions yet."
         )
         return html(
-            operations_page(session.csrf_token, locale=locale, message=message),
+            operations_page(session.csrf_token, locale=locale, message=message, master_mode=True),
             locale=locale,
             status_code=403,
         )
@@ -547,10 +547,23 @@ def create_admin_router(
 
     @router.get("/setup")
     def setup(request: Request) -> Response:
-        return protected_page(
-            request,
-            lambda csrf, locale: operations_page(csrf, locale=locale),
+        locale = locale_for(request)
+        session = current_session(request)
+        if session is None:
+            redirect_response = redirect("/admin/login")
+            _clear_cookie(redirect_response, secure=secure_cookie(request))
+            remember_requested_locale(redirect_response, request)
+            return redirect_response
+        page_response = html(
+            operations_page(
+                session.csrf_token,
+                locale=locale,
+                master_mode=isinstance(session, MasterAdminSession),
+            ),
+            locale=locale,
         )
+        remember_requested_locale(page_response, request)
+        return page_response
 
     @router.get("/login")
     def login(request: Request) -> Response:
@@ -708,7 +721,7 @@ def create_admin_router(
                     csrf,
                     view,
                     locale=locale,
-                    allow_reveal=isinstance(current_session(request), MasterAdminSession),
+                    allow_master_actions=isinstance(current_session(request), MasterAdminSession),
                 )
             )
 
@@ -778,6 +791,50 @@ def create_admin_router(
 
         status, value = await run_in_threadpool(current_value)
         return safe_text(value, status)
+
+    @router.post("/libraries/{library_id}/callers/{caller_id}/credentials/{credential_id}/revoke")
+    async def revoke_agent_token_as_master(
+        request: Request, library_id: str, caller_id: str, credential_id: str
+    ) -> Response:
+        locale = locale_for(request)
+        if not _same_origin_submission(request):
+            return forbidden(request)
+        session = current_session(request)
+        if session is None:
+            return html(
+                login_page(locale=locale, message="Sign in again."),
+                locale=locale,
+                status_code=401,
+            )
+        if not isinstance(session, MasterAdminSession):
+            return forbidden(request, "A master session is required.")
+        try:
+            values = await _read_form(request, allowed_fields=frozenset({"csrf_token"}))
+            _require_csrf(values, session)
+            await run_in_threadpool(
+                service.revoke_agent_credential_as_master,
+                library_id,
+                caller_id,
+                credential_id,
+                master_session=session,
+            )
+        except _FormError as exc:
+            status, message = exc.status_code, exc.safe_message
+        except AuthenticationError:
+            status, message = 401, "Sign in again."
+        except ResourceNotFoundError:
+            status, message = 404, "The Agent credential was not found."
+        except (CredentialLifecycleError, IntegrityError):
+            status, message = 409, "The action conflicts with current local state."
+        except Exception:
+            status, message = 500, "The action could not be completed."
+        else:
+            return redirect(f"/admin/libraries/{library_id}/callers/{caller_id}")
+        return html(
+            operations_page(session.csrf_token, locale=locale, message=message, master_mode=True),
+            locale=locale,
+            status_code=status,
+        )
 
     @router.get("/libraries/{library_id}/sections/{section_id}")
     def section_detail(request: Request, library_id: str, section_id: str) -> Response:
