@@ -12,7 +12,15 @@ from sqlalchemy import Connection, Engine, and_, func, or_, select
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.sql import Select
 
-from patchouli_lib.auth.models import AgentTokenValue, AuditEvent, Caller, Credential, SectionGrant
+from patchouli_lib.auth.models import (
+    AgentTokenValue,
+    AuditEvent,
+    Caller,
+    Credential,
+    CredentialLibraryGrant,
+    CredentialLibraryPolicy,
+    SectionGrant,
+)
 from patchouli_lib.content.models import Page, Revision, RevisionFile
 from patchouli_lib.content.service import page_current_etag
 from patchouli_lib.library.models import Book, Library, Section
@@ -205,6 +213,15 @@ class CredentialItem:
     revoked_at: int | None
     rotated_at: int | None
     token_tail: str | None
+    library_grants_policy: bool = False
+    library_grants: tuple[CredentialLibraryGrantItem, ...] = ()
+
+
+@dataclass(frozen=True)
+class CredentialLibraryGrantItem:
+    library_id: str
+    library_name: str
+    action: str
 
 
 @dataclass(frozen=True)
@@ -515,6 +532,41 @@ class AdminReadModel:
                 .mappings()
                 .all()
             )
+            policy_ids = set(
+                connection.scalars(
+                    select(CredentialLibraryPolicy.credential_id).where(
+                        CredentialLibraryPolicy.home_library_id == library_id,
+                        CredentialLibraryPolicy.caller_id == caller_id,
+                    )
+                )
+            )
+            library_grant_rows = connection.execute(
+                select(
+                    CredentialLibraryGrant.credential_id,
+                    CredentialLibraryGrant.target_library_id.label("library_id"),
+                    Library.name.label("library_name"),
+                    CredentialLibraryGrant.action,
+                )
+                .join(Library, Library.id == CredentialLibraryGrant.target_library_id)
+                .where(
+                    CredentialLibraryGrant.home_library_id == library_id,
+                    CredentialLibraryGrant.caller_id == caller_id,
+                )
+                .order_by(
+                    CredentialLibraryGrant.credential_id,
+                    Library.name,
+                    CredentialLibraryGrant.action,
+                )
+            ).mappings()
+            grants_by_credential: dict[str, list[CredentialLibraryGrantItem]] = {}
+            for grant in library_grant_rows:
+                grants_by_credential.setdefault(grant["credential_id"], []).append(
+                    CredentialLibraryGrantItem(
+                        library_id=grant["library_id"],
+                        library_name=grant["library_name"],
+                        action=grant["action"],
+                    )
+                )
             grant_rows = (
                 connection.execute(
                     select(
@@ -545,7 +597,14 @@ class AdminReadModel:
                 row["description"],
                 row["kind"],
                 row["disabled_at"],
-                tuple(CredentialItem(**credential) for credential in credential_rows),
+                tuple(
+                    CredentialItem(
+                        **credential,
+                        library_grants_policy=credential["id"] in policy_ids,
+                        library_grants=tuple(grants_by_credential.get(credential["id"], ())),
+                    )
+                    for credential in credential_rows
+                ),
                 tuple(SectionGrantItem(**grant) for grant in grant_rows),
             )
 

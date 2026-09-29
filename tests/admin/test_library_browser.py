@@ -480,7 +480,9 @@ def test_caller_detail_scopes_safe_credential_metadata_and_existing_grants(
         assert "Last used" in metadata
         assert "Revoked" in metadata
         assert "Rotated" in metadata
-        assert metadata.endswith("</dl></details>")
+        assert metadata.endswith(
+            "</dl><p>Legacy Section grants; no automatic full-Library access.</p></details>"
+        )
     assert "Credential active" in english.text
     assert "Credential not yet active" in english.text
     future_credential = next(

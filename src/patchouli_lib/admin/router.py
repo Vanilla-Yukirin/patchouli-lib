@@ -22,6 +22,7 @@ from starlette.concurrency import run_in_threadpool
 from patchouli_lib.admin.contracts import (
     BootstrapInput,
     MasterProvisionAgentInput,
+    MasterRotateAgentCredentialInput,
     PageTagFormInput,
     ProvisionAgentInput,
     RecoverOperatorInput,
@@ -920,6 +921,70 @@ def create_admin_router(
             status, message = 500, "The action could not be completed."
         else:
             return redirect(f"/admin/libraries/{library_id}/callers/{caller_id}")
+        return html(
+            operations_page(session.csrf_token, locale=locale, message=message, master_mode=True),
+            locale=locale,
+            status_code=status,
+        )
+
+    @router.post("/libraries/{library_id}/callers/{caller_id}/credentials/{credential_id}/rotate")
+    async def rotate_agent_token_as_master(
+        request: Request, library_id: str, caller_id: str, credential_id: str
+    ) -> Response:
+        locale = locale_for(request)
+        if not _same_origin_submission(request):
+            return forbidden(request)
+        session = current_session(request)
+        if session is None:
+            return html(
+                login_page(locale=locale, message="Sign in again."),
+                locale=locale,
+                status_code=401,
+            )
+        if not isinstance(session, MasterAdminSession):
+            return forbidden(request, "A master session is required.")
+        try:
+            values = await _read_form(
+                request,
+                allowed_fields=frozenset(MasterRotateAgentCredentialInput.model_fields)
+                | {"csrf_token"},
+            )
+            _require_csrf(values, session)
+            result = await run_in_threadpool(
+                service.rotate_agent_credential_as_master,
+                library_id,
+                caller_id,
+                credential_id,
+                MasterRotateAgentCredentialInput.model_validate(values),
+                master_session=session,
+            )
+        except _FormError as exc:
+            status, message = exc.status_code, exc.safe_message
+        except (ValidationError, ValueError):
+            status, message = 422, "Check the submitted fields and try again."
+        except AuthenticationError:
+            status, message = 401, "Sign in again."
+        except ResourceNotFoundError:
+            status, message = 404, "The Agent credential was not found."
+        except PolicyConflictError:
+            status, message = 409, "Legacy Section credentials require explicit reprovision."
+        except (CredentialLifecycleError, IntegrityError):
+            status, message = 409, "The action conflicts with current local state."
+        except Exception:
+            status, message = 500, "The action could not be completed."
+        else:
+            return html(
+                credential_page(
+                    session.csrf_token,
+                    heading="Agent credential rotated",
+                    result=result,
+                    locale=locale,
+                    recoverable=True,
+                ),
+                locale=locale,
+            )
+        if status == 401:
+            return html(login_page(locale=locale, message=message), locale=locale, status_code=401)
         return html(
             operations_page(session.csrf_token, locale=locale, message=message, master_mode=True),
             locale=locale,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from time import time
 from typing import Any
@@ -13,7 +14,12 @@ from alembic.config import Config
 from pydantic import ValidationError
 from sqlalchemy import Engine, func, select
 
-from patchouli_lib.admin.contracts import MasterLibraryGrantInput, MasterProvisionAgentInput
+import patchouli_lib.admin.service as admin_service_module
+from patchouli_lib.admin.contracts import (
+    MasterLibraryGrantInput,
+    MasterProvisionAgentInput,
+    MasterRotateAgentCredentialInput,
+)
 from patchouli_lib.admin.master_audit import MasterAuditRepository
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.service import AdminActionService
@@ -29,12 +35,16 @@ from patchouli_lib.auth.models import (
 )
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import CallerKind
-from patchouli_lib.auth.service import AuthenticationService
+from patchouli_lib.auth.service import (
+    AuthenticationError,
+    AuthenticationService,
+    CredentialIssuer,
+)
 from patchouli_lib.database import build_engine, immediate_transaction
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import CreateLibraryInput
 from patchouli_lib.library.service import LibraryStructureService
-from patchouli_lib.operator.service import ResourceNotFoundError
+from patchouli_lib.operator.service import CredentialLifecycleError, ResourceNotFoundError
 
 
 @pytest.fixture
@@ -207,16 +217,203 @@ def test_master_provision_works_with_current_migrated_schema(
         issued = AdminActionService(engine, clock=lambda: 2_000_000).provision_agent_as_master(
             _request(home.id, (home.id, LibraryAction.READ)), master_session=session
         )
+        replacement = AdminActionService(
+            engine, clock=lambda: 2_000_001
+        ).rotate_agent_credential_as_master(
+            home.id,
+            issued.caller_id,
+            issued.credential_id,
+            MasterRotateAgentCredentialInput(credential_ttl_seconds=7200),
+            master_session=session,
+        )
         with engine.connect() as connection:
             repository = AuthRepository(connection)
             assert repository.has_library_grant_policy(
-                home.id, issued.caller_id, issued.credential_id
+                home.id, issued.caller_id, replacement.credential_id
             )
             assert (
-                AuthenticationService(repository, clock=lambda: 2_000_001)
-                .authenticate(issued.value)
+                AuthenticationService(repository, clock=lambda: 2_000_002)
+                .authenticate(replacement.value)
                 .caller.id
                 == issued.caller_id
             )
+            with pytest.raises(AuthenticationError):
+                AuthenticationService(repository, clock=lambda: 2_000_002).authenticate(
+                    issued.value
+                )
     finally:
         engine.dispose()
+
+
+def test_master_rotation_preserves_exact_grants_and_revokes_only_selected_token(
+    master_provision_context: tuple[AdminActionService, Engine, MasterAdminSession, str, str],
+) -> None:
+    service, engine, session, home_id, target_id = master_provision_context
+    first = service.provision_agent_as_master(
+        _request(home_id, (home_id, LibraryAction.READ), (target_id, LibraryAction.WRITE)),
+        master_session=session,
+    )
+    with immediate_transaction(engine) as connection:
+        repository = AuthRepository(connection)
+        caller = repository.get_caller(home_id, first.caller_id)
+        assert caller is not None
+        sibling = CredentialIssuer(repository, clock=lambda: 2_000_000).issue(
+            caller, expires_at=2_000_000 + 3_600_000_000
+        )
+    replacement = service.rotate_agent_credential_as_master(
+        home_id,
+        first.caller_id,
+        first.credential_id,
+        MasterRotateAgentCredentialInput(credential_ttl_seconds=7200),
+        master_session=session,
+    )
+    assert replacement.caller_id == first.caller_id
+    assert replacement.credential_id != first.credential_id
+    assert replacement.value != first.value
+    with engine.connect() as connection:
+        repository = AuthRepository(connection)
+        with pytest.raises(AuthenticationError):
+            AuthenticationService(repository, clock=lambda: 2_000_001).authenticate(first.value)
+        assert (
+            AuthenticationService(repository, clock=lambda: 2_000_001)
+            .authenticate(replacement.value)
+            .caller.id
+            == first.caller_id
+        )
+        assert (
+            AuthenticationService(repository, clock=lambda: 2_000_001)
+            .authenticate(sibling.value)
+            .caller.id
+            == first.caller_id
+        )
+        stored_ids = set(connection.scalars(select(AgentTokenValue.credential_id)))
+        assert first.credential_id not in stored_ids
+        assert stored_ids == {replacement.credential_id, sibling.credential.id}
+        assert (
+            repository.get_active_agent_token_value(
+                home_id, first.caller_id, first.credential_id, active_at=2_000_001
+            )
+            is None
+        )
+        assert (
+            repository.get_active_agent_token_value(
+                home_id, first.caller_id, replacement.credential_id, active_at=2_000_001
+            )
+            == replacement.value
+        )
+        assert repository.has_library_grant_policy(
+            home_id, first.caller_id, replacement.credential_id
+        )
+        assert repository.list_credential_library_grants(
+            home_library_id=home_id,
+            caller_id=first.caller_id,
+            credential_id=replacement.credential_id,
+        ) == repository.list_credential_library_grants(
+            home_library_id=home_id, caller_id=first.caller_id, credential_id=first.credential_id
+        )
+        old = repository.get_credential(home_id, first.caller_id, first.credential_id)
+        assert old is not None
+        assert old.rotated_to_credential_id == replacement.credential_id
+        assert connection.scalars(select(MasterAuditEvent.action)).all() == [
+            "auth.agent.provision",
+            "auth.agent_credential.rotate",
+        ]
+    with pytest.raises(CredentialLifecycleError):
+        service.rotate_agent_credential_as_master(
+            home_id,
+            first.caller_id,
+            first.credential_id,
+            MasterRotateAgentCredentialInput(credential_ttl_seconds=7200),
+            master_session=session,
+        )
+
+
+def test_master_rotation_preserves_explicit_zero_grants_and_rolls_back_on_audit_failure(
+    master_provision_context: tuple[AdminActionService, Engine, MasterAdminSession, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, engine, session, home_id, _ = master_provision_context
+    first = service.provision_agent_as_master(_request(home_id), master_session=session)
+
+    def reject_audit(self: MasterAuditRepository, **kwargs: Any) -> None:
+        raise RuntimeError("synthetic rotation audit failure")
+
+    monkeypatch.setattr(MasterAuditRepository, "add_success", reject_audit)
+    with pytest.raises(RuntimeError, match="synthetic rotation audit failure"):
+        service.rotate_agent_credential_as_master(
+            home_id,
+            first.caller_id,
+            first.credential_id,
+            MasterRotateAgentCredentialInput(credential_ttl_seconds=7200),
+            master_session=session,
+        )
+    with engine.connect() as connection:
+        repository = AuthRepository(connection)
+        assert connection.scalar(select(func.count()).select_from(Credential)) == 1
+        assert connection.scalar(select(func.count()).select_from(AgentTokenValue)) == 1
+        assert (
+            repository.get_active_agent_token_value(
+                home_id, first.caller_id, first.credential_id, active_at=2_000_001
+            )
+            == first.value
+        )
+        assert repository.has_library_grant_policy(home_id, first.caller_id, first.credential_id)
+        assert connection.scalar(select(func.count()).select_from(CredentialLibraryGrant)) == 0
+    monkeypatch.undo()
+    replacement = service.rotate_agent_credential_as_master(
+        home_id,
+        first.caller_id,
+        first.credential_id,
+        MasterRotateAgentCredentialInput(credential_ttl_seconds=7200),
+        master_session=session,
+    )
+    with engine.connect() as connection:
+        repository = AuthRepository(connection)
+        assert repository.has_library_grant_policy(
+            home_id, first.caller_id, replacement.credential_id
+        )
+        assert repository.get_library_policy(
+            credential_id=replacement.credential_id,
+            caller_id=first.caller_id,
+            home_library_id=home_id,
+            target_library_id=home_id,
+            active_at=2_000_001,
+        ) == LibraryGrantPolicy(read=False, write=False)
+
+
+def test_master_rotation_rechecks_expiry_after_acquiring_write_transaction(
+    master_provision_context: tuple[AdminActionService, Engine, MasterAdminSession, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, engine, session, home_id, _ = master_provision_context
+    first = service.provision_agent_as_master(
+        _request(home_id, (home_id, LibraryAction.READ)), master_session=session
+    )
+    with engine.connect() as connection:
+        current = AuthRepository(connection).get_credential(
+            home_id, first.caller_id, first.credential_id
+        )
+        assert current is not None
+        expires_at = current.expires_at
+    observed_time = [expires_at - 1]
+    late_service = AdminActionService(engine, clock=lambda: observed_time[0])
+    original_transaction = immediate_transaction
+
+    @contextmanager
+    def lock_acquired_late(target_engine: Engine) -> Iterator[Any]:
+        with original_transaction(target_engine) as connection:
+            observed_time[0] = expires_at
+            yield connection
+
+    monkeypatch.setattr(admin_service_module, "immediate_transaction", lock_acquired_late)
+    with pytest.raises(CredentialLifecycleError):
+        late_service.rotate_agent_credential_as_master(
+            home_id,
+            first.caller_id,
+            first.credential_id,
+            MasterRotateAgentCredentialInput(credential_ttl_seconds=7200),
+            master_session=session,
+        )
+    with engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(Credential)) == 1
+        assert connection.scalar(select(func.count()).select_from(AgentTokenValue)) == 1

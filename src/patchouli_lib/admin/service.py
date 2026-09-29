@@ -10,6 +10,7 @@ from sqlalchemy import Connection, Engine, insert, select
 from patchouli_lib.admin.contracts import (
     BootstrapInput,
     MasterProvisionAgentInput,
+    MasterRotateAgentCredentialInput,
     PageTagFormInput,
     ProvisionAgentInput,
     RecoverOperatorInput,
@@ -65,6 +66,7 @@ from patchouli_lib.operator.service import (
     LocalOperatorRecoveryService,
     OperatorBootstrapService,
     OperatorService,
+    PolicyConflictError,
     ResourceNotFoundError,
 )
 from patchouli_lib.tags.service import TagNotFoundError, TagService
@@ -364,8 +366,8 @@ class AdminActionService:
         self, request: MasterProvisionAgentInput, *, master_session: MasterAdminSession
     ) -> DeliveredCredential:
         """Issue one Agent credential with an explicit, default-deny Library policy."""
-        now = self._clock()
         with immediate_transaction(self._engine) as connection:
+            now = self._clock()
             self._require_current_admin_session(
                 connection, master_session, master_session.audit_fingerprint()
             )
@@ -425,6 +427,91 @@ class AdminActionService:
             library_id=caller.library_id,
             caller_id=caller.id,
             credential_id=issued.credential.id,
+        )
+
+    def rotate_agent_credential_as_master(
+        self,
+        library_id: str,
+        caller_id: str,
+        credential_id: str,
+        request: MasterRotateAgentCredentialInput,
+        *,
+        master_session: MasterAdminSession,
+    ) -> DeliveredCredential:
+        """Replace one active Library-scoped Agent Token without changing its grants."""
+        with immediate_transaction(self._engine) as connection:
+            now = self._clock()
+            self._require_current_admin_session(
+                connection, master_session, master_session.audit_fingerprint()
+            )
+            repository = AuthRepository(connection)
+            caller = repository.get_caller(library_id, caller_id)
+            current = repository.get_credential(library_id, caller_id, credential_id)
+            if caller is None or caller.kind is not CallerKind.AGENT or current is None:
+                raise ResourceNotFoundError
+            if (
+                caller.disabled_at is not None
+                or current.created_at > now
+                or current.expires_at <= now
+                or current.revoked_at is not None
+                or current.rotated_at is not None
+            ):
+                raise CredentialLifecycleError
+            if not repository.has_library_grant_policy(library_id, caller_id, credential_id):
+                # Legacy Section grants belong to the caller, not this credential.
+                # Require explicit reprovision instead of silently changing modes.
+                raise PolicyConflictError
+            existing_grants = repository.list_credential_library_grants(
+                home_library_id=library_id, caller_id=caller_id, credential_id=credential_id
+            )
+            replacement = CredentialIssuer(repository, clock=lambda: now).issue(
+                caller, expires_at=_expires_at(now, request.credential_ttl_seconds)
+            )
+            connection.execute(
+                insert(CredentialLibraryPolicy),
+                {
+                    "credential_id": replacement.credential.id,
+                    "caller_id": caller_id,
+                    "home_library_id": library_id,
+                    "mode": "library_grants",
+                    "created_at": now,
+                },
+            )
+            for grant in existing_grants:
+                for action in grant.actions:
+                    connection.execute(
+                        insert(CredentialLibraryGrant),
+                        {
+                            "credential_id": replacement.credential.id,
+                            "caller_id": caller_id,
+                            "home_library_id": library_id,
+                            "target_library_id": grant.library_id,
+                            "action": action.value,
+                            "created_at": now,
+                        },
+                    )
+            if (
+                repository.mark_credential_rotated(
+                    current, replacement.credential.id, rotated_at=now
+                )
+                is None
+            ):
+                raise CredentialLifecycleError
+            MasterAuditRepository(connection).add_success(
+                identity_id=master_session.identity_id,
+                session_generation=master_session.session_generation,
+                session_fingerprint=master_session.audit_fingerprint(),
+                action="auth.agent_credential.rotate",
+                target_type="credential",
+                target_id=credential_id,
+                occurred_at=now,
+                event_id=uuid4().hex,
+            )
+        return DeliveredCredential(
+            value=replacement.value,
+            library_id=library_id,
+            caller_id=caller_id,
+            credential_id=replacement.credential.id,
         )
 
     def revoke_agent_credential(self, request: RevokeAgentCredentialInput) -> None:

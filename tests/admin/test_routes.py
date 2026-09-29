@@ -1561,6 +1561,184 @@ def test_master_agent_provision_accepts_many_explicit_library_grants(
     assert all(grant["actions"] == ["read", "write"] for grant in whoami.json()["library_grants"])
 
 
+def test_master_session_rotates_exact_library_agent_token_without_leaking_old_value(
+    admin_web: AdminWeb,
+) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    library = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Synthetic Rotation Library"},
+    )
+    assert library.status_code == 303
+    library_id = library.headers["location"].rsplit("/", 1)[-1]
+    issued = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": csrf,
+            "home_library_id": library_id,
+            "agent_name": "Synthetic Rotating Agent",
+            "credential_ttl_seconds": "3600",
+            "grants": [f"{library_id}:read"],
+        },
+    )
+    assert issued.status_code == 200
+    old_token = _credential_from(issued.text)
+    _, caller_id, old_id = _metadata_from(issued.text)
+    detail_path = f"/admin/libraries/{library_id}/callers/{caller_id}"
+    rotate_path = f"{detail_path}/credentials/{old_id}/rotate"
+    detail = admin_web.client.get(detail_path + "?lang=zh-CN")
+    assert detail.status_code == 200
+    assert f'action="{rotate_path}"' in detail.text
+    assert "逐知识库授权" in detail.text
+    assert " — 读取" in detail.text
+    assert old_token not in detail.text
+    form = {"csrf_token": csrf, "credential_ttl_seconds": "7200"}
+    assert (
+        _post(
+            admin_web.client, rotate_path, data=form, origin="https://other.example.invalid"
+        ).status_code
+        == 403
+    )
+    assert (
+        _post(admin_web.client, rotate_path, data={**form, "csrf_token": "bad"}).status_code == 403
+    )
+    assert _post(admin_web.client, rotate_path, data={**form, "extra": "x"}).status_code == 422
+    rotated = _post(admin_web.client, rotate_path, data=form)
+    assert rotated.status_code == 200
+    new_token = _credential_from(rotated.text)
+    _, new_caller_id, new_id = _metadata_from(rotated.text)
+    assert new_caller_id == caller_id
+    assert new_id != old_id
+    assert new_token != old_token
+    assert old_token not in rotated.text
+    assert new_token not in str(rotated.request.url)
+    assert new_token not in (admin_web.client.cookies.get(_SESSION_COOKIE) or "")
+    _assert_security_headers(rotated)
+    assert (
+        admin_web.client.get(
+            "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {old_token}"}
+        ).status_code
+        == 401
+    )
+    new_identity = admin_web.client.get(
+        "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {new_token}"}
+    )
+    assert new_identity.status_code == 200
+    assert new_identity.json()["library_grants"] == [
+        {"library_id": library_id, "actions": ["read"]}
+    ]
+    assert _post(admin_web.client, rotate_path, data=form).status_code == 409
+    assert (
+        _post(
+            admin_web.client,
+            f"{detail_path}/credentials/{old_id}/reveal",
+            data={"csrf_token": csrf},
+        ).status_code
+        == 410
+    )
+    revealed = _post(
+        admin_web.client,
+        f"{detail_path}/credentials/{new_id}/reveal",
+        data={"csrf_token": csrf},
+    )
+    assert revealed.status_code == 200
+    assert revealed.text == new_token
+
+
+def test_master_rotation_does_not_convert_legacy_section_token_to_library_access(
+    admin_web: AdminWeb,
+) -> None:
+    old_token, library_id, caller_id, credential_id = _issue_web_agent(admin_web)
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    detail_path = f"/admin/libraries/{library_id}/callers/{caller_id}"
+    detail = admin_web.client.get(detail_path)
+    assert detail.status_code == 200
+    assert f'action="{detail_path}/credentials/{credential_id}/rotate"' not in detail.text
+    rejected = _post(
+        admin_web.client,
+        f"{detail_path}/credentials/{credential_id}/rotate",
+        data={"csrf_token": csrf, "credential_ttl_seconds": "3600"},
+    )
+    assert rejected.status_code == 409
+    assert "explicit reprovision" in rejected.text
+    assert (
+        admin_web.client.get(
+            "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {old_token}"}
+        ).status_code
+        == 200
+    )
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(AgentTokenValue.credential_id)).scalars().all() == [
+            credential_id
+        ]
+
+
+def test_master_agent_rotation_rechecks_session_generation_before_writing(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    library = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Synthetic Rotation Race Library"},
+    )
+    assert library.status_code == 303
+    library_id = library.headers["location"].rsplit("/", 1)[-1]
+    issued = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": csrf,
+            "home_library_id": library_id,
+            "agent_name": "Synthetic Rotation Race Agent",
+            "credential_ttl_seconds": "3600",
+            "grants": [f"{library_id}:read"],
+        },
+    )
+    assert issued.status_code == 200
+    old_token = _credential_from(issued.text)
+    _, caller_id, old_id = _metadata_from(issued.text)
+
+    async def rotate_master_before_action(action: Any, *args: Any, **kwargs: Any) -> Any:
+        with immediate_transaction(admin_web.engine) as connection:
+            assert (
+                MasterTokenRepository(connection).rotate(
+                    _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
+                )
+                is not None
+            )
+        return await starlette_run_in_threadpool(action, *args, **kwargs)
+
+    monkeypatch.setattr(admin_router, "run_in_threadpool", rotate_master_before_action)
+    rejected = _post(
+        admin_web.client,
+        f"/admin/libraries/{library_id}/callers/{caller_id}/credentials/{old_id}/rotate",
+        data={"csrf_token": csrf, "credential_ttl_seconds": "7200"},
+    )
+    assert rejected.status_code == 401
+    assert old_token not in rejected.text
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(AgentTokenValue.credential_id)).scalars().all() == [old_id]
+        assert len(connection.execute(select(Credential.id)).all()) == 1
+        assert (
+            connection.execute(
+                select(MasterAuditEvent.id).where(
+                    MasterAuditEvent.action == "auth.agent_credential.rotate"
+                )
+            ).all()
+            == []
+        )
+        assert (
+            AuthenticationService(AuthRepository(connection)).authenticate(old_token).caller.id
+            == caller_id
+        )
+
+
 def test_legacy_agent_provision_cannot_race_local_master_setup(
     admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
 ) -> None:

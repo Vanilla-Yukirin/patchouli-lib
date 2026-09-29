@@ -272,6 +272,7 @@ _ZH_CN: dict[str, str] = {
     "Administration sign in": "管理面板登录",
     "Agent caller ID": "Agent 调用方 ID",
     "Agent credential created": "Agent 凭据已创建",
+    "Agent credential rotated": "Agent 凭据已轮换",
     "Agent credential ID": "Agent 凭据 ID",
     "Agent credential revoked": "Agent 凭据已撤销",
     "Agent description": "Agent 说明",
@@ -851,6 +852,26 @@ def caller_page(
             if item.rotated_at is not None
             else localize(locale, "Not rotated")
         )
+        if item.library_grants_policy:
+            empty_grants = "无读取或写入权限" if locale == "zh-CN" else "No read or write grants."
+            action_labels = {"read": "读取", "write": "写入"} if locale == "zh-CN" else {}
+            grant_entries = "".join(
+                "<li>"
+                f"{escape(grant.library_name)} (<code>{escape(grant.library_id)}</code>)"
+                f" — {action_labels.get(grant.action, escape(grant.action))}</li>"
+                for grant in item.library_grants
+            )
+            policy_summary = (
+                f"<p>{'逐知识库授权' if locale == 'zh-CN' else 'Per-Library grants'}"
+                "</p>"
+                + (f"<ul>{grant_entries}</ul>" if grant_entries else f"<p>{empty_grants}</p>")
+            )
+        else:
+            policy_summary = (
+                "<p>旧版分区授权；不会自动获得整库权限。</p>"
+                if locale == "zh-CN"
+                else "<p>Legacy Section grants; no automatic full-Library access.</p>"
+            )
         reveal = ""
         if (
             view.kind == "agent"
@@ -917,6 +938,36 @@ def caller_page(
                 f'<button type="submit">{localize(locale, "Revoke credential")}</button>'
                 "</form></details>"
             )
+        rotate = ""
+        if (
+            view.kind == "agent"
+            and allow_master_actions
+            and credential_status == "Credential active"
+            and item.library_grants_policy
+        ):
+            path = (
+                f"/admin/libraries/{view.library_id}/callers/{view.id}/credentials/{item.id}/rotate"
+            )
+            rotate_label = "轮换此 Token" if locale == "zh-CN" else "Rotate this Token"
+            rotate_button = "确认轮换" if locale == "zh-CN" else "Rotate credential"
+            ttl_field = _number(
+                "credential_ttl_seconds", "Credential lifetime in seconds", 31_536_000, locale
+            )
+            rotate = (
+                f"<details><summary>{rotate_label}</summary>"
+                f"<p>{
+                    '旧 Token 将立即失效，新 Token 保留上面列出的逐知识库授权。'
+                    if locale == 'zh-CN'
+                    else 'The old Token stops working immediately; '
+                    'the new Token keeps exactly the per-Library grants listed above.'
+                }</p>"
+                f"<p><code>{escape(item.id)}</code></p>"
+                f'<form method="post" action="{escape(path, quote=True)}">'
+                f"{_csrf(escape(csrf_token, quote=True))}"
+                f"{ttl_field}"
+                f'<button type="submit">{rotate_button}</button>'
+                "</form></details>"
+            )
         credentials.append(
             '<li class="credential-item">'
             '<p class="credential-summary">'
@@ -933,7 +984,7 @@ def caller_page(
             f"<dd>{revoked}</dd>"
             f"<dt>{localize(locale, 'Rotated')}</dt>"
             f"<dd>{rotated}</dd>"
-            f"</dl></details>{reveal}{revoke}</li>"
+            f"</dl>{policy_summary}</details>{reveal}{rotate}{revoke}</li>"
         )
     credential_list = (
         f'<ul class="item-list">{"".join(credentials)}</ul>'

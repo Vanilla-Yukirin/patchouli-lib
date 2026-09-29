@@ -85,6 +85,10 @@ class MasterProvisionAgentInput(AdminActionInput):
         return self
 
 
+class MasterRotateAgentCredentialInput(AdminActionInput):
+    credential_ttl_seconds: CredentialTtlSeconds
+
+
 class RevokeAgentCredentialInput(AdminActionInput):
     library_name: ResourceName
     caller_id: OpaqueId
