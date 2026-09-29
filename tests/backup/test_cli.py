@@ -26,12 +26,16 @@ from patchouli_lib.backup import (
     verify_backup_bundle,
 )
 from patchouli_lib.backup.manifest import (
+    ACTOR_HOME_SCHEMA_REVISION,
     AGENT_TOKEN_VALUES_SCHEMA_REVISION,
     FILE_SET_SCHEMA_REVISION,
     INTERMEDIATE_SCHEMA_REVISION,
     LEGACY_SCHEMA_REVISION,
     LIBRARY_POLICY_SCHEMA_REVISION,
     LIFECYCLE_SCHEMA_REVISION,
+    MASTER_AUDIT_SCHEMA_REVISION,
+    MASTER_IDENTITY_SCHEMA_REVISION,
+    MASTER_LIFECYCLE_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
     TAG_SCHEMA_REVISION,
@@ -377,7 +381,15 @@ def test_cli_accepts_each_additional_supported_exact_revision(
 
 
 @pytest.mark.parametrize(
-    "schema_revision", (AGENT_TOKEN_VALUES_SCHEMA_REVISION, LIBRARY_POLICY_SCHEMA_REVISION)
+    "schema_revision",
+    (
+        MASTER_LIFECYCLE_SCHEMA_REVISION,
+        MASTER_AUDIT_SCHEMA_REVISION,
+        ACTOR_HOME_SCHEMA_REVISION,
+        MASTER_IDENTITY_SCHEMA_REVISION,
+        AGENT_TOKEN_VALUES_SCHEMA_REVISION,
+        LIBRARY_POLICY_SCHEMA_REVISION,
+    ),
 )
 def test_cli_verifies_and_restores_recent_historical_bundle_with_explicit_revision(
     complete_engine: Engine,
