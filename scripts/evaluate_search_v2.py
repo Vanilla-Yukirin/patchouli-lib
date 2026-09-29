@@ -36,6 +36,8 @@ BASE_TIME = 1_700_000_000_000_000
 TOP_K = 20
 MAX_CORPUS_BODY_BYTES = 64 * 1_024 * 1_024
 SHORT_LITERAL_TERMS_VERSION = "non-Han-codepoint-1-2-3-NFC-casefold-NFC-v1"
+type TagIdentity = tuple[str, str]
+type SyntheticTag = tuple[str, str]  # Stable ID and display name within one Library.
 _HAN_ALPHABET = "知识库文档版本检索时间来源技术新闻视频摘要索引安全权限项目系统研究实验数据分析报告"
 _HAN_RANGES = (
     (0x3007, 0x3007),
@@ -66,7 +68,7 @@ class Document:
     body: str
     text_files: tuple[tuple[str, str], ...]
     binary_files: tuple[tuple[str, bytes], ...]
-    tags: tuple[str, ...]
+    tags: tuple[SyntheticTag, ...]
     occurred_at: int
     old_body: str | None
     deleted: bool
@@ -77,7 +79,7 @@ class Query:
     name: str
     libraries: tuple[str, ...]
     keywords: tuple[str, ...] = ()
-    tags_any: tuple[str, ...] = ()
+    tags_any: tuple[TagIdentity, ...] = ()
     occurred_from: int | None = None
     occurred_before: int | None = None
     expected_first: tuple[str, ...] = ()
@@ -155,7 +157,10 @@ def generate_corpus(page_count: int, body_bytes: int) -> tuple[Document, ...]:
                     if number % 23 == 0
                     else ()
                 ),
-                tags=(f"tag-{number % 7}",) + (("shared",) if number % 5 == 0 else ()),
+                tags=((f"tag-{number % 7}", f"合成标签 {number % 7}"),)
+                + ((("shared", "跨库共用 ID"),) if number % 5 == 0 else ())
+                + ((("same-name-library-1", "跨库同名"),) if number == 4 else ())
+                + ((("same-name-library-2", "跨库同名"),) if number == 5 else ()),
                 occurred_at=BASE_TIME + number * 1_000_000,
                 old_body=f"旧版独有标记 page-{number:05d}" if number % 11 == 0 else None,
                 deleted=number >= 3 and number % 19 == 0,
@@ -180,6 +185,12 @@ def evaluation_queries(page_count: int) -> tuple[Query, ...]:
         Query("mixed_han_symbols", authorized, ("技术-lit🙂?",), expected_first=("page-00003",)),
         Query("keywords_or", authorized, ("独家信号", "共同主题"), expected_first=sentinel),
         Query(
+            "keywords_or_with_duplicates",
+            authorized,
+            ("独家信号", "独家信号", "共同主题", "共同主题"),
+            expected_first=sentinel,
+        ),
+        Query(
             "disjoint_keywords_or",
             authorized,
             ("stararchive", "多文件文本独有信号"),
@@ -194,16 +205,31 @@ def evaluation_queries(page_count: int) -> tuple[Query, ...]:
         Query("text_file", authorized, ("多文件文本独有信号",), expected_first=("page-00004",)),
         Query("file_name", authorized, ("binary-needle.bin",), expected_first=("page-00004",)),
         Query("binary_bytes_not_text", authorized, ("二进制隐匿密文",)),
-        Query("tags_any_only", authorized, tags_any=("tag-1", "tag-2")),
+        Query(
+            "tags_any_only",
+            authorized,
+            tags_any=(("library-0", "tag-1"), ("library-1", "tag-2")),
+        ),
         Query(
             "tags_and_time_only",
             authorized,
-            tags_any=("tag-1", "tag-2"),
+            tags_any=(("library-0", "tag-1"), ("library-1", "tag-2")),
             occurred_from=BASE_TIME + 60 * 1_000_000,
             occurred_before=BASE_TIME + min(page_count, 240) * 1_000_000,
         ),
         Query("time_only", ("library-0",), occurred_from=BASE_TIME + 10 * 1_000_000),
         Query("time_before_only", authorized, occurred_before=BASE_TIME + 60 * 1_000_000),
+        Query(
+            "same_bare_tag_id_scoped",
+            ("library-0", "library-1", "library-2"),
+            tags_any=(("library-0", "shared"),),
+        ),
+        Query(
+            "same_tag_name_distinct_ids_scoped",
+            ("library-0", "library-1", "library-2"),
+            tags_any=(("library-1", "same-name-library-1"),),
+            expected_first=("page-00004",),
+        ),
         Query("old_revision_only", authorized, ("旧版独有标记",)),
         Query("deleted_only", authorized, ("回收站独有标记",)),
         Query("no_match", authorized, ("绝不会出现的镜面词",)),
@@ -255,7 +281,8 @@ def literal_oracle(documents: tuple[Document, ...], query: Query) -> frozenset[s
             continue
         if query.occurred_before is not None and document.occurred_at >= query.occurred_before:
             continue
-        if query.tags_any and not set(document.tags).intersection(query.tags_any):
+        identities = {(document.library_id, tag_id) for tag_id, _name in document.tags}
+        if query.tags_any and not identities.intersection(query.tags_any):
             continue
         if query.keywords:
             if any(keyword == "" for keyword in query.keywords):
@@ -316,9 +343,10 @@ def _create_authority(connection: sqlite3.Connection, documents: tuple[Document,
         "text_files_json TEXT NOT NULL, file_names_json TEXT NOT NULL, "
         "occurred_at INTEGER NOT NULL, deleted INTEGER NOT NULL);"
         "CREATE INDEX documents_scope ON documents(library_id, deleted, occurred_at);"
-        "CREATE TABLE tags (number INTEGER NOT NULL, tag TEXT NOT NULL, "
-        "PRIMARY KEY (number, tag));"
-        "CREATE INDEX tags_lookup ON tags(tag, number);"
+        "CREATE TABLE tags (number INTEGER NOT NULL, library_id TEXT NOT NULL, "
+        "tag_id TEXT NOT NULL, display_name TEXT NOT NULL, "
+        "PRIMARY KEY (number, library_id, tag_id));"
+        "CREATE INDEX tags_lookup ON tags(library_id, tag_id, number);"
         "CREATE TABLE old_revisions (number INTEGER PRIMARY KEY, body TEXT NOT NULL);"
         "CREATE TABLE binary_files (number INTEGER NOT NULL, name TEXT NOT NULL, "
         "payload BLOB NOT NULL, PRIMARY KEY (number, name));"
@@ -351,8 +379,12 @@ def _create_authority(connection: sqlite3.Connection, documents: tuple[Document,
             ),
         )
         connection.executemany(
-            "INSERT INTO tags VALUES (?, ?)",
-            ((doc.number, tag) for doc in documents for tag in doc.tags),
+            "INSERT INTO tags VALUES (?, ?, ?, ?)",
+            (
+                (doc.number, doc.library_id, tag_id, display_name)
+                for doc in documents
+                for tag_id, display_name in doc.tags
+            ),
         )
         connection.executemany(
             "INSERT INTO old_revisions VALUES (?, ?)",
@@ -416,11 +448,12 @@ def _statement(query: Query) -> tuple[str, tuple[object, ...]]:
         conditions.append("d.occurred_at < ?")
         parameters.append(query.occurred_before)
     if query.tags_any:
-        slots = ", ".join("?" for _ in query.tags_any)
+        matches = " OR ".join("(t.library_id = ? AND t.tag_id = ?)" for _ in query.tags_any)
         conditions.append(
-            f"EXISTS (SELECT 1 FROM tags AS t WHERE t.number = d.number AND t.tag IN ({slots}))"
+            "EXISTS (SELECT 1 FROM tags AS t WHERE t.number = d.number "
+            f"AND t.library_id = d.library_id AND ({matches}))"
         )
-        parameters.extend(query.tags_any)
+        parameters.extend(part for identity in query.tags_any for part in identity)
     sql = (
         "SELECT d.page_id, d.title, d.body, d.text_files_json, d.file_names_json, "
         "d.number FROM " + from_clause + " WHERE " + " AND ".join(conditions)
@@ -434,7 +467,7 @@ def _candidate_rank(
     body: str,
     text_files_json: str,
     file_names_json: str,
-    tags: set[str],
+    tags: set[TagIdentity],
     query: Query,
 ) -> tuple[int, str] | None:
     title_text = _normalized(title)
@@ -442,8 +475,7 @@ def _candidate_rank(
     extra_text = tuple(_normalized(text) for _name, text in json.loads(text_files_json))
     file_names = tuple(_normalized(name) for name in json.loads(file_names_json))
     score = 0
-    for keyword in query.keywords:
-        literal = _normalized(keyword)
+    for literal in dict.fromkeys(_normalized(keyword) for keyword in query.keywords):
         if literal in title_text:
             score += 100
         if literal in body_text:
@@ -461,13 +493,14 @@ def _candidate_rank(
 def _candidate_search(connection: sqlite3.Connection, query: Query) -> tuple[tuple[str, ...], int]:
     statement, parameters = _statement(query)
     rows = connection.execute(statement, parameters).fetchall()
-    tag_matches: dict[int, set[str]] = {}
+    tag_matches: dict[int, set[TagIdentity]] = {}
     if query.tags_any:
-        slots = ", ".join("?" for _ in query.tags_any)
-        for number, tag in connection.execute(
-            f"SELECT number, tag FROM tags WHERE tag IN ({slots})", query.tags_any
+        matches = " OR ".join("(library_id = ? AND tag_id = ?)" for _ in query.tags_any)
+        for number, library_id, tag_id in connection.execute(
+            f"SELECT number, library_id, tag_id FROM tags WHERE {matches}",
+            tuple(part for identity in query.tags_any for part in identity),
         ):
-            tag_matches.setdefault(number, set()).add(tag)
+            tag_matches.setdefault(number, set()).add((library_id, tag_id))
     ranked: list[tuple[int, str]] = []
     for page_id, title, body, text_files_json, file_names_json, number in rows:
         score = _candidate_rank(

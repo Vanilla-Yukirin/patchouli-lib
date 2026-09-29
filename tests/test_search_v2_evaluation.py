@@ -56,6 +56,9 @@ def test_corpus_is_deterministic_diverse_and_keeps_history_outside_current_text(
     assert first[4].text_files == (("notes.txt", "多文件文本独有信号"),)
     assert first[4].binary_files[0][0] == "binary-needle.bin"
     assert first[4].binary_files[0][1].decode("utf-8") == "二进制隐匿密文"
+    assert first[4].tags[-1] == ("same-name-library-1", "跨库同名")
+    assert first[5].tags[-1] == ("same-name-library-2", "跨库同名")
+    assert first[4].library_id != first[5].library_id
     with pytest.raises(ValueError):
         generate_corpus(20_000, 10 * 1_024)
     with pytest.raises(ValueError):
@@ -84,8 +87,24 @@ def test_independent_oracle_uses_literal_page_membership_not_candidate_rank() ->
     assert literal_oracle(documents, binary_content) == frozenset()
     tags = next(query for query in evaluation_queries(96) if query.name == "tags_any_only")
     assert literal_oracle(documents, tags) == literal_oracle(
-        documents, replace(tags, tags_any=("tag-1",))
-    ) | literal_oracle(documents, replace(tags, tags_any=("tag-2",)))
+        documents, replace(tags, tags_any=(("library-0", "tag-1"),))
+    ) | literal_oracle(documents, replace(tags, tags_any=(("library-1", "tag-2"),)))
+    same_id = next(
+        query for query in evaluation_queries(96) if query.name == "same_bare_tag_id_scoped"
+    )
+    assert "page-00000" in literal_oracle(documents, same_id)
+    assert "page-00005" not in literal_oracle(documents, same_id)
+    assert all(
+        document.library_id == "library-0"
+        for document in documents
+        if document.page_id in literal_oracle(documents, same_id)
+    )
+    same_name = next(
+        query
+        for query in evaluation_queries(96)
+        if query.name == "same_tag_name_distinct_ids_scoped"
+    )
+    assert literal_oracle(documents, same_name) == frozenset({"page-00004"})
     before = next(query for query in evaluation_queries(96) if query.name == "time_before_only")
     assert "page-00060" not in literal_oracle(documents, before)
     assert "page-00058" in literal_oracle(documents, before)
@@ -103,6 +122,18 @@ def test_caller_text_is_encoded_before_fts_compilation() -> None:
     assert compiled.startswith('"')
     with pytest.raises(ValueError):
         compile_keyword(("",))
+
+
+def test_normalized_duplicate_keywords_do_not_increase_experimental_rank() -> None:
+    query_type = cast(Any, _MODULE["Query"])
+    rank = cast(Callable[..., tuple[int, str] | None], _MODULE["_candidate_rank"])
+    distinct = query_type("distinct", ("library-0",), ("Straße", "共同主题"))
+    repeated = replace(
+        distinct,
+        keywords=("Straße", "STRASSE", "共同主题", "共同主题"),
+    )
+    fields = ("page-00000", "Straße 共同主题", "", "[]", "[]", set())
+    assert rank(*fields, distinct) == rank(*fields, repeated)
 
 
 def test_all_queries_have_complete_membership_and_manual_sentinels(report: dict[str, Any]) -> None:
@@ -130,6 +161,10 @@ def test_all_queries_have_complete_membership_and_manual_sentinels(report: dict[
     )
     assert _query(report, "broad_all")["candidate_count"] > 256
     assert _query(report, "wide_keywords_or")["candidate_count"] > 256
+    assert (
+        _query(report, "keywords_or_with_duplicates")["top_k_page_ids"]
+        == _query(report, "keywords_or")["top_k_page_ids"]
+    )
     assert _query(report, "disjoint_keywords_or")["top_k_page_ids"] == [
         "page-00000",
         "page-00004",
@@ -143,6 +178,8 @@ def test_all_queries_have_complete_membership_and_manual_sentinels(report: dict[
     )
     assert _query(report, "tags_and_time_only")["matched_count"] > 0
     assert _query(report, "tags_any_only")["matched_count"] > 0
+    assert _query(report, "same_bare_tag_id_scoped")["matched_count"] > 0
+    assert _query(report, "same_tag_name_distinct_ids_scoped")["top_k_page_ids"] == ["page-00004"]
     assert _query(report, "time_before_only")["matched_count"] > 0
     assert _query(report, "old_revision_only")["matched_count"] == 0
     assert _query(report, "deleted_only")["matched_count"] == 0
