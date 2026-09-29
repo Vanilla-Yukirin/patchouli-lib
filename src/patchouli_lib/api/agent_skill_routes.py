@@ -116,7 +116,8 @@ def create_agent_skill_router(engine: Engine) -> APIRouter:
 <main><h1>AI 原生接入</h1>
 <p>复制下面的无密钥指令，交给你的本地 Agent。设备 Token 只在本机输入，
 不要发送给模型。</p>
-<p>如果还没有设备 Token，请先在管理后台创建；已有 Token 无法从校验值找回。</p>
+<p>如果还没有设备 Token，请先在管理后台创建。新版本签发且仍有效的 Agent Token
+可由管理员登录后再次显示；早期只存校验值的旧 Token 无法还原。</p>
 <textarea id="instruction" readonly rows="20" cols="85">{escape(_INSTRUCTIONS)}</textarea>
 <p><button id="copy-instruction" type="button">复制接入指令</button>
 <span id="copy-status" role="status"></span></p>

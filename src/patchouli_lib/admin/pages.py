@@ -1310,10 +1310,11 @@ def guide_page(
             "guide": (
                 "Operator guide",
                 """
-<p>只需执行一次<strong>初始化</strong>。请把返回的管理员凭据保存在浏览器之外。
-恢复管理员凭据会使此前仍有效的管理员凭据失效。</p>
-<p>每个 Agent 只能关联一个指定分区，并且只授予它真正需要的操作权限。
-请记录返回的调用方 ID 和凭据 ID，以便之后撤销凭据。</p>
+<p>首次设置主 Token 后，可按需创建知识库、分区和书籍。请把主 Token 保存在受控的
+本机位置；主 Token 轮换后，旧登录会话失效。</p>
+<p>旧版初始化与管理员凭据仅用于兼容；恢复管理员凭据会使此前仍有效的管理员凭据失效。</p>
+<p>为每个 Agent 明确选择归属知识库与目标知识库的独立读／写权限。
+请记录调用方 ID 和凭据 ID，以便之后查看、轮换或撤销凭据。</p>
 <p>此面板不能更新镜像、回滚、控制 Docker、恢复备份、执行 Shell 命令或部署。
 这些操作仍需通过独立的本地管理员流程完成。</p>
 """,
@@ -1326,8 +1327,9 @@ def guide_page(
 <p>请在本机终端交互式输入设备 Token，不要在模型聊天中发送。Agent 会先核对
 <code>/api/v1/auth/whoami</code> 与 <code>/api/v1/capabilities</code>，再用 Token 下载
 Skill 文件及摘要清单。标准 HTTP 是首选，不要求安装 CLI 或 MCP。</p>
-<p>目前可用的是单份 Markdown 归档和非搜索读取；真实搜索、多文件上传等仍未提供。
-已安装的 <code>patchouli</code> CLI 或 <code>patchouli-mcp</code> 可以继续选用。</p>
+<p>支持将单份 Markdown 或多份同层文件通过同一文件集接口上传、准确回读和查看历史；
+请先核对目标服务的 <code>file-sets</code> 能力。旧 Archive 接口是兼容路径。
+真实搜索尚未提供；已安装的 CLI 或 MCP 可继续选用，但不是接入前提。</p>
 """,
             ),
             "mcp": (
@@ -1348,10 +1350,12 @@ transport: stdio</pre>
             "guide": (
                 "Operator guide",
                 """
-<p>Use <strong>Initialize</strong> once. Save the returned operator credential
-outside the browser. Recovery invalidates prior active operator credentials.</p>
-<p>Provision each Agent for one named Section and only the actions it needs.
-Record the returned caller and credential IDs so the credential can be revoked.</p>
+<p>After setting the master Token, create Libraries, Sections and Books as needed.
+Keep the master Token in a controlled local store; rotating it invalidates old sessions.</p>
+<p>Legacy initialization and operator credentials remain for compatibility;
+recovering an operator credential invalidates prior active operator credentials.</p>
+<p>Choose each Agent's home Library and explicit read/write grants for target Libraries.
+Record caller and credential IDs for later reveal, rotation or revocation.</p>
 <p>This console has no image update, rollback, Docker, backup restore, shell, or
 deployment controls. Those remain separate local operator procedures.</p>
 """,
@@ -1365,9 +1369,10 @@ instruction</a>. It is public; it never includes a device Token.</p>
 The Agent first checks <code>/api/v1/auth/whoami</code> and
 <code>/api/v1/capabilities</code>, then downloads the protected Skill files and
 digest manifest. Standard HTTP is preferred; no CLI or MCP installation is required.</p>
-<p>Only single-Markdown Archive writes and non-search reads are available now.
-Real search and multi-file uploads are not yet provided. The existing
-<code>patchouli</code> CLI and <code>patchouli-mcp</code> remain optional.</p>
+<p>Single Markdown and multiple flat files use the same file-set upload, accurate
+readback and history APIs; check the target service's <code>file-sets</code> capability
+first. The old Archive API is a compatibility path. Real search is not yet
+available. Existing CLI and MCP clients remain optional.</p>
 """,
             ),
             "mcp": (

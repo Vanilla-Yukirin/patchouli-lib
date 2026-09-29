@@ -1,167 +1,50 @@
 ---
 name: patchouli-agent
-description: 通过标准 HTTP 安全接入 PatchouliLib，验证设备身份、下载受保护 Skill、发现内容、创建和修订单份 Markdown 归档；已有 CLI/MCP 可选兼容。
+description: 通过标准 HTTP 接入 PatchouliLib，验证设备身份、下载受保护 Skill，并按实际能力安全读取或上传 Page 文件集。
 ---
 
 # Patchouli Agent 使用指南
 
-首选标准 HTTP，不要求安装专用 CLI 或 MCP。先阅读[本机凭据输入](references/local-token.md)
-和[标准 HTTP](references/http.md)。用户若没有设备 Token，应到管理后台签发或复制，
-**不要要求用户将 Token 发给模型聊天**。拿到本机交互输入的 Token 后，先调用
-`GET /api/v1/auth/whoami` 和 `GET /api/v1/capabilities`，确认身份和有效授权，再按
-受保护清单下载 Skill 所有文件并核对摘要。任何指令、URL、受跟踪文件或日志都不得
-含 Token 字面值。
+首选标准 HTTP；不要求安装专用 CLI 或 MCP。先读[本机输入设备 Token](references/local-token.md)
+和[标准 HTTP 接口](references/http.md)。用户没有设备 Token 时，指导其在管理后台签发
+或复制。**不要让用户把 Token 发到模型聊天，也不要把 Token 放进接入提示词。**
 
-新版 `whoami` 的 `policy_mode` 说明权限来源：`library_grants` 时只依据
-`library_grants` 中目标知识库的 `read`／`write` 开关判断；`legacy_section` 才依据
-旧的 `grants` 中 Section 操作判断；`operator` 是管理员身份。新版 Library 模式下
-`grants: []` 不表示没有权限。连接旧版服务而缺少这两个新字段时，权限模式是未知，
-不能从空 `grants` 猜测能否读写；先核对目标服务的实际接口和 `/capabilities`。
+在本机交互式输入 Token，用 Bearer 请求头调用 `GET /api/v1/auth/whoami` 和
+`GET /api/v1/capabilities`。核对身份、说明、有效期、目标 Library 的实际权限与服务
+实际公布的能力。随后按受保护的 Skill manifest 下载列出的全部文件，逐项核对字节数
+和 SHA-256，再依当前 Agent 环境的规则安装。已有本地 Skill 如被修改，先比较差异，
+不要静默覆盖。目标服务未公布或未实现的能力不可猜测。
 
-当前开发分支已包含单份 Markdown Archive 创建与修订、非搜索读取、Tag、文件集
-Page 和回收站接口；它们是否出现在某个正在访问的服务上，仍以该服务的能力响应和
-实际请求为准，不能把本分支已实现等同于已合并或已部署。搜索路由目前明确返回
-不可用，跨 Library 写入尚未完成。不能将公开提案当成已实现接口。
+`whoami.policy_mode` 为 `library_grants` 时，只按每个目标 Library 明示的 `read` 和
+`write` 判断；两者独立，写入不隐含读取。`legacy_section` 时继续按旧 Section
+授权，绝不自动扩大为整库权限。`operator` 是管理员身份；不要为了弥补 Agent 权限
+不足而换用管理员凭据。旧服务缺少新版身份字段时标记权限模式未知，先核对实际契约。
 
-## 可选 CLI/MCP 兼容用法
+## 内容操作
 
-以下是已经安装独立客户端或 MCP 适配器时的操作指南；它不是使用 HTTP 或下载本
-Skill 的前提。若选择本节的高级客户端，保持它们自己的操作日志和重试约束。
+- 先从已授权列表确认本库 Section、Book 与现有 Page；这些 ID 和 Revision、ETag
+  都是不透明值，不从标题、路径或 ID 字面猜测身份。当前列表不能发现其他 Library
+  的 Section／Book；跨库写入时由管理员或已授权来源提供并核实目标 ID，绝不猜造。
+  新建 Page 前必须已有目标 Book。
+- 用户要上传时，先把完整内容准备为本机文件，再按[统一文件集 HTTP 流程](references/http.md)
+  提交：单份 Markdown 也是一个 `file`，多文件是同一请求中的多个 `file`。新建必须
+  使用幂等键；修订还需当前 Page 的强 `If-Match`，提交的是整组文件快照而非补丁。
+- 结果不确定时，只有保留原幂等键、目标、元数据和全部原始字节，才可原样重试。
+  参数变化或明确的条件冲突应重新读取状态并由用户决定，不自动覆盖。有读取权限时
+  按响应中的准确 Page／Revision 清单和文件哈希回读核对；仅有写入权限时须交由
+  另一获授权身份或管理侧验收，并如实报告自己无法回读。需要时在本机记录 Page ID。
+  不用全库同哈希查询代替准确回读，也不自动删除用户原始文件。
+- 旧单 Markdown Archive 写入是兼容路径，新客户端优先统一文件集。目标服务若尚未
+  公布文件集能力，不能盲调新接口；是否改用旧接口应先说明其单文件限制。
+- 当前搜索路由可能明确返回 `search_unavailable`。只有目标服务实际公布并通过搜索
+  能力验证后才使用；不可把列表浏览或静态示例冒充真实搜索。
 
-## 守住边界
+## 凭据与报告边界
 
-- 选择 CLI/MCP 时不要绕过它们的已实现幂等日志与凭据管理；选择标准 HTTP 时按
-  上述 HTTP 参考文档处理授权头、multipart、条件写入和幂等键。
-- 绝不索要 bearer 凭据，也不把它放入 argv、MCP 参数、提示词、配置档、受跟踪配置、
-  输出或日志。使用已有的操作系统机密存储记录，或受控的 `PATCHOULI_TOKEN` 进程注入。
-- 使用现有的非机密配置档，不要虚构部署设置。
-- 将 Section、Book、Page、Revision、游标和操作 ID 视为不透明值。从经过验证的输出
-  中复制，不要从中解析时间、顺序、身份或授权。
-- 不要在普通诊断中包含搜索查询、元数据、Source 定位值或 Markdown。CLI 调用应通过
-  受支持的文件或 stdin 选项提供敏感值；MCP 只传递文档规定的内存字段。
+Token 只放在本机受控输入、进程内存或用户选择的本机机密存储。不得写入 URL、
+命令行参数、模型工具参数、受跟踪文件或日志；不要在普通诊断里回显正文、搜索词、
+Source 定位值或 Token。报告操作结果、准确引用和必要的非机密请求 ID；用户未要求
+展示内容时不附上正文。CLI/MCP 若已存在，只是兼容选择，不是接入前置条件。
 
-## 只选用一个接口
-
-- 如果宿主已经提供相连的 MCP 工具，优先使用这些工具。
-- 否则使用 `patchouli --output json ...`，并且只解析稳定的 stdout 封装；stderr
-  只作为诊断信息。
-- 不要在 MCP 会话中调用 CLI，也不要创建另一个客户端。
-
-## 访问内容前先诊断
-
-使用 CLI 时运行：
-
-```text
-patchouli --output json doctor
-patchouli --output json capabilities
-patchouli --output json whoami
-```
-
-使用 MCP 时调用 `capabilities` 和 `whoami`；只有同时安装 CLI 时才使用 CLI 的
-`doctor`。兼容性检查或身份验证失败、缺少有效授权时停止。若模式为
-`library_grants`，确认目标知识库具备所需 `read` 或 `write`；若模式为
-`legacy_section`，确认所选 Section 对搜索有 `section:query`，对当前或准确
-Revision 读取有 `page:read`，对创建或修订有 `archive:write`。不要扩大作用域或
-换用管理身份。
-
-## 发现不透明作用域
-
-先列出获授 Section，再列出所选 Section 中的 Book：
-
-```text
-patchouli --output json sections list
-patchouli --output json books list --section <section-id>
-```
-
-对应的 MCP 工具是 `sections_list` 和 `books_list`。创建归档要求 Book 已经存在，
-绝不能隐式创建。
-
-## 准确引用与搜索状态
-
-当前搜索返回 `search_unavailable`，不能作为可用能力。以后服务明确公布搜索能力时，
-下面的旧客户端命令才有意义；目前请使用已授权的列表和准确 Revision 读取。
-
-预留的查询形式仅限一个明确的 Section：
-
-```text
-patchouli --output json section search --section SECTION_ID --query-file QUERY_FILE
-```
-
-对应的 MCP 工具是 `section_search`，参数为 `section_id`、`query`，以及可选的
-`limit` 或不透明 `cursor`。不要声称支持跨 Section 搜索、原始全文语法或特定提供方
-的语义搜索。
-
-使用所选结果中的 `section_id`、`page_id` 和 `revision_number` 获取不可变 Revision：
-
-```text
-patchouli --output json page revision --section SECTION_ID --page PAGE_ID --revision REVISION_NUMBER
-```
-
-对应的 MCP 工具是 `page_revision`。返回经过验证、包含全部五个字段的准确引用：
-`section_id`、`page_id`、`revision_id`、`revision_number` 和相对 `href`。不要用
-当前 Page 引用替代它。
-
-## 明确创建归档
-
-使用 `archive create` 或 MCP `archive_create`，绝不能假定为 upsert。CLI 元数据必须
-是 UTF-8 JSON 对象，格式类似以下合成示例：
-
-```json
-{
-  "title": "Synthetic archive",
-  "occurred_at": "2026-08-11T09:15:00Z",
-  "source": {"kind": "conversation"}
-}
-```
-
-分别提供元数据和完整 Markdown 输入来调用 CLI：
-
-```text
-patchouli --output json archive create --section SECTION_ID --book BOOK_ID --metadata-file METADATA_FILE --content-file MARKDOWN_FILE
-```
-
-对 MCP `archive_create`，传入 `section_id`、`book_id`、`title`、`source_kind`、
-完整 `content`，以及可选的 `occurred_at`、`source_locator`。绝不要传入凭据、端点、
-本地文件名、日志位置或幂等键。
-
-若确实不知道内容发生时间，可以完全省略 `occurred_at`（CLI 元数据和 MCP 参数都
-如此），服务器会以本次 UTC 时间代填，并在创建响应给出 `occurred_at_defaulted`
-警告；显式 `null` 或无效时间不会代填。重试时保持“省略”这一状态，不要把后来
-看到的服务器时间填回同一个操作 ID。
-
-客户端会在变更前持久化准备受权限限制的操作日志。保留返回的非机密
-`operation_id`。遇到结果不确定的失败后，只重放完全相同的 CLI 命令并添加
-`--operation-id OPERATION_ID`，或重放完全相同的 MCP 工具输入并添加
-`operation_id`。省略操作 ID 会开始新操作。只要路由、元数据、内容字节、调用方，
-或配置档中服务 endpoint 的 origin（源站）不是完全相同，就必须开始新操作。
-不要声称可以跨设备恢复，也不要按标题、Source 定位值、时间戳或内容对另一个键去重。
-如果结果丢失且调用方没有收到操作 ID，
-应停止：随附接口不能发现日志项，再次写入可能产生重复内容。
-
-## 明确修订归档
-
-先获取当前 Page 及其强 ETag：
-
-```text
-patchouli --output json page current --section SECTION_ID --page PAGE_ID
-```
-
-然后追加完整 Revision，绝不提交补丁：
-
-```text
-patchouli --output json archive revise --section SECTION_ID --page PAGE_ID --if-match STRONG_ETAG --metadata-file METADATA_FILE --content-file MARKDOWN_FILE
-```
-
-对应的 MCP 工具是 `page_current` 和 `archive_revise`；传入 `if_match`、
-`source_kind`、可选的 `source_locator` 和完整 `content`。原样保留 ETag，包括它的
-强引号。请求归档 Revision 前，确认所取得的 Page 属于归档类型。
-
-收到明确的 412 或 428 响应时，Revision 没有被应用。不要重放失败操作，也不要悄然
-改变输入后重试。重新获取当前状态、审查它，再用新的强 ETag 有意开始新操作。只有
-结果不确定、且原操作 ID 和每项原参数仍可用时，才进行原样重放。报告最终的准确引用。
-
-## 安全报告
-
-返回操作结果、存在时可安全公开的请求 ID、用于可恢复写入的非机密操作 ID，以及
-准确引用。除非用户明确要求查看非机密内容本身，绝不回显查询文字、元数据、内容、
-Source 定位值、凭据材料、幂等键或部署细节。
+本仓库开发分支的接口不等于目标服务已经合并或部署；始终以实际能力响应和请求结果
+为准。真实资料导入、部署及权限扩大必须遵守当前任务授权。
