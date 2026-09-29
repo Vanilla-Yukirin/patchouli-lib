@@ -89,6 +89,12 @@ class MasterRotateAgentCredentialInput(AdminActionInput):
     credential_ttl_seconds: CredentialTtlSeconds
 
 
+class MasterSetAgentLibraryGrantsInput(AdminActionInput):
+    expected_digest: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    read: bool = False
+    write: bool = False
+
+
 class RevokeAgentCredentialInput(AdminActionInput):
     library_name: ResourceName
     caller_id: OpaqueId
@@ -165,4 +171,8 @@ __all__ = [
     "TagFormInput",
     "PageTagFormInput",
     "RestoreArchiveFormInput",
+    "MasterLibraryGrantInput",
+    "MasterProvisionAgentInput",
+    "MasterRotateAgentCredentialInput",
+    "MasterSetAgentLibraryGrantsInput",
 ]

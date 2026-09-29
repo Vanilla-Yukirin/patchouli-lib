@@ -6,6 +6,9 @@ helper. Legacy Section policy is deliberately a marker, not a grant.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal
@@ -49,6 +52,30 @@ class LibraryGrantPolicy:
 
 
 LibraryPolicy = LegacySectionPolicy | LibraryGrantPolicy
+
+
+def target_library_grants_digest(
+    home_library_id: str,
+    caller_id: str,
+    credential_id: str,
+    target_library_id: str,
+    actions: Iterable[LibraryAction],
+    revision: int,
+) -> str:
+    """Stable comparison token for one target Library's read/write state."""
+
+    if revision < 0:
+        raise ValueError("Grant revision must be nonnegative.")
+    state = [
+        home_library_id,
+        caller_id,
+        credential_id,
+        target_library_id,
+        sorted(action.value for action in actions),
+        revision,
+    ]
+    serialized = json.dumps(state, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return hashlib.sha256(b"patchouli-target-library-grants-v1\0" + serialized).hexdigest()
 
 
 def resolve_library_policy(
@@ -116,5 +143,6 @@ __all__ = [
     "LibraryAction",
     "LibraryGrantPolicy",
     "LibraryPolicy",
+    "target_library_grants_digest",
     "resolve_library_policy",
 ]

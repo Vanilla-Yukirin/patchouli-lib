@@ -2,9 +2,36 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Connection, insert
+from collections.abc import Iterable
+
+from sqlalchemy import Connection, func, insert, select
 
 from patchouli_lib.auth.models import MasterAuditEvent
+
+
+def grant_revisions_for_credentials(
+    connection: Connection, credential_ids: Iterable[str]
+) -> dict[tuple[str, str], int]:
+    """Count committed grant-change events; counts remain monotonic across ABA edits."""
+
+    ids = frozenset(credential_ids)
+    if not ids:
+        return {}
+    rows = connection.scalars(
+        select(MasterAuditEvent.target_id).where(
+            MasterAuditEvent.action == "auth.agent_credential.grants_update",
+            MasterAuditEvent.target_type == "credential_library_grant",
+            func.substr(MasterAuditEvent.target_id, 1, 32).in_(ids),
+        )
+    )
+    revisions: dict[tuple[str, str], int] = {}
+    for target in rows:
+        parts = target.split(":")
+        if len(parts) != 4 or parts[0] not in ids:
+            continue
+        key = parts[0], parts[1]
+        revisions[key] = revisions.get(key, 0) + 1
+    return revisions
 
 
 class MasterAuditRepository:
@@ -47,4 +74,4 @@ class MasterAuditRepository:
         )
 
 
-__all__ = ["MasterAuditRepository"]
+__all__ = ["MasterAuditRepository", "grant_revisions_for_credentials"]

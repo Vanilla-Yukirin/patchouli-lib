@@ -5,12 +5,13 @@ from dataclasses import dataclass, field
 from time import time
 from uuid import uuid4
 
-from sqlalchemy import Connection, Engine, insert, select
+from sqlalchemy import Connection, Engine, delete, insert, select
 
 from patchouli_lib.admin.contracts import (
     BootstrapInput,
     MasterProvisionAgentInput,
     MasterRotateAgentCredentialInput,
+    MasterSetAgentLibraryGrantsInput,
     PageTagFormInput,
     ProvisionAgentInput,
     RecoverOperatorInput,
@@ -18,9 +19,13 @@ from patchouli_lib.admin.contracts import (
     RevokeAgentCredentialInput,
     TagFormInput,
 )
-from patchouli_lib.admin.master_audit import MasterAuditRepository
+from patchouli_lib.admin.master_audit import (
+    MasterAuditRepository,
+    grant_revisions_for_credentials,
+)
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.session import MasterAdminSession
+from patchouli_lib.auth.library_policy import LibraryAction, target_library_grants_digest
 from patchouli_lib.auth.models import (
     AdminStructureAuditEvent,
     CredentialLibraryGrant,
@@ -74,6 +79,10 @@ from patchouli_lib.tags.service import TagNotFoundError, TagService
 Clock = Callable[[], int]
 RequestIdFactory = Callable[[], str]
 _MICROSECONDS_PER_SECOND = 1_000_000
+
+
+class GrantVersionConflictError(ValueError):
+    """The exact credential grants changed since the form was displayed."""
 
 
 @dataclass(frozen=True, slots=True, repr=False, eq=False)
@@ -513,6 +522,105 @@ class AdminActionService:
             caller_id=caller_id,
             credential_id=replacement.credential.id,
         )
+
+    def set_agent_grants_as_master(
+        self,
+        library_id: str,
+        caller_id: str,
+        credential_id: str,
+        target_library_id: str,
+        request: MasterSetAgentLibraryGrantsInput,
+        *,
+        master_session: MasterAdminSession,
+    ) -> bool:
+        """Replace grants on one active Library-mode Token, with stale-form protection."""
+        with immediate_transaction(self._engine) as connection:
+            now = self._clock()
+            self._require_current_admin_session(
+                connection, master_session, master_session.audit_fingerprint()
+            )
+            repository = AuthRepository(connection)
+            caller = repository.get_caller(library_id, caller_id)
+            current = repository.get_credential(library_id, caller_id, credential_id)
+            if caller is None or caller.kind is not CallerKind.AGENT or current is None:
+                raise ResourceNotFoundError
+            if (
+                caller.disabled_at is not None
+                or current.created_at > now
+                or current.expires_at <= now
+                or current.revoked_at is not None
+                or current.rotated_at is not None
+            ):
+                raise CredentialLifecycleError
+            if not repository.has_library_grant_policy(library_id, caller_id, credential_id):
+                raise PolicyConflictError
+            if not repository.library_exists(target_library_id):
+                raise ResourceNotFoundError
+            existing = {
+                action
+                for grant in repository.list_credential_library_grants(
+                    home_library_id=library_id, caller_id=caller_id, credential_id=credential_id
+                )
+                if grant.library_id == target_library_id
+                for action in grant.actions
+            }
+            revision = grant_revisions_for_credentials(connection, (credential_id,)).get(
+                (credential_id, target_library_id), 0
+            )
+            if (
+                target_library_grants_digest(
+                    library_id, caller_id, credential_id, target_library_id, existing, revision
+                )
+                != request.expected_digest
+            ):
+                raise GrantVersionConflictError
+            desired = {
+                action
+                for action, enabled in (
+                    (LibraryAction.READ, request.read),
+                    (LibraryAction.WRITE, request.write),
+                )
+                if enabled
+            }
+            if desired == existing:
+                return False
+            old_bits = (
+                f"{int(LibraryAction.READ in existing)}{int(LibraryAction.WRITE in existing)}"
+            )
+            new_bits = f"{int(request.read)}{int(request.write)}"
+            for action in existing - desired:
+                connection.execute(
+                    delete(CredentialLibraryGrant).where(
+                        CredentialLibraryGrant.credential_id == credential_id,
+                        CredentialLibraryGrant.caller_id == caller_id,
+                        CredentialLibraryGrant.home_library_id == library_id,
+                        CredentialLibraryGrant.target_library_id == target_library_id,
+                        CredentialLibraryGrant.action == action.value,
+                    )
+                )
+            for action in desired - existing:
+                connection.execute(
+                    insert(CredentialLibraryGrant),
+                    {
+                        "credential_id": credential_id,
+                        "caller_id": caller_id,
+                        "home_library_id": library_id,
+                        "target_library_id": target_library_id,
+                        "action": action.value,
+                        "created_at": now,
+                    },
+                )
+            MasterAuditRepository(connection).add_success(
+                identity_id=master_session.identity_id,
+                session_generation=master_session.session_generation,
+                session_fingerprint=master_session.audit_fingerprint(),
+                action="auth.agent_credential.grants_update",
+                target_type="credential_library_grant",
+                target_id=f"{credential_id}:{target_library_id}:{old_bits}:{new_bits}",
+                occurred_at=now,
+                event_id=uuid4().hex,
+            )
+        return True
 
     def revoke_agent_credential(self, request: RevokeAgentCredentialInput) -> None:
         actor_token = request.operator_token.get_secret_value()

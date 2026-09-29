@@ -19,6 +19,7 @@ from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.passwords import hash_password
 from patchouli_lib.admin.session import AdminSessionCodec
 from patchouli_lib.app import create_app
+from patchouli_lib.auth.library_policy import LibraryAction, target_library_grants_digest
 from patchouli_lib.auth.models import (
     AdminStructureAuditEvent,
     AgentTokenValue,
@@ -1648,6 +1649,160 @@ def test_master_session_rotates_exact_library_agent_token_without_leaking_old_va
     assert revealed.text == new_token
 
 
+def test_master_grant_editor_changes_only_target_token_with_csrf_and_stale_form_checks(
+    admin_web: AdminWeb,
+) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    home = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Synthetic Grants Home"},
+    )
+    target = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Synthetic Grants Target"},
+    )
+    assert home.status_code == target.status_code == 303
+    home_id = home.headers["location"].rsplit("/", 1)[-1]
+    target_id = target.headers["location"].rsplit("/", 1)[-1]
+    issued = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": csrf,
+            "home_library_id": home_id,
+            "agent_name": "Synthetic Grant Editor Agent",
+            "credential_ttl_seconds": "3600",
+            "grants": [f"{home_id}:read", f"{target_id}:write"],
+        },
+    )
+    assert issued.status_code == 200
+    token = _credential_from(issued.text)
+    _, caller_id, credential_id = _metadata_from(issued.text)
+    base = f"/admin/libraries/{home_id}/callers/{caller_id}/credentials/{credential_id}/grants"
+    detail = admin_web.client.get(f"/admin/libraries/{home_id}/callers/{caller_id}")
+    assert detail.status_code == 200
+    assert f'href="{base}"' in detail.text
+    assert token not in detail.text
+    editor = admin_web.client.get(base + "?lang=zh-CN")
+    assert editor.status_code == 200
+    assert "编辑 Token 授权" in editor.text
+    assert f'action="{base}/{target_id}"' in editor.text
+    original_digest = target_library_grants_digest(
+        home_id, caller_id, credential_id, target_id, (LibraryAction.WRITE,), 0
+    )
+    assert f'name="expected_digest" value="{original_digest}"' in editor.text
+    form = {"csrf_token": csrf, "expected_digest": original_digest, "read": "true"}
+    assert (
+        _post(
+            admin_web.client,
+            f"{base}/{target_id}",
+            data=form,
+            origin="https://other.example.invalid",
+        ).status_code
+        == 403
+    )
+    assert (
+        _post(
+            admin_web.client, f"{base}/{target_id}", data={**form, "csrf_token": "bad"}
+        ).status_code
+        == 403
+    )
+    assert (
+        _post(admin_web.client, f"{base}/{target_id}", data={**form, "extra": "bad"}).status_code
+        == 422
+    )
+    saved = _post(admin_web.client, f"{base}/{target_id}", data=form)
+    assert saved.status_code == 303
+    assert saved.headers["location"] == base
+    assert "编辑 Token 授权" in admin_web.client.get(base).text
+    whoami = admin_web.client.get(
+        "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert whoami.status_code == 200
+    assert sorted(whoami.json()["library_grants"], key=lambda item: item["library_id"]) == [
+        {"library_id": library_id, "actions": ["read"]}
+        for library_id in sorted((home_id, target_id))
+    ]
+    stale = _post(admin_web.client, f"{base}/{target_id}", data=form)
+    assert stale.status_code == 409
+    assert "Grants changed since this page was opened" in stale.text
+    assert token not in stale.text
+    _assert_security_headers(stale)
+
+
+def test_master_grant_editor_rechecks_master_generation_inside_write_transaction(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    library = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Synthetic Grant Generation Library"},
+    )
+    assert library.status_code == 303
+    library_id = library.headers["location"].rsplit("/", 1)[-1]
+    issued = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": csrf,
+            "home_library_id": library_id,
+            "agent_name": "Synthetic Grant Generation Agent",
+            "credential_ttl_seconds": "3600",
+        },
+    )
+    assert issued.status_code == 200
+    token = _credential_from(issued.text)
+    _, caller_id, credential_id = _metadata_from(issued.text)
+    path = (
+        f"/admin/libraries/{library_id}/callers/{caller_id}/credentials/"
+        f"{credential_id}/grants/{library_id}"
+    )
+
+    async def rotate_master_before_action(action: Any, *args: Any, **kwargs: Any) -> Any:
+        with immediate_transaction(admin_web.engine) as connection:
+            assert (
+                MasterTokenRepository(connection).rotate(
+                    _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
+                )
+                is not None
+            )
+        return await starlette_run_in_threadpool(action, *args, **kwargs)
+
+    monkeypatch.setattr(admin_router, "run_in_threadpool", rotate_master_before_action)
+    rejected = _post(
+        admin_web.client,
+        path,
+        data={
+            "csrf_token": csrf,
+            "expected_digest": target_library_grants_digest(
+                library_id, caller_id, credential_id, library_id, (), 0
+            ),
+            "read": "true",
+        },
+    )
+    assert rejected.status_code == 401
+    assert token not in rejected.text
+    with admin_web.engine.connect() as connection:
+        assert (
+            connection.execute(
+                select(MasterAuditEvent.id).where(
+                    MasterAuditEvent.action == "auth.agent_credential.grants_update"
+                )
+            ).all()
+            == []
+        )
+    identity = admin_web.client.get(
+        "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert identity.status_code == 200
+    assert identity.json()["library_grants"] == []
+
+
 def test_master_rotation_does_not_convert_legacy_section_token_to_library_access(
     admin_web: AdminWeb,
 ) -> None:
@@ -1658,6 +1813,22 @@ def test_master_rotation_does_not_convert_legacy_section_token_to_library_access
     detail = admin_web.client.get(detail_path)
     assert detail.status_code == 200
     assert f'action="{detail_path}/credentials/{credential_id}/rotate"' not in detail.text
+    grants_path = f"{detail_path}/credentials/{credential_id}/grants"
+    assert f'href="{grants_path}"' not in detail.text
+    assert admin_web.client.get(grants_path).status_code == 404
+    rejected_grants = _post(
+        admin_web.client,
+        f"{grants_path}/{library_id}",
+        data={
+            "csrf_token": csrf,
+            "expected_digest": target_library_grants_digest(
+                library_id, caller_id, credential_id, library_id, (), 0
+            ),
+            "read": "true",
+        },
+    )
+    assert rejected_grants.status_code == 409
+    assert "explicit reprovision" in rejected_grants.text
     rejected = _post(
         admin_web.client,
         f"{detail_path}/credentials/{credential_id}/rotate",

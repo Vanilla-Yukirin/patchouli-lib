@@ -12,6 +12,7 @@ from sqlalchemy import Connection, Engine, and_, func, or_, select
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.sql import Select
 
+from patchouli_lib.admin.master_audit import grant_revisions_for_credentials
 from patchouli_lib.auth.models import (
     AgentTokenValue,
     AuditEvent,
@@ -215,6 +216,7 @@ class CredentialItem:
     token_tail: str | None
     library_grants_policy: bool = False
     library_grants: tuple[CredentialLibraryGrantItem, ...] = ()
+    grant_revisions: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -488,6 +490,8 @@ class AdminReadModel:
 
     def get_caller(self, library_id: str, caller_id: str) -> CallerView | None:
         with self._engine.connect() as connection:
+            # Keep grant state and its audit-backed version in one SQLite snapshot.
+            connection.exec_driver_sql("BEGIN")
             now = time_ns() // 1_000
             row = (
                 connection.execute(
@@ -567,6 +571,9 @@ class AdminReadModel:
                         action=grant["action"],
                     )
                 )
+            grant_revisions = grant_revisions_for_credentials(
+                connection, (credential["id"] for credential in credential_rows)
+            )
             grant_rows = (
                 connection.execute(
                     select(
@@ -602,6 +609,16 @@ class AdminReadModel:
                         **credential,
                         library_grants_policy=credential["id"] in policy_ids,
                         library_grants=tuple(grants_by_credential.get(credential["id"], ())),
+                        grant_revisions=tuple(
+                            sorted(
+                                (target_id, revision)
+                                for (
+                                    version_credential_id,
+                                    target_id,
+                                ), revision in grant_revisions.items()
+                                if version_credential_id == credential["id"]
+                            )
+                        ),
                     )
                     for credential in credential_rows
                 ),

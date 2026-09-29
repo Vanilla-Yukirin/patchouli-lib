@@ -10,6 +10,7 @@ from patchouli_lib.admin.read_model import (
     CallerItem,
     CallerView,
     ContentActivityItem,
+    CredentialItem,
     LibraryItem,
     LibraryView,
     PageView,
@@ -21,6 +22,7 @@ from patchouli_lib.admin.read_model import (
 )
 from patchouli_lib.admin.service import DeliveredCredential
 from patchouli_lib.api.agent_skill_routes import SkillBundle
+from patchouli_lib.auth.library_policy import LibraryAction, target_library_grants_digest
 from patchouli_lib.auth.schemas import SectionAction
 
 AdminLocale = Literal["en", "zh-CN"]
@@ -968,6 +970,18 @@ def caller_page(
                 f'<button type="submit">{rotate_button}</button>'
                 "</form></details>"
             )
+        edit_grants = ""
+        if (
+            view.kind == "agent"
+            and allow_master_actions
+            and credential_status == "Credential active"
+            and item.library_grants_policy
+        ):
+            path = (
+                f"/admin/libraries/{view.library_id}/callers/{view.id}/credentials/{item.id}/grants"
+            )
+            label = "编辑此 Token 的授权" if locale == "zh-CN" else "Edit this Token's grants"
+            edit_grants = f'<p><a href="{escape(path, quote=True)}">{label}</a></p>'
         credentials.append(
             '<li class="credential-item">'
             '<p class="credential-summary">'
@@ -984,7 +998,7 @@ def caller_page(
             f"<dd>{revoked}</dd>"
             f"<dt>{localize(locale, 'Rotated')}</dt>"
             f"<dd>{rotated}</dd>"
-            f"</dl>{policy_summary}</details>{reveal}{rotate}{revoke}</li>"
+            f"</dl>{policy_summary}</details>{reveal}{edit_grants}{rotate}{revoke}</li>"
         )
     credential_list = (
         f'<ul class="item-list">{"".join(credentials)}</ul>'
@@ -1027,6 +1041,82 @@ def caller_page(
         body,
         crumbs=((localize(locale, "Libraries"), "/admin/libraries"),),
         script_src="/admin/reveal.js" if allow_master_actions and view.kind == "agent" else None,
+    )
+
+
+def agent_grants_page(
+    csrf_token: str,
+    view: CallerView,
+    credential: CredentialItem,
+    libraries: tuple[LibraryItem, ...],
+    *,
+    locale: AdminLocale = "en",
+    message: str | None = None,
+) -> str:
+    title = "编辑 Token 授权" if locale == "zh-CN" else "Edit Token grants"
+    guidance = (
+        "每个知识库单独保存读取和写入权限；未勾选即无权，写入不自动包含读取。"
+        "此设置只影响上方这一枚 Token。跨知识库写入目前仅文件集接口支持。"
+        if locale == "zh-CN"
+        else "Save read and write for each Library separately. Unchecked means no access; "
+        "write does not imply read. Only this Token changes. Cross-Library writes "
+        "currently work through the file-set API only."
+    )
+    base_path = (
+        f"/admin/libraries/{view.library_id}/callers/{view.id}/credentials/{credential.id}/grants"
+    )
+    revisions = dict(credential.grant_revisions)
+    forms = []
+    for library in libraries:
+        actions = {
+            LibraryAction(grant.action)
+            for grant in credential.library_grants
+            if grant.library_id == library.id
+        }
+        digest = target_library_grants_digest(
+            view.library_id,
+            view.id,
+            credential.id,
+            library.id,
+            actions,
+            revisions.get(library.id, 0),
+        )
+        path = f"{base_path}/{library.id}"
+        checked_read = " checked" if LibraryAction.READ in actions else ""
+        checked_write = " checked" if LibraryAction.WRITE in actions else ""
+        read_label = "读取" if locale == "zh-CN" else "Read"
+        write_label = "写入" if locale == "zh-CN" else "Write"
+        save_label = "保存此知识库" if locale == "zh-CN" else "Save this Library"
+        forms.append(
+            '<section class="card">'
+            f"<h2>{escape(library.name)}</h2>"
+            f'<form method="post" action="{escape(path, quote=True)}">'
+            f"{_csrf(escape(csrf_token, quote=True))}"
+            f'<input type="hidden" name="expected_digest" value="{digest}">'
+            f'<label><input type="checkbox" name="read" value="true"{checked_read}> '
+            f"{read_label}</label> "
+            f'<label><input type="checkbox" name="write" value="true"{checked_write}> '
+            f"{write_label}</label> "
+            f'<button type="submit">{save_label}</button>'
+            "</form></section>"
+        )
+    notice = "" if message is None else _notice(localize(locale, message), error=True)
+    body = (
+        f"<h1>{title}</h1>"
+        f"<p>{escape(view.name)} · <code>{escape(credential.id)}</code></p>"
+        f'<p class="section-help">{guidance}</p>'
+        f"{notice}{''.join(forms)}"
+        f'<p><a href="/admin/libraries/{escape(view.library_id, quote=True)}/callers/'
+        f'{escape(view.id, quote=True)}">'
+        f"{'返回 Agent 详情' if locale == 'zh-CN' else 'Back to Agent details'}</a></p>"
+    )
+    return _browser_document(
+        csrf_token,
+        locale,
+        title,
+        base_path,
+        body,
+        crumbs=((localize(locale, "Libraries"), "/admin/libraries"),),
     )
 
 

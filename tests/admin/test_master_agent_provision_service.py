@@ -19,12 +19,18 @@ from patchouli_lib.admin.contracts import (
     MasterLibraryGrantInput,
     MasterProvisionAgentInput,
     MasterRotateAgentCredentialInput,
+    MasterSetAgentLibraryGrantsInput,
 )
 from patchouli_lib.admin.master_audit import MasterAuditRepository
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
-from patchouli_lib.admin.service import AdminActionService
+from patchouli_lib.admin.service import AdminActionService, GrantVersionConflictError
 from patchouli_lib.admin.session import MasterAdminSession
-from patchouli_lib.auth.library_policy import LibraryAction, LibraryGrantPolicy
+from patchouli_lib.auth.library_policy import (
+    LegacySectionPolicy,
+    LibraryAction,
+    LibraryGrantPolicy,
+    target_library_grants_digest,
+)
 from patchouli_lib.auth.models import (
     AgentTokenValue,
     Caller,
@@ -44,7 +50,11 @@ from patchouli_lib.database import build_engine, immediate_transaction
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import CreateLibraryInput
 from patchouli_lib.library.service import LibraryStructureService
-from patchouli_lib.operator.service import CredentialLifecycleError, ResourceNotFoundError
+from patchouli_lib.operator.service import (
+    CredentialLifecycleError,
+    PolicyConflictError,
+    ResourceNotFoundError,
+)
 
 
 @pytest.fixture
@@ -83,6 +93,25 @@ def _request(home_id: str, *grants: tuple[str, LibraryAction]) -> MasterProvisio
             MasterLibraryGrantInput(library_id=library_id, action=action)
             for library_id, action in grants
         ),
+    )
+
+
+def _grant_edit(
+    home_id: str,
+    caller_id: str,
+    credential_id: str,
+    target_id: str,
+    *existing: LibraryAction,
+    read: bool = False,
+    write: bool = False,
+    revision: int = 0,
+) -> MasterSetAgentLibraryGrantsInput:
+    return MasterSetAgentLibraryGrantsInput(
+        expected_digest=target_library_grants_digest(
+            home_id, caller_id, credential_id, target_id, existing, revision
+        ),
+        read=read,
+        write=write,
     )
 
 
@@ -417,3 +446,293 @@ def test_master_rotation_rechecks_expiry_after_acquiring_write_transaction(
     with engine.connect() as connection:
         assert connection.scalar(select(func.count()).select_from(Credential)) == 1
         assert connection.scalar(select(func.count()).select_from(AgentTokenValue)) == 1
+
+
+def test_master_grant_edit_changes_only_exact_token_and_target_library(
+    master_provision_context: tuple[AdminActionService, Engine, MasterAdminSession, str, str],
+) -> None:
+    service, engine, session, home_id, target_id = master_provision_context
+    issued = service.provision_agent_as_master(
+        _request(home_id, (home_id, LibraryAction.READ), (target_id, LibraryAction.WRITE)),
+        master_session=session,
+    )
+    with immediate_transaction(engine) as connection:
+        repository = AuthRepository(connection)
+        caller = repository.get_caller(home_id, issued.caller_id)
+        assert caller is not None
+        legacy_sibling = CredentialIssuer(repository, clock=lambda: 2_000_000).issue(
+            caller, expires_at=2_000_000 + 3_600_000_000
+        )
+    changed = service.set_agent_grants_as_master(
+        home_id,
+        issued.caller_id,
+        issued.credential_id,
+        target_id,
+        _grant_edit(
+            home_id,
+            issued.caller_id,
+            issued.credential_id,
+            target_id,
+            LibraryAction.WRITE,
+            read=True,
+        ),
+        master_session=session,
+    )
+    assert changed is True
+    with engine.connect() as connection:
+        repository = AuthRepository(connection)
+        assert repository.get_library_policy(
+            credential_id=issued.credential_id,
+            caller_id=issued.caller_id,
+            home_library_id=home_id,
+            target_library_id=target_id,
+            active_at=2_000_001,
+        ) == LibraryGrantPolicy(read=True, write=False)
+        assert repository.get_library_policy(
+            credential_id=issued.credential_id,
+            caller_id=issued.caller_id,
+            home_library_id=home_id,
+            target_library_id=home_id,
+            active_at=2_000_001,
+        ) == LibraryGrantPolicy(read=True, write=False)
+        assert (
+            repository.get_library_policy(
+                credential_id=legacy_sibling.credential.id,
+                caller_id=issued.caller_id,
+                home_library_id=home_id,
+                target_library_id=target_id,
+                active_at=2_000_001,
+            )
+            == LegacySectionPolicy()
+        )
+        audit = connection.execute(
+            select(
+                MasterAuditEvent.action, MasterAuditEvent.target_type, MasterAuditEvent.target_id
+            ).where(MasterAuditEvent.action == "auth.agent_credential.grants_update")
+        ).one()
+        assert tuple(audit) == (
+            "auth.agent_credential.grants_update",
+            "credential_library_grant",
+            f"{issued.credential_id}:{target_id}:01:10",
+        )
+    with pytest.raises(PolicyConflictError):
+        service.set_agent_grants_as_master(
+            home_id,
+            issued.caller_id,
+            legacy_sibling.credential.id,
+            target_id,
+            _grant_edit(
+                home_id, issued.caller_id, legacy_sibling.credential.id, target_id, read=True
+            ),
+            master_session=session,
+        )
+    assert service.set_agent_grants_as_master(
+        home_id,
+        issued.caller_id,
+        issued.credential_id,
+        target_id,
+        _grant_edit(
+            home_id,
+            issued.caller_id,
+            issued.credential_id,
+            target_id,
+            LibraryAction.READ,
+            revision=1,
+        ),
+        master_session=session,
+    )
+    with engine.connect() as connection:
+        repository = AuthRepository(connection)
+        assert repository.has_library_grant_policy(home_id, issued.caller_id, issued.credential_id)
+        assert repository.get_library_policy(
+            credential_id=issued.credential_id,
+            caller_id=issued.caller_id,
+            home_library_id=home_id,
+            target_library_id=target_id,
+            active_at=2_000_001,
+        ) == LibraryGrantPolicy(read=False, write=False)
+
+
+def test_master_grant_edit_rejects_stale_form_and_rolls_back_failed_audit(
+    master_provision_context: tuple[AdminActionService, Engine, MasterAdminSession, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, engine, session, home_id, target_id = master_provision_context
+    issued = service.provision_agent_as_master(_request(home_id), master_session=session)
+    original = _grant_edit(home_id, issued.caller_id, issued.credential_id, target_id, read=True)
+    assert service.set_agent_grants_as_master(
+        home_id,
+        issued.caller_id,
+        issued.credential_id,
+        target_id,
+        original,
+        master_session=session,
+    )
+    with pytest.raises(GrantVersionConflictError):
+        service.set_agent_grants_as_master(
+            home_id,
+            issued.caller_id,
+            issued.credential_id,
+            target_id,
+            original,
+            master_session=session,
+        )
+    current = _grant_edit(
+        home_id,
+        issued.caller_id,
+        issued.credential_id,
+        target_id,
+        LibraryAction.READ,
+        read=True,
+        revision=1,
+    )
+    assert not service.set_agent_grants_as_master(
+        home_id,
+        issued.caller_id,
+        issued.credential_id,
+        target_id,
+        current,
+        master_session=session,
+    )
+
+    def reject_audit(self: MasterAuditRepository, **kwargs: Any) -> None:
+        raise RuntimeError("synthetic grant audit failure")
+
+    monkeypatch.setattr(MasterAuditRepository, "add_success", reject_audit)
+    with pytest.raises(RuntimeError, match="synthetic grant audit failure"):
+        service.set_agent_grants_as_master(
+            home_id,
+            issued.caller_id,
+            issued.credential_id,
+            target_id,
+            _grant_edit(
+                home_id,
+                issued.caller_id,
+                issued.credential_id,
+                target_id,
+                LibraryAction.READ,
+                write=True,
+                revision=1,
+            ),
+            master_session=session,
+        )
+    with engine.connect() as connection:
+        repository = AuthRepository(connection)
+        assert repository.get_library_policy(
+            credential_id=issued.credential_id,
+            caller_id=issued.caller_id,
+            home_library_id=home_id,
+            target_library_id=target_id,
+            active_at=2_000_001,
+        ) == LibraryGrantPolicy(read=True, write=False)
+        assert (
+            connection.execute(
+                select(func.count())
+                .select_from(MasterAuditEvent)
+                .where(MasterAuditEvent.action == "auth.agent_credential.grants_update")
+            ).scalar_one()
+            == 1
+        )
+
+
+def test_master_grant_edit_rejects_aba_even_when_bits_return_to_original_value(
+    master_provision_context: tuple[AdminActionService, Engine, MasterAdminSession, str, str],
+) -> None:
+    service, engine, session, home_id, target_id = master_provision_context
+    issued = service.provision_agent_as_master(_request(home_id), master_session=session)
+    stale_form = _grant_edit(home_id, issued.caller_id, issued.credential_id, target_id, read=True)
+    assert service.set_agent_grants_as_master(
+        home_id,
+        issued.caller_id,
+        issued.credential_id,
+        target_id,
+        stale_form,
+        master_session=session,
+    )
+    assert service.set_agent_grants_as_master(
+        home_id,
+        issued.caller_id,
+        issued.credential_id,
+        target_id,
+        _grant_edit(
+            home_id,
+            issued.caller_id,
+            issued.credential_id,
+            target_id,
+            LibraryAction.READ,
+            revision=1,
+        ),
+        master_session=session,
+    )
+    with pytest.raises(GrantVersionConflictError):
+        service.set_agent_grants_as_master(
+            home_id,
+            issued.caller_id,
+            issued.credential_id,
+            target_id,
+            stale_form,
+            master_session=session,
+        )
+    with engine.connect() as connection:
+        repository = AuthRepository(connection)
+        assert repository.get_library_policy(
+            credential_id=issued.credential_id,
+            caller_id=issued.caller_id,
+            home_library_id=home_id,
+            target_library_id=target_id,
+            active_at=2_000_001,
+        ) == LibraryGrantPolicy(read=False, write=False)
+        assert (
+            connection.execute(
+                select(func.count())
+                .select_from(MasterAuditEvent)
+                .where(MasterAuditEvent.action == "auth.agent_credential.grants_update")
+            ).scalar_one()
+            == 2
+        )
+
+
+def test_master_grant_edit_and_rotation_serialize_without_reviving_old_token(
+    master_provision_context: tuple[AdminActionService, Engine, MasterAdminSession, str, str],
+) -> None:
+    service, engine, session, home_id, target_id = master_provision_context
+    first = service.provision_agent_as_master(_request(home_id), master_session=session)
+    assert service.set_agent_grants_as_master(
+        home_id,
+        first.caller_id,
+        first.credential_id,
+        target_id,
+        _grant_edit(home_id, first.caller_id, first.credential_id, target_id, write=True),
+        master_session=session,
+    )
+    replacement = service.rotate_agent_credential_as_master(
+        home_id,
+        first.caller_id,
+        first.credential_id,
+        MasterRotateAgentCredentialInput(credential_ttl_seconds=7200),
+        master_session=session,
+    )
+    with engine.connect() as connection:
+        assert AuthRepository(connection).get_library_policy(
+            credential_id=replacement.credential_id,
+            caller_id=first.caller_id,
+            home_library_id=home_id,
+            target_library_id=target_id,
+            active_at=2_000_001,
+        ) == LibraryGrantPolicy(read=False, write=True)
+    with pytest.raises(CredentialLifecycleError):
+        service.set_agent_grants_as_master(
+            home_id,
+            first.caller_id,
+            first.credential_id,
+            target_id,
+            _grant_edit(
+                home_id,
+                first.caller_id,
+                first.credential_id,
+                target_id,
+                LibraryAction.WRITE,
+                read=True,
+            ),
+            master_session=session,
+        )

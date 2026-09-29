@@ -23,6 +23,7 @@ from patchouli_lib.admin.contracts import (
     BootstrapInput,
     MasterProvisionAgentInput,
     MasterRotateAgentCredentialInput,
+    MasterSetAgentLibraryGrantsInput,
     PageTagFormInput,
     ProvisionAgentInput,
     RecoverOperatorInput,
@@ -37,6 +38,7 @@ from patchouli_lib.admin.pages import (
     STYLESHEET,
     AdminLocale,
     action_result_page,
+    agent_grants_page,
     book_page,
     browser_not_found_page,
     caller_page,
@@ -58,7 +60,11 @@ from patchouli_lib.admin.pages import (
 )
 from patchouli_lib.admin.passwords import password_matches
 from patchouli_lib.admin.read_model import AdminReadModel
-from patchouli_lib.admin.service import AdminActionService, DeliveredCredential
+from patchouli_lib.admin.service import (
+    AdminActionService,
+    DeliveredCredential,
+    GrantVersionConflictError,
+)
 from patchouli_lib.admin.session import AdminSession, AdminSessionCodec, MasterAdminSession
 from patchouli_lib.api.agent_skill_routes import SkillBundle
 from patchouli_lib.auth.repository import AuthRepository
@@ -817,6 +823,146 @@ def create_admin_router(
             )
 
         return protected_page(request, render, allow_self_script=True)
+
+    def grant_editor(
+        request: Request,
+        library_id: str,
+        caller_id: str,
+        credential_id: str,
+        *,
+        message: str | None = None,
+        status_code: int = 200,
+    ) -> Response:
+        locale = locale_for(request)
+        session = current_session(request)
+        if session is None:
+            return redirect("/admin/login")
+        if not isinstance(session, MasterAdminSession):
+            return forbidden(request, "A master session is required.")
+        view = read_model.get_caller(library_id, caller_id)
+        credential = (
+            next((item for item in view.credentials if item.id == credential_id), None)
+            if view is not None
+            else None
+        )
+        now = utc_microseconds()
+        if (
+            view is None
+            or view.kind != "agent"
+            or view.disabled_at is not None
+            or credential is None
+            or not credential.library_grants_policy
+            or credential.created_at > now
+            or credential.expires_at <= now
+            or credential.revoked_at is not None
+            or credential.rotated_at is not None
+        ):
+            return html(
+                browser_not_found_page(session.csrf_token, locale=locale),
+                locale=locale,
+                status_code=404,
+            )
+        page_response = html(
+            agent_grants_page(
+                session.csrf_token,
+                view,
+                credential,
+                read_model.list_libraries(),
+                locale=locale,
+                message=message,
+            ),
+            locale=locale,
+            status_code=status_code,
+        )
+        remember_requested_locale(page_response, request)
+        return page_response
+
+    @router.get("/libraries/{library_id}/callers/{caller_id}/credentials/{credential_id}/grants")
+    def edit_agent_grants(
+        request: Request, library_id: str, caller_id: str, credential_id: str
+    ) -> Response:
+        return grant_editor(request, library_id, caller_id, credential_id)
+
+    @router.post(
+        "/libraries/{library_id}/callers/{caller_id}/credentials/{credential_id}"
+        "/grants/{target_library_id}"
+    )
+    async def set_agent_library_grants(
+        request: Request,
+        library_id: str,
+        caller_id: str,
+        credential_id: str,
+        target_library_id: str,
+    ) -> Response:
+        locale = locale_for(request)
+        if not _same_origin_submission(request):
+            return forbidden(request)
+        session = current_session(request)
+        if session is None:
+            return html(
+                login_page(locale=locale, message="Sign in again."),
+                locale=locale,
+                status_code=401,
+            )
+        if not isinstance(session, MasterAdminSession):
+            return forbidden(request, "A master session is required.")
+        stale_grants = False
+        try:
+            values = await _read_form(
+                request,
+                allowed_fields=frozenset(MasterSetAgentLibraryGrantsInput.model_fields)
+                | {"csrf_token"},
+            )
+            _require_csrf(values, session)
+            await run_in_threadpool(
+                service.set_agent_grants_as_master,
+                library_id,
+                caller_id,
+                credential_id,
+                target_library_id,
+                MasterSetAgentLibraryGrantsInput.model_validate(values),
+                master_session=session,
+            )
+        except _FormError as exc:
+            status, message = exc.status_code, exc.safe_message
+        except GrantVersionConflictError:
+            status, message = 409, "Grants changed since this page was opened. Review and retry."
+            stale_grants = True
+        except (ValidationError, ValueError):
+            status, message = 422, "Check the submitted fields and try again."
+        except AuthenticationError:
+            status, message = 401, "Sign in again."
+        except ResourceNotFoundError:
+            status, message = 404, "The requested local resource was not found."
+        except PolicyConflictError:
+            status, message = 409, "Legacy Section credentials require explicit reprovision."
+        except (CredentialLifecycleError, IntegrityError):
+            status, message = 409, "The action conflicts with current local state."
+        except Exception:
+            status, message = 500, "The action could not be completed."
+        else:
+            return redirect(
+                f"/admin/libraries/{library_id}/callers/{caller_id}"
+                f"/credentials/{credential_id}/grants"
+            )
+        if status == 401:
+            return html(login_page(locale=locale, message=message), locale=locale, status_code=401)
+        if status == 409 and not stale_grants:
+            return html(
+                operations_page(
+                    session.csrf_token, locale=locale, message=message, master_mode=True
+                ),
+                locale=locale,
+                status_code=status,
+            )
+        return grant_editor(
+            request,
+            library_id,
+            caller_id,
+            credential_id,
+            message=message,
+            status_code=status,
+        )
 
     @router.post("/libraries/{library_id}/callers/{caller_id}/credentials/{credential_id}/reveal")
     async def reveal_agent_token(
