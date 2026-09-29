@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Any
 
 from sqlalchemy import Connection, Engine, and_, func, or_, select
@@ -14,6 +16,8 @@ from patchouli_lib.content.models import Page, Revision, RevisionFile
 from patchouli_lib.content.service import page_current_etag
 from patchouli_lib.library.models import Book, Library, Section
 from patchouli_lib.tags.models import PageTag, Tag
+
+_MAX_FILE_SET_PREVIEW_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -141,7 +145,7 @@ class PageView:
     section: SectionItem
     book: BookItem
     page: PageItem
-    markdown: str
+    markdown: str | None
     selected_revision_number: int
     selected_revision_created_at: int
     files: tuple[RevisionFileItem, ...]
@@ -716,6 +720,42 @@ class AdminReadModel:
                     .order_by(RevisionFile.filename)
                 ).mappings()
             )
+            markdown: str | None
+            if row["content_md"] is not None:
+                # Preserve the existing legacy Archive preview, including its size limit.
+                markdown = bytes(row["content_md"]).decode("utf-8")
+            else:
+                # A file-set Revision has no legacy Markdown mirror. Preview only
+                # a small, verified content.md as escaped plain text in the page.
+                preview = (
+                    connection.execute(
+                        select(
+                            RevisionFile.content_bytes,
+                            RevisionFile.size_bytes,
+                            RevisionFile.content_sha256,
+                        ).where(
+                            RevisionFile.library_id == library_id,
+                            RevisionFile.page_uid == row["page_uid"],
+                            RevisionFile.revision_id == row["selected_revision_id"],
+                            RevisionFile.revision_number == row["selected_revision_number"],
+                            RevisionFile.filename == "content.md",
+                            RevisionFile.size_bytes <= _MAX_FILE_SET_PREVIEW_BYTES,
+                            func.length(RevisionFile.content_bytes) <= _MAX_FILE_SET_PREVIEW_BYTES,
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                markdown = None
+                if preview is not None:
+                    content = bytes(preview["content_bytes"])
+                    if (
+                        len(content) == preview["size_bytes"]
+                        and sha256(content).digest() == bytes(preview["content_sha256"])
+                        and b"\x00" not in content
+                    ):
+                        with suppress(UnicodeDecodeError):
+                            markdown = content.decode("utf-8", errors="strict")
             revisions = tuple(
                 RevisionItem(item["revision_number"], item["created_at"])
                 for item in connection.execute(
@@ -748,7 +788,7 @@ class AdminReadModel:
                 section,
                 book,
                 _page_item(row),
-                bytes(row["content_md"]).decode("utf-8"),
+                markdown,
                 row["selected_revision_number"],
                 row["selected_revision_created_at"],
                 files,

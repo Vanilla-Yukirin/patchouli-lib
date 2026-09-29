@@ -13,7 +13,14 @@ from patchouli_lib.admin.read_model import AdminReadModel
 from patchouli_lib.app import create_app
 from patchouli_lib.auth.models import AuditEvent, Caller, Credential, SectionGrant
 from patchouli_lib.config import Settings
-from patchouli_lib.content.models import Page, Revision, RevisionFile
+from patchouli_lib.content.file_manifest import build_file_manifest
+from patchouli_lib.content.models import (
+    Page,
+    Revision,
+    RevisionFile,
+    RevisionFileSeal,
+    RevisionFileSet,
+)
 from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import MarkdownContent, NewPage, NewPageIdentifier, NewRevision
 from patchouli_lib.database import immediate_transaction
@@ -150,6 +157,84 @@ def _insert_page(
             )
         )
     return identifier.value
+
+
+def _append_file_set_revision(
+    engine: Engine,
+    library_id: str,
+    page_id: str,
+    *,
+    number: int,
+    marker: str,
+    files: tuple[tuple[str, bytes], ...],
+) -> None:
+    manifest = build_file_manifest(files)
+    revision_id = "rev_" + marker * 32
+    created_at = (number + 1) * 1_000_000
+    with immediate_transaction(engine) as connection:
+        page = (
+            connection.execute(
+                Page.__table__.select().where(
+                    Page.library_id == library_id, Page.page_id == page_id
+                )
+            )
+            .mappings()
+            .one()
+        )
+        connection.execute(
+            insert(Revision).values(
+                library_id=library_id,
+                revision_id=revision_id,
+                page_uid=page["page_uid"],
+                revision_number=number,
+                content_md=None,
+                content_size_bytes=None,
+                content_sha256=None,
+                created_at=created_at,
+            )
+        )
+        connection.execute(
+            insert(RevisionFileSet).values(
+                library_id=library_id,
+                page_uid=page["page_uid"],
+                revision_id=revision_id,
+                revision_number=number,
+                storage_format="file_set_v1",
+                file_count=len(manifest.files),
+                total_size_bytes=manifest.total_size_bytes,
+                snapshot_sha256=manifest.snapshot_sha256,
+            )
+        )
+        for entry in manifest.files:
+            connection.execute(
+                insert(RevisionFile).values(
+                    library_id=library_id,
+                    page_uid=page["page_uid"],
+                    revision_id=revision_id,
+                    revision_number=number,
+                    filename=entry.name,
+                    content_bytes=entry.content,
+                    size_bytes=entry.content_size_bytes,
+                    content_sha256=entry.content_sha256,
+                )
+            )
+        connection.execute(
+            insert(RevisionFileSeal).values(
+                library_id=library_id,
+                page_uid=page["page_uid"],
+                revision_id=revision_id,
+                revision_number=number,
+            )
+        )
+        connection.execute(
+            update(Page)
+            .where(Page.library_id == library_id, Page.page_id == page_id)
+            .values(
+                current_revision_id=revision_id,
+                current_revision_number=number,
+                updated_at=created_at,
+            )
+        )
 
 
 def _seed_activity_actor(engine: Engine, library_id: str, marker: str) -> tuple[str, str]:
@@ -726,6 +811,109 @@ def test_browser_reads_historical_revision_without_crossing_page_scope(
     assert "版本历史" in chinese.text
     assert "返回当前版本" in chinese.text
     assert "(正在查看)" in chinese.text
+
+
+def test_browser_reads_mixed_and_binary_file_set_history_without_inline_binary(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    library, section, book = _seed_structure(engine)
+    page_id = _insert_page(engine, library, section, book, markdown=b"# Legacy\n")
+    _, _, _, page_path = _paths(library, section, book, page_id)
+    markdown = b"# Mixed\n<script>alert('text')</script>\n"
+    binary = b"\x00<script>alert('binary')</script>\xff"
+    _append_file_set_revision(
+        engine,
+        library,
+        page_id,
+        number=2,
+        marker="3",
+        files=(("content.md", markdown), ("payload.bin", binary)),
+    )
+    _login(client)
+
+    mixed = client.get(page_path)
+    assert mixed.status_code == 200
+    assert "# Mixed" in mixed.text
+    assert "&lt;script&gt;alert(&#x27;text&#x27;)&lt;/script&gt;" in mixed.text
+    assert "<script>alert('text')</script>" not in mixed.text
+    assert "<script>alert('binary')</script>" not in mixed.text
+    assert "content.md" in mixed.text and "payload.bin" in mixed.text
+    assert sha256(markdown).hexdigest() in mixed.text
+    assert sha256(binary).hexdigest() in mixed.text
+    assert f'href="{page_path}/revisions/1"' in mixed.text
+
+    legacy = client.get(f"{page_path}/revisions/1")
+    assert legacy.status_code == 200
+    assert "# Legacy" in legacy.text
+    assert "payload.bin" not in legacy.text
+
+    _append_file_set_revision(
+        engine,
+        library,
+        page_id,
+        number=3,
+        marker="4",
+        files=(("payload.bin", binary),),
+    )
+    binary_only = client.get(page_path)
+    assert binary_only.status_code == 200
+    assert "No safe Markdown preview is available for this version." in binary_only.text
+    assert '<pre class="markdown-preview">' not in binary_only.text
+    assert "payload.bin" in binary_only.text
+    assert "content.md" not in binary_only.text
+    assert "<script>alert('binary')</script>" not in binary_only.text
+    assert sha256(binary).hexdigest() in binary_only.text
+    assert "此版本没有可安全预览的 Markdown 正文。" in client.get(page_path + "?lang=zh-CN").text
+
+    historical_mixed = client.get(f"{page_path}/revisions/2")
+    assert historical_mixed.status_code == 200
+    assert "# Mixed" in historical_mixed.text
+    assert "content.md" in historical_mixed.text
+    assert "payload.bin" in historical_mixed.text
+    assert sha256(markdown).hexdigest() in historical_mixed.text
+
+
+def test_file_set_markdown_preview_rejects_invalid_or_oversized_bytes(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    library, section, book = _seed_structure(engine)
+    page_id = _insert_page(engine, library, section, book)
+    _, _, _, page_path = _paths(library, section, book, page_id)
+    invalid_utf8 = b"\xff<script>alert('invalid')</script>"
+    _append_file_set_revision(
+        engine,
+        library,
+        page_id,
+        number=2,
+        marker="3",
+        files=(("content.md", invalid_utf8),),
+    )
+    _login(client)
+    invalid = client.get(page_path)
+    assert invalid.status_code == 200
+    assert "No safe Markdown preview is available for this version." in invalid.text
+    assert '<pre class="markdown-preview">' not in invalid.text
+    assert "<script>alert('invalid')</script>" not in invalid.text
+    assert sha256(invalid_utf8).hexdigest() in invalid.text
+
+    oversized = b"x" * (64 * 1024 + 1)
+    _append_file_set_revision(
+        engine,
+        library,
+        page_id,
+        number=3,
+        marker="4",
+        files=(("content.md", oversized),),
+    )
+    large = client.get(page_path)
+    assert large.status_code == 200
+    assert "No safe Markdown preview is available for this version." in large.text
+    assert '<pre class="markdown-preview">' not in large.text
+    assert sha256(oversized).hexdigest() in large.text
+    assert len(large.content) < 10_000
+    assert client.get(f"{page_path}/revisions/2").status_code == 200
 
 
 def test_home_shows_only_scoped_successful_content_activity(

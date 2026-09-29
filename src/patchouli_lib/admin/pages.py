@@ -309,6 +309,9 @@ _ZH_CN: dict[str, str] = {
     "Page type": "页面类型",
     "Current Markdown": "当前 Markdown 正文",
     "Markdown body": "Markdown 正文",
+    "No safe Markdown preview is available for this version.": (
+        "此版本没有可安全预览的 Markdown 正文。"
+    ),
     "Version history": "版本历史",
     "Version": "版本",
     "Viewing": "正在查看",
@@ -1392,6 +1395,7 @@ def page_preview_page(
     )
     current = view.selected_revision_number == view.page.revision_number
     heading = "Current Markdown" if current else "Markdown body"
+    no_preview = localize(locale, "No safe Markdown preview is available for this version.")
     body = (
         f'<p class="meta">{localize(locale, "Page type")}: {escape(view.page.page_type)} · '
         f"{localize(locale, 'Occurred')}: {_time(view.page.occurred_at)} · "
@@ -1404,9 +1408,13 @@ def page_preview_page(
             if current
             else f'<p><a href="{base}">{localize(locale, "Back to current version")}</a></p>'
         )
-        + f"<h2>{localize(locale, heading)}</h2>"
-        f'<pre class="markdown-preview">{escape(view.markdown)}</pre>'
-        f"<h2>{localize(locale, 'Files in this version')}</h2>"
+        + (
+            f"<h2>{localize(locale, heading)}</h2>"
+            f'<pre class="markdown-preview">{escape(view.markdown)}</pre>'
+            if view.markdown is not None
+            else f"<p>{no_preview}</p>"
+        )
+        + f"<h2>{localize(locale, 'Files in this version')}</h2>"
         f'<ul class="item-list revision-files">{files}</ul>'
         f"<h2>{localize(locale, 'Version history')}</h2>"
         f'<ul class="item-list revision-history">{history}</ul>'
