@@ -15,11 +15,13 @@ from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import NewCredential
 from patchouli_lib.auth.tokens import generate_token
 from patchouli_lib.backup import BACKUP_FILENAME, BackupDatabaseError, validate_database
+from patchouli_lib.backup import validation as backup_validation
 from patchouli_lib.backup.manifest import (
     INTERMEDIATE_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
 )
+from patchouli_lib.content.file_manifest import build_file_manifest
 from patchouli_lib.content.schemas import (
     AppendArchiveRevisionCommand,
     ArchiveIdempotencyKey,
@@ -33,7 +35,7 @@ from patchouli_lib.database import immediate_transaction
 from patchouli_lib.idempotency.schemas import digest_idempotency_key
 from patchouli_lib.identifiers import parse_occurrence_time
 
-from .test_service import _create, _legacy_bundle_with_binary_file
+from .test_service import _append_binary_file_set, _create, _legacy_bundle_with_binary_file
 
 
 def _replace_trigger(
@@ -216,6 +218,30 @@ def test_validation_rejects_unknown_schema_objects(
     database = _database_copy(complete_engine, tmp_path, "unknown-schema-object")
     with closing(sqlite3.connect(database)) as connection:
         connection.execute(statement)
+        connection.commit()
+    with pytest.raises(BackupDatabaseError):
+        validate_database(database)
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        None,
+        "CREATE TRIGGER trg_revision_file_sets_no_replace "
+        "BEFORE INSERT ON revision_file_sets BEGIN SELECT 1; END",
+    ],
+)
+def test_0013_backup_requires_exact_file_set_no_replace_trigger(
+    complete_engine: Engine,
+    tmp_path: Path,
+    replacement: str | None,
+) -> None:
+    database = _database_copy(complete_engine, tmp_path, "file-set-replace-trigger")
+    validate_database(database)
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("DROP TRIGGER trg_revision_file_sets_no_replace")
+        if replacement is not None:
+            connection.execute(replacement)
         connection.commit()
     with pytest.raises(BackupDatabaseError):
         validate_database(database)
@@ -482,6 +508,160 @@ def test_validation_rejects_legacy_markdown_and_file_snapshot_divergence(
         )
     with pytest.raises(BackupDatabaseError):
         validate_database(database)
+
+
+@pytest.mark.parametrize(
+    ("name", "trigger", "statement"),
+    [
+        (
+            "missing-file",
+            "trg_revision_files_no_delete",
+            "DELETE FROM revision_files WHERE revision_number = 2 AND filename = 'chart.png'",
+        ),
+        (
+            "bad-file-digest",
+            "trg_revision_files_no_update",
+            "UPDATE revision_files SET content_sha256 = zeroblob(32) "
+            "WHERE revision_number = 2 AND filename = 'chart.png'",
+        ),
+        (
+            "bad-file-size",
+            "trg_revision_files_no_update",
+            "UPDATE revision_files SET size_bytes = size_bytes + 1 "
+            "WHERE revision_number = 2 AND filename = 'chart.png'",
+        ),
+        (
+            "noncanonical-name",
+            "trg_revision_files_no_update",
+            "UPDATE revision_files SET filename = 'Café.bin' "
+            "WHERE revision_number = 2 AND filename = 'chart.png'",
+        ),
+        (
+            "bad-snapshot-digest",
+            "trg_revision_file_sets_no_update",
+            "UPDATE revision_file_sets SET snapshot_sha256 = zeroblob(32) "
+            "WHERE revision_number = 2",
+        ),
+        (
+            "bad-file-count",
+            "trg_revision_file_sets_no_update",
+            "UPDATE revision_file_sets SET file_count = 1 WHERE revision_number = 2",
+        ),
+        (
+            "bad-total-size",
+            "trg_revision_file_sets_no_update",
+            "UPDATE revision_file_sets SET total_size_bytes = total_size_bytes + 1 "
+            "WHERE revision_number = 2",
+        ),
+        (
+            "missing-manifest",
+            "trg_revision_file_sets_no_delete",
+            "DELETE FROM revision_file_sets WHERE revision_number = 2",
+        ),
+    ],
+)
+def test_0013_validation_rejects_inconsistent_binary_snapshot(
+    complete_engine: Engine,
+    tmp_path: Path,
+    name: str,
+    trigger: str,
+    statement: str,
+) -> None:
+    _append_binary_file_set(complete_engine)
+    database = _database_copy(complete_engine, tmp_path, name)
+    with closing(sqlite3.connect(database)) as connection:
+        _replace_trigger(connection, trigger, statement, ignore_checks=True)
+    with pytest.raises(BackupDatabaseError):
+        validate_database(database)
+
+
+def test_0013_validation_requires_source_for_binary_revision(
+    complete_engine: Engine,
+    tmp_path: Path,
+) -> None:
+    _append_binary_file_set(complete_engine)
+    database = _database_copy(complete_engine, tmp_path, "missing-binary-source")
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("DELETE FROM page_sources WHERE revision_number = 2")
+        connection.commit()
+    with pytest.raises(BackupDatabaseError):
+        validate_database(database)
+
+
+def test_0013_rejects_noncanonical_stored_name_with_coordinated_digest(
+    complete_engine: Engine,
+    tmp_path: Path,
+) -> None:
+    _revision_id, files = _append_binary_file_set(complete_engine)
+    database = _database_copy(complete_engine, tmp_path, "normalized-name-forgery")
+    decomposed = "Café.bin"
+    assert decomposed != "Café.bin"
+    forged = build_file_manifest([(decomposed, files[0][1]), files[1]])
+    with closing(sqlite3.connect(database)) as connection:
+        _replace_trigger(
+            connection,
+            "trg_revision_files_no_update",
+            "UPDATE revision_files SET filename = 'Café.bin' "
+            "WHERE revision_number = 2 AND filename = 'chart.png'",
+        )
+        _replace_trigger(
+            connection,
+            "trg_revision_file_sets_no_update",
+            "UPDATE revision_file_sets SET snapshot_sha256 = "
+            f"x'{forged.snapshot_sha256.hex()}' WHERE revision_number = 2",
+        )
+    with pytest.raises(BackupDatabaseError):
+        validate_database(database)
+
+
+def test_0013_rejects_oversize_file_set_before_building_manifest(
+    complete_engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _append_binary_file_set(complete_engine)
+    database = _database_copy(complete_engine, tmp_path, "oversize-binary-snapshot")
+    file_size = 16 * 1024 * 1024
+    digest = hashlib.sha256(bytes(file_size)).digest()
+    with closing(sqlite3.connect(database)) as connection:
+        protected = (
+            "trg_revision_files_no_delete",
+            "trg_revision_files_legacy_sealed_insert",
+        )
+        triggers = [
+            connection.execute(
+                "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?", (name,)
+            ).fetchone()[0]
+            for name in protected
+        ]
+        for name in protected:
+            connection.execute(f"DROP TRIGGER {name}")
+        connection.execute("DELETE FROM revision_files WHERE revision_number = 2")
+        for index in range(5):
+            connection.execute(
+                "INSERT INTO revision_files "
+                "(library_id, page_uid, revision_id, revision_number, filename, "
+                "content_bytes, size_bytes, content_sha256) "
+                "SELECT library_id, page_uid, revision_id, revision_number, ?, "
+                "zeroblob(?), ?, ? FROM revisions WHERE revision_number = 2",
+                (f"file-{index:02d}.bin", file_size, file_size, digest),
+            )
+        for statement in triggers:
+            connection.execute(statement)
+        connection.commit()
+
+    builder_file_counts: list[int] = []
+
+    def bounded_builder(files: list[tuple[str, bytes]]) -> object:
+        builder_file_counts.append(len(files))
+        if len(files) == 5:
+            pytest.fail("Over-limit files reached the manifest builder.")
+        return build_file_manifest(files)
+
+    monkeypatch.setattr(backup_validation, "build_file_manifest", bounded_builder)
+    with pytest.raises(BackupDatabaseError):
+        validate_database(database)
+    assert 5 not in builder_file_counts
 
 
 @pytest.mark.parametrize("name", ["CONTENT.MD", "bad\u2028name"])

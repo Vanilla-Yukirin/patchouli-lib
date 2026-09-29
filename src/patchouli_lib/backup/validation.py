@@ -15,6 +15,7 @@ from patchouli_lib.backup.errors import BackupDatabaseError
 from patchouli_lib.backup.manifest import (
     INTERMEDIATE_SCHEMA_REVISION,
     LEGACY_SCHEMA_REVISION,
+    LIFECYCLE_SCHEMA_REVISION,
     OCCURRENCE_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
@@ -296,13 +297,46 @@ _EXPECTED_SQL_HASHES_0012: Final = _EXPECTED_SQL_HASHES_0011 | {
         "8ddf19a61f02d73470377dfdba12c4a50dbbdbf21d5af58c1ff71fb5726289fb"
     ),
 }
+_EXPECTED_SQL_HASHES_0013: Final = _EXPECTED_SQL_HASHES_0012 | {
+    # Produced from an empty database upgraded through 0013 with Alembic,
+    # using the same canonical SQL normalization as every earlier head.
+    ("table", "revision_file_sets"): (
+        "7b6a8edbf33ec75be858e34467af0a5b66b40857e933730c6e043edfbf791816"
+    ),
+    ("table", "revisions"): ("71105002c4fe6bcc2e2395a5275ebafe0f82a9c5d8af64c43149eda8470eb0b2"),
+    ("trigger", "trg_revision_file_seals_validate_insert"): (
+        "dcf7e778802878db2283de905f7686633b5348b1d36da61128d3303937fdde83"
+    ),
+    ("trigger", "trg_revision_file_sets_no_delete"): (
+        "f153580fb563010c427baf200993a66a66d983fd8cc0ada3b2a4f5d5593a297f"
+    ),
+    ("trigger", "trg_revision_file_sets_no_replace"): (
+        "e4a888f9254ce24209a483b19b92eb87d7fa0e031aaf9cfbb123816ea393cff3"
+    ),
+    ("trigger", "trg_revision_file_sets_no_update"): (
+        "8b41aeef4ba4e11d5a95135d75d222a3e043f3b2b4795e7a9e4821b38662abe5"
+    ),
+    ("trigger", "trg_revision_file_sets_validate_insert"): (
+        "42af79a76543598aecd1756d1f2912e0ba019e78515f0d6b14f8849883f0e5aa"
+    ),
+    ("trigger", "trg_revision_files_auto_seal_legacy"): (
+        "e3b74e733993c094a77c2b79ea925b3f21ea4f2973a7815fe8e43114b15329d6"
+    ),
+    ("trigger", "trg_revision_files_legacy_sealed_insert"): (
+        "2a68b99f4f38eaec0a4700097382edecfac806a58bff6fe1995baa2572a0e579"
+    ),
+    ("trigger", "trg_revisions_mirror_content_file"): (
+        "e44829a4bfd0ea7342a066c9f711bdb3fdac9c458be58b4829b24adf861fce36"
+    ),
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
     PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
     INTERMEDIATE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0009,
     TAG_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0010,
     OCCURRENCE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0011,
-    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0012,
+    LIFECYCLE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0012,
+    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0013,
 }
 
 
@@ -427,6 +461,12 @@ def _require_page_graph(connection: sqlite3.Connection, schema_revision: str) ->
     for content, size, digest in connection.execute(
         "SELECT content_md, content_size_bytes, content_sha256 FROM revisions"
     ):
+        if schema_revision == SUPPORTED_SCHEMA_REVISION and (content, size, digest) == (
+            None,
+            None,
+            None,
+        ):
+            continue
         if type(content) is not bytes or type(size) is not int or type(digest) is not bytes:
             raise BackupDatabaseError
         try:
@@ -552,7 +592,11 @@ def _require_occurrence_graph(
 ) -> dict[tuple[str, bytes], int]:
     """Validate the complete correction chain and return each Page's ID time."""
 
-    if schema_revision not in {OCCURRENCE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
+    if schema_revision not in {
+        OCCURRENCE_SCHEMA_REVISION,
+        LIFECYCLE_SCHEMA_REVISION,
+        SUPPORTED_SCHEMA_REVISION,
+    }:
         return {}
     if _one_integer(connection, "SELECT count(*) FROM page_occurrence_correction_guards"):
         raise BackupDatabaseError
@@ -883,7 +927,11 @@ def _require_lifecycle_graph(connection: sqlite3.Connection) -> None:
 
 
 def _require_revision_files(connection: sqlite3.Connection, schema_revision: str) -> None:
-    """Check file bytes and the revision-specific legacy file-set policy."""
+    """Check every file and the revision-specific complete snapshot policy."""
+
+    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+        _require_manifested_revision_files(connection)
+        return
 
     revisions = connection.execute(
         "SELECT library_id, page_uid, revision_id, revision_number, "
@@ -952,6 +1000,102 @@ def _require_revision_files(connection: sqlite3.Connection, schema_revision: str
             build_file_manifest(files)
         except (TypeError, ValueError, OverflowError, UnicodeError):
             raise BackupDatabaseError from None
+
+
+def _require_manifested_revision_files(connection: sqlite3.Connection) -> None:
+    """Verify exact 0013 file-set rows, bytes, hashes and complete digests."""
+
+    revision_count = _one_integer(connection, "SELECT count(*) FROM revisions")
+    manifest_count = _one_integer(connection, "SELECT count(*) FROM revision_file_sets")
+    if revision_count != manifest_count:
+        raise BackupDatabaseError
+
+    revisions = connection.execute(
+        "SELECT r.library_id, r.page_uid, r.revision_id, r.revision_number, "
+        "r.content_md, r.content_size_bytes, r.content_sha256, "
+        "m.storage_format, m.file_count, m.total_size_bytes, m.snapshot_sha256 "
+        "FROM revisions AS r LEFT JOIN revision_file_sets AS m "
+        "ON m.library_id = r.library_id AND m.page_uid = r.page_uid "
+        "AND m.revision_id = r.revision_id AND m.revision_number = r.revision_number"
+    )
+    for (
+        library_id,
+        page_uid,
+        revision_id,
+        revision_number,
+        legacy,
+        legacy_size,
+        legacy_sha,
+        storage_format,
+        file_count,
+        total_size,
+        snapshot_sha,
+    ) in revisions:
+        if (
+            type(library_id) is not str
+            or type(page_uid) is not bytes
+            or type(revision_id) is not str
+            or type(revision_number) is not int
+            or storage_format not in {"legacy_markdown", "file_set_v1"}
+            or type(file_count) is not int
+            or type(total_size) is not int
+        ):
+            raise BackupDatabaseError
+
+        files: list[tuple[str, bytes]] = []
+        observed_total_size = 0
+        rows = connection.execute(
+            "SELECT filename, content_bytes, size_bytes, content_sha256 "
+            "FROM revision_files WHERE library_id = ? AND page_uid = ? "
+            "AND revision_id = ? AND revision_number = ? ORDER BY filename",
+            (library_id, page_uid, revision_id, revision_number),
+        )
+        for name, content, size, digest in rows:
+            if (
+                type(name) is not str
+                or type(content) is not bytes
+                or type(size) is not int
+                or type(digest) is not bytes
+                or len(files) >= MAX_FILES_PER_PAGE
+                or len(content) > MAX_FILE_BYTES
+                or observed_total_size + len(content) > MAX_PAGE_BYTES
+                or size != len(content)
+                or digest != hashlib.sha256(content).digest()
+            ):
+                raise BackupDatabaseError
+            observed_total_size += len(content)
+            files.append((name, content))
+        try:
+            canonical = build_file_manifest(files)
+        except (TypeError, ValueError, OverflowError, UnicodeError):
+            raise BackupDatabaseError from None
+        if [(entry.name, entry.content) for entry in canonical.files] != files:
+            # The builder normalizes input names for creation. Stored names
+            # themselves must already be canonical, not merely normalizable.
+            raise BackupDatabaseError
+        if file_count != len(canonical.files) or total_size != canonical.total_size_bytes:
+            raise BackupDatabaseError
+        if storage_format == "legacy_markdown":
+            if (
+                type(legacy) is not bytes
+                or type(legacy_size) is not int
+                or type(legacy_sha) is not bytes
+                or len(canonical.files) != 1
+                or canonical.files[0].name != "content.md"
+                or canonical.files[0].content != legacy
+                or canonical.files[0].content_size_bytes != legacy_size
+                or canonical.files[0].content_sha256 != legacy_sha
+                or snapshot_sha is not None
+            ):
+                raise BackupDatabaseError
+        elif (
+            legacy is not None
+            or legacy_size is not None
+            or legacy_sha is not None
+            or type(snapshot_sha) is not bytes
+            or snapshot_sha != canonical.snapshot_sha256
+        ):
+            raise BackupDatabaseError
 
 
 def _require_revision_seals(connection: sqlite3.Connection) -> None:
@@ -1217,7 +1361,12 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
 
         if method == "PATCH":
             if (
-                schema_revision not in {OCCURRENCE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}
+                schema_revision
+                not in {
+                    OCCURRENCE_SCHEMA_REVISION,
+                    LIFECYCLE_SCHEMA_REVISION,
+                    SUPPORTED_SCHEMA_REVISION,
+                }
                 or route != CORRECT_OCCURRENCE_ROUTE_TEMPLATE
                 or status != 200
             ):
@@ -1304,7 +1453,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
             continue
 
         if route in {DELETE_PAGE_ROUTE_TEMPLATE, RESTORE_PAGE_ROUTE_TEMPLATE}:
-            if schema_revision != SUPPORTED_SCHEMA_REVISION:
+            if schema_revision not in {LIFECYCLE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
                 raise BackupDatabaseError
             _require_lifecycle_replay(
                 connection,
@@ -1356,7 +1505,11 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
         ):
             raise BackupDatabaseError
         response_occurrence = row[4]
-        if schema_revision in {OCCURRENCE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
+        if schema_revision in {
+            OCCURRENCE_SCHEMA_REVISION,
+            LIFECYCLE_SCHEMA_REVISION,
+            SUPPORTED_SCHEMA_REVISION,
+        }:
             corrections = connection.execute(
                 "SELECT old_occurred_at, new_occurred_at, at_revision_number "
                 "FROM page_occurrence_corrections WHERE library_id = ? AND page_uid = ? "
@@ -1461,7 +1614,7 @@ def _validate_connection(
     ):
         raise BackupDatabaseError
     _require_page_graph(connection, schema_revision)
-    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+    if schema_revision in {LIFECYCLE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
         _require_lifecycle_graph(connection)
     if schema_revision not in {
         LEGACY_SCHEMA_REVISION,

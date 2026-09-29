@@ -244,8 +244,15 @@ def test_application_does_not_register_retrieval_without_cursor_secret(tmp_path:
         application.state.engine.dispose()
 
 
-def test_integrated_archive_create_replay_and_revise(tmp_path: Path) -> None:
-    application: FastAPI = create_app(_settings(tmp_path))
+def test_integrated_archive_create_replay_and_revise(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+    monkeypatch.setenv("PATCHOULI_DATABASE_URL", settings.database_url)
+    monkeypatch.setenv("PATCHOULI_ENVIRONMENT", "test")
+    command.upgrade(Config(str(Path(__file__).resolve().parents[1] / "alembic.ini")), "head")
+    application: FastAPI = create_app(settings)
     engine: Engine = application.state.engine
     section_id, book_id, token = _seed_agent(engine)
     create_type, create_body = _multipart(

@@ -26,12 +26,25 @@ from patchouli_lib.retrieval.service import (
     RetrievalNotFoundError,
     RetrievalPersistenceError,
     RetrievalService,
+    RetrievalUnsupportedFormatError,
 )
 
 from .conftest import CALLER_ID, EXTRA_QUERY_BOOK_ID, RetrievalScope
 
 
 def _service(engine: Engine, scope: RetrievalScope) -> tuple[Connection, RetrievalService]:
+    # create_all() does not run Alembic's 0013 backfill for this synthetic fixture.
+    with immediate_transaction(engine) as fixture_connection:
+        fixture_connection.exec_driver_sql(
+            "INSERT INTO revision_file_sets "
+            "(library_id, page_uid, revision_id, revision_number, storage_format, "
+            "file_count, total_size_bytes, snapshot_sha256) "
+            "SELECT r.library_id, r.page_uid, r.revision_id, r.revision_number, "
+            "'legacy_markdown', 1, r.content_size_bytes, NULL FROM revisions AS r "
+            "WHERE NOT EXISTS (SELECT 1 FROM revision_file_sets AS m WHERE "
+            "m.library_id = r.library_id AND m.page_uid = r.page_uid "
+            "AND m.revision_id = r.revision_id AND m.revision_number = r.revision_number)"
+        )
     connection = engine.connect()
     return connection, RetrievalService(
         RetrievalRepository(connection),
@@ -187,6 +200,152 @@ def test_revision_file_reads_bind_exact_history_and_current_revision(
         )
         assert current.content == retrieval_scope.current_content.encode()
         assert "Historical" not in current.content.decode()
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    ("revision_number", "file_kind"),
+    [(1, "mixed"), (2, "binary")],
+)
+def test_legacy_reads_reject_file_set_before_markdown_validation(
+    retrieval_engine: Engine,
+    retrieval_scope: RetrievalScope,
+    revision_number: int,
+    file_kind: str,
+) -> None:
+    revision_id = (
+        retrieval_scope.first_revision_id
+        if revision_number == 1
+        else retrieval_scope.second_revision_id
+    )
+    with immediate_transaction(retrieval_engine) as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO revision_file_sets "
+            "(library_id, page_uid, revision_id, revision_number, storage_format, "
+            "file_count, total_size_bytes, snapshot_sha256) "
+            "VALUES (?, ?, ?, ?, 'file_set_v1', ?, ?, ?)",
+            (
+                retrieval_scope.library_id,
+                retrieval_scope.first_page_uid,
+                revision_id,
+                revision_number,
+                2 if file_kind == "mixed" else 1,
+                (
+                    2
+                    if file_kind == "binary"
+                    else len(retrieval_scope.historical_content.encode()) + 2
+                ),
+                b"s" * 32,
+            ),
+        )
+        if file_kind == "binary":
+            connection.exec_driver_sql(
+                "UPDATE revisions SET content_md = NULL, content_size_bytes = NULL, "
+                "content_sha256 = NULL WHERE revision_id = ?",
+                (revision_id,),
+            )
+            connection.exec_driver_sql(
+                "DELETE FROM revision_files WHERE revision_id = ?",
+                (revision_id,),
+            )
+        binary = b"\x00\xff"
+        connection.exec_driver_sql(
+            "INSERT INTO revision_files "
+            "(library_id, page_uid, revision_id, revision_number, filename, "
+            "content_bytes, size_bytes, content_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                retrieval_scope.library_id,
+                retrieval_scope.first_page_uid,
+                revision_id,
+                revision_number,
+                "artifact.bin",
+                binary,
+                len(binary),
+                hashlib.sha256(binary).digest(),
+            ),
+        )
+
+    connection, service = _service(retrieval_engine, retrieval_scope)
+    try:
+        if revision_number == 2:
+            with pytest.raises(RetrievalUnsupportedFormatError):
+                service.get_current_page(
+                    retrieval_scope.query_section_id, retrieval_scope.first_page_id
+                )
+            assert (
+                service.get_revision(
+                    retrieval_scope.query_section_id, retrieval_scope.first_page_id, 1
+                ).revision.content
+                == retrieval_scope.historical_content
+            )
+        else:
+            assert (
+                service.get_current_page(
+                    retrieval_scope.query_section_id, retrieval_scope.first_page_id
+                ).document.revision.content
+                == retrieval_scope.current_content
+            )
+        with pytest.raises(RetrievalUnsupportedFormatError):
+            service.get_revision(
+                retrieval_scope.query_section_id,
+                retrieval_scope.first_page_id,
+                revision_number,
+            )
+        with pytest.raises(RetrievalUnsupportedFormatError):
+            service.list_revision_files(
+                retrieval_scope.query_section_id,
+                retrieval_scope.first_page_id,
+                revision_number,
+            )
+        with pytest.raises(RetrievalUnsupportedFormatError):
+            service.get_revision_file(
+                retrieval_scope.query_section_id,
+                retrieval_scope.first_page_id,
+                revision_number,
+                "artifact.bin",
+            )
+        with pytest.raises(RetrievalAuthorizationError):
+            service.get_revision(
+                retrieval_scope.second_query_section_id,
+                retrieval_scope.first_page_id,
+                revision_number,
+            )
+        with pytest.raises(RetrievalNotFoundError):
+            service.get_revision(
+                retrieval_scope.hidden_section_id,
+                retrieval_scope.first_page_id,
+                revision_number,
+            )
+    finally:
+        connection.close()
+
+
+def test_missing_revision_manifest_fails_closed(
+    retrieval_engine: Engine,
+    retrieval_scope: RetrievalScope,
+) -> None:
+    connection, service = _service(retrieval_engine, retrieval_scope)
+    try:
+        with immediate_transaction(retrieval_engine) as mutation:
+            mutation.exec_driver_sql(
+                "DELETE FROM revision_file_sets WHERE revision_id = ?",
+                (retrieval_scope.second_revision_id,),
+            )
+        with pytest.raises(RetrievalPersistenceError):
+            service.get_current_page(
+                retrieval_scope.query_section_id, retrieval_scope.first_page_id
+            )
+        with pytest.raises(RetrievalPersistenceError):
+            service.get_revision(retrieval_scope.query_section_id, retrieval_scope.first_page_id, 2)
+        with pytest.raises(RetrievalPersistenceError):
+            service.list_revision_files(
+                retrieval_scope.query_section_id, retrieval_scope.first_page_id, 2
+            )
+        with pytest.raises(RetrievalPersistenceError):
+            service.get_revision_file(
+                retrieval_scope.query_section_id, retrieval_scope.first_page_id, 2, "content.md"
+            )
     finally:
         connection.close()
 

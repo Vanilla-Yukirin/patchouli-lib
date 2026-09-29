@@ -25,7 +25,11 @@ from patchouli_lib.identifiers import (
     validate_page_id,
     validate_revision_number,
 )
-from patchouli_lib.retrieval.repository import RetrievalRepository, StoredDocument
+from patchouli_lib.retrieval.repository import (
+    RetrievalRepository,
+    RetrievalUnsupportedFormatError,
+    StoredDocument,
+)
 from patchouli_lib.retrieval.schemas import (
     BookView,
     CurrentPageRead,
@@ -135,6 +139,8 @@ class RetrievalService:
                 section_id,
                 page_id,
             )
+        except RetrievalUnsupportedFormatError:
+            raise
         except RuntimeError:
             raise RetrievalPersistenceError from None
         if stored is None:
@@ -168,7 +174,7 @@ class RetrievalService:
         page = self._repository.get_page(caller.library_id, section_id, page_id)
         if page is None:
             raise RetrievalNotFoundError
-        revision = self._repository.get_revision(
+        revision = self._get_revision(
             caller.library_id,
             page.page_uid,
             revision_number,
@@ -223,7 +229,7 @@ class RetrievalService:
         page = self._repository.get_page(caller.library_id, section_id, page_id)
         if page is None:
             raise RetrievalNotFoundError
-        revision = self._repository.get_revision(caller.library_id, page.page_uid, revision_number)
+        revision = self._get_revision(caller.library_id, page.page_uid, revision_number)
         if revision is None:
             raise RetrievalNotFoundError
         if not self._repository.has_revision_file_seal(
@@ -259,6 +265,19 @@ class RetrievalService:
         except (TypeError, ValueError, OverflowError, UnicodeError):
             raise RetrievalPersistenceError from None
         return page, revision, manifest
+
+    def _get_revision(
+        self,
+        library_id: str,
+        page_uid: bytes,
+        revision_number: int,
+    ) -> RevisionRecord | None:
+        try:
+            return self._repository.get_revision(library_id, page_uid, revision_number)
+        except RetrievalUnsupportedFormatError:
+            raise
+        except RuntimeError:
+            raise RetrievalPersistenceError from None
 
     def _require_current_agent(self) -> CallerRecord:
         authenticated = self._authenticated
@@ -396,5 +415,6 @@ __all__ = [
     "RetrievalAuthorizationError",
     "RetrievalNotFoundError",
     "RetrievalPersistenceError",
+    "RetrievalUnsupportedFormatError",
     "RetrievalService",
 ]

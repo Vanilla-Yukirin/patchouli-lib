@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -34,11 +35,13 @@ from patchouli_lib.backup import (
 from patchouli_lib.backup import service as backup_service
 from patchouli_lib.backup.manifest import (
     LEGACY_SCHEMA_REVISION,
+    LIFECYCLE_SCHEMA_REVISION,
     MAX_MANIFEST_BYTES,
     PREVIOUS_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
     BackupManifestV1,
 )
+from patchouli_lib.content.file_manifest import build_file_manifest
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.library.schemas import CreateLibraryInput
 
@@ -113,6 +116,85 @@ def _add_second_revision_with_binary_file(engine: Engine) -> tuple[bytes, bytes]
             },
         )
     return markdown, binary
+
+
+def _append_binary_file_set(engine: Engine) -> tuple[str, tuple[tuple[str, bytes], ...]]:
+    """Append a 0013 snapshot with no Markdown and an exact Source."""
+
+    revision_id = "rev_" + "77" * 16
+    files = (("chart.png", b"\x89PNG\r\n\x1a\n"), ("资料.bin", b"\x00\xff\x81payload"))
+    manifest = build_file_manifest(files)
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            text(
+                "INSERT INTO revisions (library_id, revision_id, page_uid, "
+                "revision_number, content_md, content_size_bytes, content_sha256, "
+                "created_at) SELECT library_id, :revision_id, page_uid, 2, "
+                "NULL, NULL, NULL, 3000000 FROM revisions WHERE revision_number = 1"
+            ),
+            {"revision_id": revision_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO revision_file_sets "
+                "(library_id, page_uid, revision_id, revision_number, storage_format, "
+                "file_count, total_size_bytes, snapshot_sha256) "
+                "SELECT library_id, page_uid, revision_id, 2, 'file_set_v1', "
+                ":file_count, :total_size, :snapshot_sha FROM revisions "
+                "WHERE revision_id = :revision_id"
+            ),
+            {
+                "revision_id": revision_id,
+                "file_count": len(manifest.files),
+                "total_size": manifest.total_size_bytes,
+                "snapshot_sha": manifest.snapshot_sha256,
+            },
+        )
+        for file in manifest.files:
+            connection.execute(
+                text(
+                    "INSERT INTO revision_files "
+                    "(library_id, page_uid, revision_id, revision_number, filename, "
+                    "content_bytes, size_bytes, content_sha256) "
+                    "SELECT library_id, page_uid, revision_id, 2, :name, :content, "
+                    ":size, :digest FROM revisions WHERE revision_id = :revision_id"
+                ),
+                {
+                    "revision_id": revision_id,
+                    "name": file.name,
+                    "content": file.content,
+                    "size": file.content_size_bytes,
+                    "digest": file.content_sha256,
+                },
+            )
+        connection.execute(
+            text(
+                "INSERT INTO revision_file_seals "
+                "(library_id, page_uid, revision_id, revision_number) "
+                "SELECT library_id, page_uid, revision_id, 2 FROM revisions "
+                "WHERE revision_id = :revision_id"
+            ),
+            {"revision_id": revision_id},
+        )
+        connection.execute(
+            text(
+                "UPDATE pages SET current_revision_id = :revision_id, "
+                "current_revision_number = 2, updated_at = 3000000"
+            ),
+            {"revision_id": revision_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO page_sources "
+                "(library_id, source_id, page_uid, revision_id, revision_number, "
+                "kind, locator, captured_at, created_at) "
+                "SELECT library_id, :source_id, page_uid, revision_id, 2, "
+                "'synthetic', 'urn:synthetic:binary-snapshot', 3000000, 3000000 "
+                "FROM revisions WHERE revision_id = :revision_id"
+            ),
+            {"source_id": "8" * 32, "revision_id": revision_id},
+        )
+    return revision_id, files
 
 
 def _legacy_bundle_with_binary_file(
@@ -215,6 +297,137 @@ def test_0008_bundle_remains_explicitly_verifiable_and_restorable(
             b"# Synthetic archive\n\nExact bytes.\n",
         )
         assert connection.execute("SELECT count(*) FROM revision_file_seals").fetchone() == (1,)
+
+
+def test_0012_bundle_remains_explicitly_verifiable_and_restorable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "lifecycle-source.sqlite"
+    command.upgrade(_config(source_path, monkeypatch), LIFECYCLE_SCHEMA_REVISION)
+
+    bundle = tmp_path / "lifecycle-bundle"
+    bundle.mkdir()
+    database = bundle / BACKUP_FILENAME
+    with closing(sqlite3.connect(source_path)) as source:
+        journal_mode = source.execute("PRAGMA journal_mode").fetchone()[0]
+        with closing(sqlite3.connect(database)) as destination:
+            source.backup(destination)
+            destination.execute("PRAGMA journal_mode = DELETE")
+            destination.commit()
+    data = database.read_bytes()
+    artifact = identity()
+    manifest = BackupManifestV1(
+        schema_version=1,
+        backup_filename=BACKUP_FILENAME,
+        byte_size=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        created_at="2026-08-13T12:34:56.123456Z",
+        app_version=APP_VERSION,
+        schema_revision=LIFECYCLE_SCHEMA_REVISION,
+        sqlite_version=sqlite3.sqlite_version,
+        source_journal_mode=journal_mode,
+        artifact_identity=artifact.identity,
+        artifact_digest=artifact.digest,
+    )
+    (bundle / MANIFEST_FILENAME).write_bytes(manifest.canonical_bytes())
+
+    with pytest.raises(BackupManifestError):
+        verify_backup_bundle(bundle, app_version=APP_VERSION)
+    assert (
+        verify_backup_bundle(
+            bundle, app_version=APP_VERSION, schema_revision=LIFECYCLE_SCHEMA_REVISION
+        )
+        == manifest
+    )
+    restored = tmp_path / "lifecycle-restored.sqlite"
+    restore_backup(
+        bundle, restored, app_version=APP_VERSION, schema_revision=LIFECYCLE_SCHEMA_REVISION
+    )
+    validate_database(restored, schema_revision=LIFECYCLE_SCHEMA_REVISION)
+
+
+def test_0013_backup_restores_exact_binary_file_set(
+    complete_engine: Engine,
+    tmp_path: Path,
+) -> None:
+    revision_id, files = _append_binary_file_set(complete_engine)
+    bundle = tmp_path / "binary-bundle"
+    result = _create(complete_engine, bundle)
+    assert result.manifest.schema_revision == SUPPORTED_SCHEMA_REVISION
+    assert verify_backup_bundle(bundle, app_version=APP_VERSION) == result.manifest
+
+    restored = tmp_path / "binary-restored.sqlite"
+    restore_backup(bundle, restored, app_version=APP_VERSION)
+    validate_database(restored)
+    with closing(sqlite3.connect(restored)) as connection:
+        legacy = connection.execute(
+            "SELECT content_md, content_size_bytes, content_sha256 FROM revisions "
+            "WHERE revision_id = ?",
+            (revision_id,),
+        ).fetchone()
+        assert legacy == (None, None, None)
+        restored_files = connection.execute(
+            "SELECT filename, content_bytes FROM revision_files WHERE revision_id = ?",
+            (revision_id,),
+        ).fetchall()
+        assert sorted(restored_files) == sorted(files)
+        stored_manifest = connection.execute(
+            "SELECT file_count, total_size_bytes, snapshot_sha256 "
+            "FROM revision_file_sets WHERE revision_id = ?",
+            (revision_id,),
+        ).fetchone()
+        expected = build_file_manifest(files)
+        assert stored_manifest == (
+            len(files),
+            expected.total_size_bytes,
+            expected.snapshot_sha256,
+        )
+        assert connection.execute(
+            "SELECT count(*) FROM page_sources WHERE revision_id = ?", (revision_id,)
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT count(*) FROM revision_file_seals WHERE revision_id = ?", (revision_id,)
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT count(*) FROM revision_file_seal_guards WHERE revision_id = ?",
+            (revision_id,),
+        ).fetchone() == (1,)
+
+
+def test_0013_bundle_rejects_forged_snapshot_digest_even_with_rehashed_outer_manifest(
+    complete_engine: Engine,
+    tmp_path: Path,
+) -> None:
+    _append_binary_file_set(complete_engine)
+    bundle = tmp_path / "forged-binary-bundle"
+    result = _create(complete_engine, bundle)
+    with closing(sqlite3.connect(result.database_path)) as connection:
+        trigger = connection.execute(
+            "SELECT sql FROM sqlite_schema WHERE type = 'trigger' "
+            "AND name = 'trg_revision_file_sets_no_update'"
+        ).fetchone()
+        assert trigger is not None and isinstance(trigger[0], str)
+        connection.execute("DROP TRIGGER trg_revision_file_sets_no_update")
+        connection.execute(
+            "UPDATE revision_file_sets SET snapshot_sha256 = zeroblob(32) WHERE revision_number = 2"
+        )
+        connection.execute(trigger[0])
+        connection.commit()
+    data = result.database_path.read_bytes()
+    forged_outer = replace(
+        result.manifest,
+        byte_size=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+    )
+    result.manifest_path.write_bytes(forged_outer.canonical_bytes())
+
+    with pytest.raises(BackupDatabaseError):
+        verify_backup_bundle(bundle, app_version=APP_VERSION)
+    destination = tmp_path / "forged-binary-restored.sqlite"
+    with pytest.raises(BackupDatabaseError):
+        restore_backup(bundle, destination, app_version=APP_VERSION)
+    assert not destination.exists()
 
 
 def test_new_backup_restores_admin_structure_audit(complete_engine: Engine, tmp_path: Path) -> None:

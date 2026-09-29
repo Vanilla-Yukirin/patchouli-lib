@@ -246,7 +246,7 @@ def test_page_content_migration_upgrade_check_downgrade_upgrade(
                 "trg_pages_stable_identity",
             }
             assert first.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == (
-                "20260929_0012"
+                "20260929_0013"
             )
     finally:
         engine.dispose()

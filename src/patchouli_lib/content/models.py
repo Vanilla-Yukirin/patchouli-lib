@@ -15,7 +15,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from patchouli_lib.content.file_manifest import MAX_FILE_BYTES, MAX_FILENAME_BYTES
+from patchouli_lib.content.file_manifest import (
+    MAX_FILE_BYTES,
+    MAX_FILENAME_BYTES,
+    MAX_FILES_PER_PAGE,
+    MAX_PAGE_BYTES,
+)
 from patchouli_lib.identifiers import (
     MAX_BASE_SLUG_BYTES,
     MAX_COLLISION_ORDINAL,
@@ -423,16 +428,20 @@ class Revision(Base):
             name="ck_revisions_revision_number",
         ),
         CheckConstraint(
-            f"typeof(content_md) = 'blob' AND length(content_md) BETWEEN 1 "
-            f"AND {MAX_MARKDOWN_BYTES} AND instr(content_md, x'00') = 0",
+            "content_md IS NULL OR (typeof(content_md) = 'blob' "
+            f"AND length(content_md) BETWEEN 1 AND {MAX_MARKDOWN_BYTES} "
+            "AND instr(content_md, x'00') = 0)",
             name="ck_revisions_content_md",
         ),
         CheckConstraint(
-            "content_size_bytes = length(content_md)",
+            "(content_md IS NULL AND content_size_bytes IS NULL) OR "
+            "(content_md IS NOT NULL AND content_size_bytes = length(content_md))",
             name="ck_revisions_content_size_bytes",
         ),
         CheckConstraint(
-            f"typeof(content_sha256) = 'blob' AND length(content_sha256) = {CONTENT_SHA256_BYTES}",
+            "(content_md IS NULL AND content_sha256 IS NULL) OR "
+            "(content_md IS NOT NULL AND typeof(content_sha256) = 'blob' "
+            f"AND length(content_sha256) = {CONTENT_SHA256_BYTES})",
             name="ck_revisions_content_sha256",
         ),
         CheckConstraint("created_at >= 0", name="ck_revisions_created_at"),
@@ -467,17 +476,54 @@ class Revision(Base):
     )
     page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), nullable=False)
     revision_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    content_md: Mapped[bytes] = mapped_column(LargeBinary(MAX_MARKDOWN_BYTES), nullable=False)
-    content_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    content_sha256: Mapped[bytes] = mapped_column(
+    content_md: Mapped[bytes | None] = mapped_column(LargeBinary(MAX_MARKDOWN_BYTES))
+    content_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    content_sha256: Mapped[bytes | None] = mapped_column(
         LargeBinary(CONTENT_SHA256_BYTES),
-        nullable=False,
     )
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
+class RevisionFileSet(Base):
+    """Format and declared complete manifest for one immutable Revision."""
+
+    __tablename__ = "revision_file_sets"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id", "page_uid", "revision_id", "revision_number"],
+            [
+                "revisions.library_id",
+                "revisions.page_uid",
+                "revisions.revision_id",
+                "revisions.revision_number",
+            ],
+            name="fk_revision_file_sets_exact_revision",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "(storage_format = 'legacy_markdown' AND file_count = 1 "
+            f"AND total_size_bytes BETWEEN 1 AND {MAX_MARKDOWN_BYTES} "
+            "AND snapshot_sha256 IS NULL) OR "
+            "(storage_format = 'file_set_v1' "
+            f"AND file_count BETWEEN 1 AND {MAX_FILES_PER_PAGE} "
+            f"AND total_size_bytes BETWEEN 0 AND {MAX_PAGE_BYTES} "
+            "AND typeof(snapshot_sha256) = 'blob' AND length(snapshot_sha256) = 32)",
+            name="ck_revision_file_sets_format_manifest",
+        ),
+    )
+
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
+    revision_id: Mapped[str] = mapped_column(String(REVISION_ID_LENGTH), primary_key=True)
+    revision_number: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    storage_format: Mapped[str] = mapped_column(String(16), nullable=False)
+    file_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    total_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    snapshot_sha256: Mapped[bytes | None] = mapped_column(LargeBinary(CONTENT_SHA256_BYTES))
+
+
 class RevisionFile(Base):
-    """One immutable row for a Revision file; migration triggers seal legacy sets."""
+    """One immutable flat file in a Revision's sealed snapshot."""
 
     __tablename__ = "revision_files"
     __table_args__ = (
@@ -525,7 +571,7 @@ class RevisionFile(Base):
 
 
 class RevisionFileSeal(Base):
-    """An immutable marker for a complete legacy Revision file set."""
+    """An immutable marker for a complete Revision file set."""
 
     __tablename__ = "revision_file_seals"
     __table_args__ = (
@@ -821,4 +867,5 @@ __all__ = [
     "PageSource",
     "Revision",
     "RevisionFile",
+    "RevisionFileSet",
 ]

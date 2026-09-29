@@ -77,6 +77,15 @@ def retrieval_api(
     engine_iterator = engine_factory(tmp_path)
     retrieval_engine = next(engine_iterator)
     retrieval_scope = scope_factory(retrieval_engine)
+    # create_all() does not run Alembic's 0013 backfill for this synthetic fixture.
+    with immediate_transaction(retrieval_engine) as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO revision_file_sets "
+            "(library_id, page_uid, revision_id, revision_number, storage_format, "
+            "file_count, total_size_bytes, snapshot_sha256) "
+            "SELECT library_id, page_uid, revision_id, revision_number, "
+            "'legacy_markdown', 1, content_size_bytes, NULL FROM revisions"
+        )
     with retrieval_engine.connect() as connection:
         credential = RetrievalRepository(connection).get_credential(
             retrieval_scope.library_id,
@@ -296,6 +305,106 @@ def test_revision_file_manifest_and_download_are_exact_and_not_cacheable(
     )
     assert download.headers["X-Content-Type-Options"] == "nosniff"
     _assert_protected(download)
+
+
+def test_file_set_is_rejected_by_legacy_routes_after_authorization(
+    retrieval_api: RetrievalApi,
+) -> None:
+    scope = retrieval_api.scope
+    binary = b"\x00\xff"
+    with immediate_transaction(retrieval_api.engine) as connection:
+        connection.exec_driver_sql(
+            "DELETE FROM revision_file_sets WHERE revision_id = ?",
+            (scope.second_revision_id,),
+        )
+        connection.exec_driver_sql(
+            "UPDATE revisions SET content_md = NULL, content_size_bytes = NULL, "
+            "content_sha256 = NULL WHERE revision_id = ?",
+            (scope.second_revision_id,),
+        )
+        connection.exec_driver_sql(
+            "DELETE FROM revision_files WHERE revision_id = ?",
+            (scope.second_revision_id,),
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO revision_file_sets "
+            "(library_id, page_uid, revision_id, revision_number, storage_format, "
+            "file_count, total_size_bytes, snapshot_sha256) "
+            "VALUES (?, ?, ?, 2, 'file_set_v1', 1, ?, ?)",
+            (
+                scope.library_id,
+                scope.first_page_uid,
+                scope.second_revision_id,
+                len(binary),
+                b"s" * 32,
+            ),
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO revision_files "
+            "(library_id, page_uid, revision_id, revision_number, filename, "
+            "content_bytes, size_bytes, content_sha256) VALUES (?, ?, ?, 2, ?, ?, ?, ?)",
+            (
+                scope.library_id,
+                scope.first_page_uid,
+                scope.second_revision_id,
+                "artifact.bin",
+                binary,
+                len(binary),
+                hashlib.sha256(binary).digest(),
+            ),
+        )
+
+    page_path = f"/api/v1/sections/{scope.query_section_id}/pages/{scope.first_page_id}"
+    for path in (
+        page_path,
+        f"{page_path}/revisions/2",
+        f"{page_path}/revisions/2/files",
+        f"{page_path}/revisions/2/files/artifact.bin",
+    ):
+        response = _get(retrieval_api, path)
+        _assert_problem(response, 409, "revision_format_unsupported")
+        assert "artifact.bin" not in response.text
+        assert "ETag" not in response.headers
+
+    historical = _get(retrieval_api, f"{page_path}/revisions/1")
+    assert historical.status_code == 200
+    assert historical.json()["revision"]["content"] == scope.historical_content
+
+    with TestClient(_app(retrieval_api), raise_server_exceptions=False) as client:
+        unauthenticated = client.get(page_path)
+    _assert_problem(unauthenticated, 401, "authentication_required")
+    forbidden = _get(
+        retrieval_api,
+        f"/api/v1/sections/{scope.second_query_section_id}/pages/{scope.first_page_id}",
+    )
+    _assert_problem(forbidden, 403, "insufficient_scope")
+    hidden = _get(
+        retrieval_api,
+        f"/api/v1/sections/{scope.hidden_section_id}/pages/{scope.first_page_id}",
+    )
+    _assert_problem(hidden, 404, "resource_not_found")
+
+
+def test_missing_revision_manifest_is_a_sanitized_persistence_failure(
+    retrieval_api: RetrievalApi,
+) -> None:
+    scope = retrieval_api.scope
+    with immediate_transaction(retrieval_api.engine) as connection:
+        connection.exec_driver_sql(
+            "DELETE FROM revision_file_sets WHERE revision_id = ?",
+            (scope.second_revision_id,),
+        )
+    page_path = f"/api/v1/sections/{scope.query_section_id}/pages/{scope.first_page_id}"
+    for path in (
+        page_path,
+        f"{page_path}/revisions/2",
+        f"{page_path}/revisions/2/files",
+        f"{page_path}/revisions/2/files/content.md",
+    ):
+        response = _get(retrieval_api, path)
+        _assert_problem(response, 500, "internal_error")
+        assert scope.current_content not in response.text
+        assert "ETag" not in response.headers
 
 
 @pytest.mark.parametrize("suffix", ["missing.md", "Content.md", "..%2Fsecret", "%0D%0Aevil", "CON"])

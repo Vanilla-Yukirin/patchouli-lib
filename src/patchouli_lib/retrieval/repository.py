@@ -27,6 +27,7 @@ from patchouli_lib.content.models import (
     RevisionFile,
     RevisionFileSeal,
     RevisionFileSealGuard,
+    RevisionFileSet,
 )
 from patchouli_lib.content.schemas import PageRecord, RevisionRecord
 from patchouli_lib.identifiers import page_id_registry_digest
@@ -47,6 +48,13 @@ class StoredRevisionFile:
     content: bytes
     size_bytes: int
     content_sha256: bytes
+
+
+class RetrievalUnsupportedFormatError(RuntimeError):
+    """The legacy Markdown reader cannot represent this Revision format."""
+
+    def __init__(self) -> None:
+        super().__init__("The requested Revision format is not supported by this read route.")
 
 
 class RetrievalRepository:
@@ -214,7 +222,22 @@ class RetrievalRepository:
             Revision.revision_number == revision_number,
         )
         row = self._connection.execute(statement).mappings().one_or_none()
-        return None if row is None else RevisionRecord.model_validate(dict(row))
+        if row is None:
+            return None
+        # Check the stored format before validating the legacy Markdown model:
+        # file_set_v1 may legitimately have no content_md mirror at all.
+        format_statement = select(RevisionFileSet.storage_format).where(
+            RevisionFileSet.library_id == library_id,
+            RevisionFileSet.page_uid == page_uid,
+            RevisionFileSet.revision_id == row["revision_id"],
+            RevisionFileSet.revision_number == revision_number,
+        )
+        storage_format = self._connection.execute(format_statement).scalar_one_or_none()
+        if storage_format == "file_set_v1":
+            raise RetrievalUnsupportedFormatError
+        if storage_format != "legacy_markdown":
+            raise RuntimeError("Stored Revision file-set manifest is missing or invalid.")
+        return RevisionRecord.model_validate(dict(row))
 
     def list_revision_files(
         self,
@@ -308,4 +331,9 @@ class RetrievalRepository:
         return KeysetPage(items=visible, next_key=key(visible[-1]))
 
 
-__all__ = ["RetrievalRepository", "StoredDocument", "StoredRevisionFile"]
+__all__ = [
+    "RetrievalRepository",
+    "RetrievalUnsupportedFormatError",
+    "StoredDocument",
+    "StoredRevisionFile",
+]

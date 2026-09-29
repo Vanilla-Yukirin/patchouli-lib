@@ -50,6 +50,7 @@ from patchouli_lib.retrieval.service import (
     RetrievalNotFoundError,
     RetrievalPersistenceError,
     RetrievalService,
+    RetrievalUnsupportedFormatError,
 )
 
 _SECTIONS_ROUTE: Final = "sections.list"
@@ -200,6 +201,13 @@ def _perform_read[ResultT](
         raise insufficient_scope() from None
     except RetrievalNotFoundError:
         raise resource_not_found() from None
+    except RetrievalUnsupportedFormatError:
+        raise ApplicationProblem(
+            status_code=409,
+            code="revision_format_unsupported",
+            title="Revision format not supported",
+            detail="This read route cannot represent the requested Revision format.",
+        ) from None
     except (InvalidPageIdError, InvalidRevisionNumberError):
         raise _validation_problem() from None
     except RetrievalPersistenceError:
