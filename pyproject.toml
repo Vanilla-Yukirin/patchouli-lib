@@ -23,11 +23,15 @@ patchouli-operator = "patchouli_lib.operator_cli:main"
 dev = [
   "httpx2>=2.10,<3",
   "mypy>=1.16,<2",
+  "patchouli-client==0.1.0a0",
   "pytest>=8.4,<10",
   "pytest-cov>=6.2,<8",
   "pyyaml>=6,<7",
   "ruff>=0.12,<1",
 ]
+
+[tool.uv.sources]
+patchouli-client = { path = "clients/python", editable = true }
 
 [build-system]
 requires = ["hatchling>=1.27,<2"]
