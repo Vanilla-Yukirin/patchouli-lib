@@ -8,21 +8,26 @@ from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, delete, select
 from starlette.concurrency import run_in_threadpool as starlette_run_in_threadpool
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 import patchouli_lib.admin.router as admin_router
+from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.passwords import hash_password
+from patchouli_lib.admin.session import AdminSessionCodec
 from patchouli_lib.app import create_app
-from patchouli_lib.auth.models import Caller
+from patchouli_lib.auth.models import Caller, MasterIdentity
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import CallerKind
 from patchouli_lib.auth.service import AuthenticationError, AuthenticationService
 from patchouli_lib.config import Settings
+from patchouli_lib.database import immediate_transaction
 
 _ORIGIN = "https://admin.example.invalid"
 _ADMIN_PASSWORD = "synthetic admin password"
+_MASTER_TOKEN = "synthetic master token material old 0001"
+_ROTATED_MASTER_TOKEN = "synthetic master token material new 0002"
 _ADMIN_PASSWORD_HASH = hash_password(
     _ADMIN_PASSWORD,
     salt_factory=lambda size: b"s" * size,
@@ -100,6 +105,34 @@ def _login(web: AdminWeb) -> str:
     match = re.search(r'name="csrf_token" value="([^"]+)"', dashboard.text)
     assert match is not None
     return match.group(1)
+
+
+def _initialize_master(web: AdminWeb) -> None:
+    with immediate_transaction(web.engine) as connection:
+        MasterTokenRepository(
+            connection, identity_factory=lambda: "a" * 32
+        ).initialize_from_local_cli(_MASTER_TOKEN, now=1_000)
+
+
+def _login_master(web: AdminWeb) -> tuple[str, str]:
+    response = _post(web.client, "/admin/login", data={"password": _MASTER_TOKEN})
+    assert response.status_code == 303
+    assert response.headers["location"] == "/admin"
+    cookie = response.headers["set-cookie"]
+    assert "HttpOnly" in cookie
+    assert "Secure" in cookie
+    assert "SameSite=strict" in cookie
+    assert "Path=/admin" in cookie
+    assert _MASTER_TOKEN not in cookie
+    _assert_security_headers(response)
+    encoded = web.client.cookies.get(_SESSION_COOKIE) or ""
+    codec = AdminSessionCodec(b"s" * 32, ttl_seconds=600)
+    session = codec.verify_master(encoded)
+    assert session is not None
+    assert session.identity_id == "a" * 32
+    assert session.session_generation == 1
+    assert codec.verify(encoded) is None
+    return encoded, session.csrf_token
 
 
 def _bootstrap_data(csrf_token: str) -> dict[str, str]:
@@ -301,6 +334,234 @@ def test_login_fails_closed_for_wrong_origin_password_and_form_shape(
         assert _ADMIN_PASSWORD not in response.text
         assert _SESSION_COOKIE not in response.cookies
         _assert_security_headers(response)
+
+
+def test_initialized_master_token_login_retires_legacy_web_login_but_not_operator(
+    admin_web: AdminWeb,
+) -> None:
+    # This is a test-only local initialization, never an HTTP setup path.
+    assert (
+        _post(admin_web.client, "/admin/login", data={"password": _MASTER_TOKEN}).status_code == 401
+    )
+
+    legacy_csrf = _login(admin_web)
+    legacy_encoded = admin_web.client.cookies.get(_SESSION_COOKIE) or ""
+    bootstrapped = _post(admin_web.client, "/admin/bootstrap", data=_bootstrap_data(legacy_csrf))
+    assert bootstrapped.status_code == 200
+    library_id, _, _ = _metadata_from(bootstrapped.text)
+    operator_token = _credential_from(bootstrapped.text)
+
+    _initialize_master(admin_web)
+    assert (
+        admin_web.client.get(
+            "/admin", headers={"Cookie": f"{_SESSION_COOKIE}={legacy_encoded}"}
+        ).status_code
+        == 303
+    )
+    assert (
+        admin_web.client.post(
+            "/admin/bootstrap",
+            data=_bootstrap_data(legacy_csrf),
+            headers={"Origin": _ORIGIN, "Cookie": f"{_SESSION_COOKIE}={legacy_encoded}"},
+        ).status_code
+        == 401
+    )
+    assert (
+        _post(admin_web.client, "/admin/login", data={"password": _ADMIN_PASSWORD}).status_code
+        == 401
+    )
+
+    wrong_origin = _post(
+        admin_web.client,
+        "/admin/login",
+        data={"password": _MASTER_TOKEN},
+        origin="https://wrong.example.invalid",
+    )
+    assert wrong_origin.status_code == 403
+    assert _SESSION_COOKIE not in wrong_origin.cookies
+
+    encoded, csrf = _login_master(admin_web)
+    assert admin_web.client.get("/admin").status_code == 200
+    assert admin_web.client.get("/admin/setup").status_code == 200
+    assert admin_web.client.get("/api/v1/auth/whoami").status_code == 401
+    assert _post(admin_web.client, "/admin/logout", data={"csrf_token": "wrong"}).status_code == 403
+    for path, fields in (
+        ("/admin/bootstrap", _bootstrap_data(csrf)),
+        ("/admin/libraries", {"csrf_token": csrf, "name": "Cannot Create With Master Session"}),
+        (
+            f"/admin/libraries/{library_id}/tags",
+            {"csrf_token": csrf, "name": "Synthetic Tag", "operator_token": operator_token},
+        ),
+        ("/admin/libraries/x/sections/y/trash/z/restore", {"csrf_token": csrf}),
+    ):
+        read_only = _post(admin_web.client, path, data=fields)
+        assert read_only.status_code == 403
+        assert "read-only" in read_only.text
+    assert _post(admin_web.client, "/admin/logout", data={"csrf_token": csrf}).status_code == 303
+    assert admin_web.client.get("/admin").status_code == 303
+
+    codec = AdminSessionCodec(b"s" * 32, ttl_seconds=600)
+    assert codec.verify(legacy_encoded) is not None
+    assert codec.verify_master(legacy_encoded) is None
+    assert encoded != legacy_encoded
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_status"),
+    [
+        ("/admin", 303),
+        ("/admin/setup", 303),
+        ("/admin/libraries", 303),
+        ("/admin/guide", 303),
+        ("/admin/login", 200),
+    ],
+)
+def test_rotated_master_session_is_rejected_on_management_get(
+    admin_web: AdminWeb, path: str, expected_status: int
+) -> None:
+    _initialize_master(admin_web)
+    encoded, _ = _login_master(admin_web)
+    with immediate_transaction(admin_web.engine) as connection:
+        state = MasterTokenRepository(connection).rotate(
+            _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
+        )
+        assert state is not None
+        assert state.session_generation == 2
+
+    response = admin_web.client.get(path, headers={"Cookie": f"{_SESSION_COOKIE}={encoded}"})
+    assert response.status_code == expected_status
+    assert _MASTER_TOKEN not in response.text
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/admin/logout",
+        "/admin/bootstrap",
+        "/admin/libraries",
+        "/admin/libraries/x/tags",
+        "/admin/libraries/x/sections/y/trash/z/restore",
+    ],
+)
+def test_rotated_master_session_is_rejected_on_management_post(
+    admin_web: AdminWeb, path: str
+) -> None:
+    _initialize_master(admin_web)
+    encoded, csrf = _login_master(admin_web)
+    with immediate_transaction(admin_web.engine) as connection:
+        assert (
+            MasterTokenRepository(connection).rotate(
+                _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
+            )
+            is not None
+        )
+
+    response = admin_web.client.post(
+        path,
+        data={"csrf_token": csrf},
+        headers={"Origin": _ORIGIN, "Cookie": f"{_SESSION_COOKIE}={encoded}"},
+    )
+    assert response.status_code == 401
+    assert _MASTER_TOKEN not in response.text
+
+
+def test_missing_master_identity_rejects_existing_v2_session(admin_web: AdminWeb) -> None:
+    _initialize_master(admin_web)
+    encoded, csrf = _login_master(admin_web)
+    with immediate_transaction(admin_web.engine) as connection:
+        connection.execute(delete(MasterIdentity))
+
+    assert (
+        admin_web.client.get(
+            "/admin", headers={"Cookie": f"{_SESSION_COOKIE}={encoded}"}
+        ).status_code
+        == 303
+    )
+    assert (
+        admin_web.client.post(
+            "/admin/logout",
+            data={"csrf_token": csrf},
+            headers={"Origin": _ORIGIN, "Cookie": f"{_SESSION_COOKIE}={encoded}"},
+        ).status_code
+        == 401
+    )
+    assert (
+        _post(admin_web.client, "/admin/login", data={"password": _MASTER_TOKEN}).status_code == 401
+    )
+
+
+def test_matching_master_token_and_legacy_password_issues_revocable_v2_cookie(
+    tmp_path: Path,
+) -> None:
+    settings = Settings.model_validate(
+        {
+            "environment": "test",
+            "database_url": f"sqlite:///{(tmp_path / 'matching-master.db').as_posix()}",
+            "admin_password_hash": hash_password(
+                _MASTER_TOKEN, salt_factory=lambda size: b"s" * size, iterations=300_000
+            ),
+            "admin_session_signing_secret": "s" * 32,
+        }
+    )
+    application = create_app(settings)
+    Caller.metadata.create_all(application.state.engine)
+    with TestClient(application, base_url=_ORIGIN, follow_redirects=False) as client:
+        web = AdminWeb(client, application.state.engine)
+        _initialize_master(web)
+        encoded, _ = _login_master(web)
+
+        with immediate_transaction(web.engine) as connection:
+            assert (
+                MasterTokenRepository(connection).rotate(
+                    _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
+                )
+                is not None
+            )
+        assert (
+            client.get("/admin", headers={"Cookie": f"{_SESSION_COOKIE}={encoded}"}).status_code
+            == 303
+        )
+        assert _post(client, "/admin/login", data={"password": _MASTER_TOKEN}).status_code == 401
+        rotated_login = _post(client, "/admin/login", data={"password": _ROTATED_MASTER_TOKEN})
+        assert rotated_login.status_code == 303
+        rotated_cookie = client.cookies.get(_SESSION_COOKIE) or ""
+        rotated_session = AdminSessionCodec(b"s" * 32, ttl_seconds=600).verify_master(
+            rotated_cookie
+        )
+        assert rotated_session is not None
+        assert rotated_session.session_generation == 2
+
+
+def test_without_legacy_hash_v1_cookie_and_password_are_rejected(tmp_path: Path) -> None:
+    settings = Settings.model_validate(
+        {
+            "environment": "test",
+            "database_url": f"sqlite:///{(tmp_path / 'master-only.db').as_posix()}",
+            "admin_session_signing_secret": "s" * 32,
+        }
+    )
+    application = create_app(settings)
+    Caller.metadata.create_all(application.state.engine)
+    with TestClient(application, base_url=_ORIGIN, follow_redirects=False) as client:
+        encoded, _ = AdminSessionCodec(b"s" * 32, ttl_seconds=600).issue()
+        assert (
+            client.get("/admin", headers={"Cookie": f"{_SESSION_COOKIE}={encoded}"}).status_code
+            == 303
+        )
+        assert (
+            client.post(
+                "/admin/logout",
+                data={"csrf_token": "not-admitted"},
+                headers={"Origin": _ORIGIN, "Cookie": f"{_SESSION_COOKIE}={encoded}"},
+            ).status_code
+            == 401
+        )
+        assert _post(client, "/admin/login", data={"password": _ADMIN_PASSWORD}).status_code == 401
+
+        web = AdminWeb(client, application.state.engine)
+        _initialize_master(web)
+        _login_master(web)
+        assert client.get("/admin").status_code == 200
 
 
 @pytest.mark.parametrize(

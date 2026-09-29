@@ -80,7 +80,7 @@ def test_admin_console_is_disabled_when_all_admin_values_are_absent_or_blank() -
     assert not blank.admin_enabled
 
 
-def test_admin_console_requires_complete_redacted_configuration() -> None:
+def test_admin_console_accepts_legacy_password_with_signing_secret() -> None:
     configured = Settings.model_validate(
         {
             "environment": "production",
@@ -95,11 +95,24 @@ def test_admin_console_requires_complete_redacted_configuration() -> None:
     assert "s" * 32 not in repr(configured)
 
 
+def test_admin_console_accepts_signing_secret_without_legacy_password() -> None:
+    configured = Settings.model_validate(
+        {
+            "environment": "production",
+            "retrieval_cursor_signing_secret": "r" * 32,
+            "admin_session_signing_secret": "s" * 32,
+        }
+    )
+
+    assert configured.admin_enabled
+    assert configured.admin_password_hash is None
+    assert "s" * 32 not in repr(configured)
+
+
 @pytest.mark.parametrize(
     "values",
     [
         {"admin_password_hash": _ADMIN_PASSWORD_HASH},
-        {"admin_session_signing_secret": "s" * 32},
         {
             "admin_password_hash": "short",
             "admin_session_signing_secret": "s" * 32,

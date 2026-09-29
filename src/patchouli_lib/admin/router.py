@@ -28,6 +28,7 @@ from patchouli_lib.admin.contracts import (
     RevokeAgentCredentialInput,
     TagFormInput,
 )
+from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.pages import (
     STYLESHEET,
     AdminLocale,
@@ -54,7 +55,7 @@ from patchouli_lib.admin.pages import (
 from patchouli_lib.admin.passwords import password_matches
 from patchouli_lib.admin.read_model import AdminReadModel
 from patchouli_lib.admin.service import AdminActionService, DeliveredCredential
-from patchouli_lib.admin.session import AdminSession, AdminSessionCodec
+from patchouli_lib.admin.session import AdminSession, AdminSessionCodec, MasterAdminSession
 from patchouli_lib.api.agent_skill_routes import SkillBundle
 from patchouli_lib.auth.service import AuthenticationError, AuthorizationError
 from patchouli_lib.config import Settings
@@ -124,7 +125,11 @@ def create_admin_router(
 ) -> APIRouter:
     if not settings.admin_enabled:
         raise ValueError("Admin router requires complete admin configuration.")
-    password_hash = cast(SecretStr, settings.admin_password_hash).get_secret_value()
+    password_hash = (
+        settings.admin_password_hash.get_secret_value()
+        if settings.admin_password_hash is not None
+        else None
+    )
     signing_secret = cast(
         SecretStr,
         settings.admin_session_signing_secret,
@@ -143,7 +148,27 @@ def create_admin_router(
         return request.scope["scheme"] == "https" or not settings.admin_allow_private_http
 
     def current_session(request: Request) -> AdminSession | None:
-        return codec.verify(request.cookies.get(_SESSION_COOKIE, ""))
+        encoded = request.cookies.get(_SESSION_COOKIE, "")
+        with engine.connect() as connection:
+            repository = MasterTokenRepository(connection)
+            if repository.has_identity():
+                master = codec.verify_master(encoded)
+                if master is not None and repository.is_session_generation_current(
+                    master.identity_id, master.session_generation
+                ):
+                    return master
+                return None
+        return codec.verify(encoded) if password_hash is not None else None
+
+    def authenticate_master(candidate: str) -> tuple[bool, tuple[str, int] | None]:
+        with engine.connect() as connection:
+            repository = MasterTokenRepository(connection)
+            if not repository.has_identity():
+                return False, None
+            state = repository.authenticate(candidate)
+        if state is None:
+            return True, None
+        return True, (state.identity_id, state.session_generation)
 
     def requested_locale(request: Request) -> AdminLocale | None:
         values = request.query_params.getlist("lang")
@@ -205,6 +230,19 @@ def create_admin_router(
         locale = locale_for(request)
         return html(login_page(locale=locale, message=message), locale=locale, status_code=403)
 
+    def master_write_forbidden(request: Request, session: MasterAdminSession) -> HTMLResponse:
+        locale = locale_for(request)
+        message = (
+            "主 Token 会话目前仅可查看管理页面。"
+            if locale == "zh-CN"
+            else "Master Token sessions are read-only until management authorization is available."
+        )
+        return html(
+            operations_page(session.csrf_token, locale=locale, message=message),
+            locale=locale,
+            status_code=403,
+        )
+
     def protected_page(
         request: Request,
         render: Callable[[str, AdminLocale], str | None],
@@ -253,6 +291,8 @@ def create_admin_router(
                 repeatable_fields=repeatable_fields,
             )
             _require_csrf(values, session)
+            if isinstance(session, MasterAdminSession):
+                return master_write_forbidden(request, session)
             result = await run_in_threadpool(action, values)
         except _FormError as exc:
             return html(
@@ -364,6 +404,8 @@ def create_admin_router(
         try:
             values = await _read_form(request, allowed_fields=allowed_fields | {"csrf_token"})
             _require_csrf(values, session)
+            if isinstance(session, MasterAdminSession):
+                return master_write_forbidden(request, session)
             location = await run_in_threadpool(action, values, session.audit_fingerprint())
         except _FormError as exc:
             status, message = exc.status_code, exc.safe_message
@@ -404,6 +446,8 @@ def create_admin_router(
         try:
             values = await _read_form(request, allowed_fields=allowed_fields | {"csrf_token"})
             _require_csrf(values, session)
+            if isinstance(session, MasterAdminSession):
+                return master_write_forbidden(request, session)
             location, result = await run_in_threadpool(action, values)
         except _FormError as exc:
             status, message = exc.status_code, exc.safe_message
@@ -703,6 +747,8 @@ def create_admin_router(
                 allowed_fields=frozenset(RestoreArchiveFormInput.model_fields) | {"csrf_token"},
             )
             _require_csrf(values, session)
+            if isinstance(session, MasterAdminSession):
+                return master_write_forbidden(request, session)
             submitted = RestoreArchiveFormInput.model_validate(values)
             await run_in_threadpool(
                 service.restore_archive_page, library_id, section_id, page_id, submitted
@@ -860,13 +906,23 @@ def create_admin_router(
                 locale=locale,
                 status_code=exc.status_code,
             )
-        if not await run_in_threadpool(password_matches, candidate, password_hash):
+        master_initialized, master_identity = await run_in_threadpool(
+            authenticate_master, candidate
+        )
+        if master_initialized and master_identity is not None:
+            encoded, _ = codec.issue_master(*master_identity)
+        elif (
+            not master_initialized
+            and password_hash is not None
+            and await run_in_threadpool(password_matches, candidate, password_hash)
+        ):
+            encoded, _ = codec.issue()
+        else:
             return html(
                 login_page(locale=locale, message="Invalid password."),
                 locale=locale,
                 status_code=401,
             )
-        encoded, _ = codec.issue()
         response = redirect("/admin")
         response.set_cookie(
             _SESSION_COOKIE,

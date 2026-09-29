@@ -33,7 +33,9 @@ def master_engine(tmp_path: Path) -> Iterator[Engine]:
 def test_first_setup_stores_only_salted_verifier_and_one_identity(master_engine: Engine) -> None:
     with immediate_transaction(master_engine) as connection:
         repository = MasterTokenRepository(connection, identity_factory=lambda: IDENTITY)
+        assert not repository.has_identity()
         state = repository.initialize_from_local_cli(OLD_TOKEN, now=1_000)
+        assert repository.has_identity()
         assert state.identity_id == IDENTITY
         assert state.session_generation == 1
         assert repository.authenticate(OLD_TOKEN) == state

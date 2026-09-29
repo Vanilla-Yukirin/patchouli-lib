@@ -1,9 +1,8 @@
-"""Inactive storage primitives for a future single-person administration login.
+"""Storage primitives for the single-person administration identity.
 
-This module creates no HTTP endpoint. In particular, an empty table is never
-proof that a remote visitor may initialize the identity. Only a future local
-CLI may call ``initialize_from_local_cli`` after verifying its execution context.
-The existing password login and operator bearer remain unchanged.
+An empty table never authorizes remote initialization. Only a local setup
+command may call ``initialize_from_local_cli`` after verifying its execution
+context. The HTTP login reads the verifier but cannot create this identity.
 """
 
 from __future__ import annotations
@@ -120,6 +119,12 @@ class MasterTokenRepository:
         if stored is None or not _matches(token, stored.verifier):
             return None
         return stored.state
+
+    def has_identity(self) -> bool:
+        """Fail closed for legacy login once the master identity slot exists."""
+
+        statement = select(MasterIdentity.slot).where(MasterIdentity.slot == 1)
+        return self._connection.execute(statement).scalar_one_or_none() == 1
 
     def rotate(self, old_token: str, new_token: str, *, now: int) -> MasterTokenState | None:
         """Replace the verifier and increment the generation in one CAS write."""

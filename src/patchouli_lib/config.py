@@ -83,17 +83,11 @@ class Settings(BaseSettings):
         if self.environment == "production" and self.retrieval_cursor_signing_secret is None:
             message = "The retrieval cursor signing secret is required in production."
             raise ValueError(message)
-        admin_values = (
-            self.admin_password_hash,
-            self.admin_session_signing_secret,
-        )
-        if any(value is not None for value in admin_values) and not all(
-            value is not None for value in admin_values
-        ):
-            message = "Admin password hash and session signing secret must be set together."
+        if self.admin_password_hash is not None and self.admin_session_signing_secret is None:
+            message = "The legacy admin password hash requires a session signing secret."
             raise ValueError(message)
         return self
 
     @property
     def admin_enabled(self) -> bool:
-        return self.admin_password_hash is not None
+        return self.admin_session_signing_secret is not None
