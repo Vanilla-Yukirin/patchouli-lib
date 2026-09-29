@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from html import escape
 from typing import Literal
 
+from patchouli_lib.admin.interface_guide import api_guide, mcp_guide, skill_guide
 from patchouli_lib.admin.read_model import (
     BookView,
     CallerItem,
@@ -19,6 +20,7 @@ from patchouli_lib.admin.read_model import (
     TrashPageView,
 )
 from patchouli_lib.admin.service import DeliveredCredential
+from patchouli_lib.api.agent_skill_routes import SkillBundle
 from patchouli_lib.auth.schemas import SectionAction
 
 AdminLocale = Literal["en", "zh-CN"]
@@ -139,6 +141,9 @@ small { color: #526259; }
 .library-grid li { min-height: 8rem; }
 .meta { color: #526259; font-size: .9rem; }
 .markdown-preview { white-space: pre-wrap; overflow-wrap: anywhere; }
+.interface-list code { overflow-wrap: anywhere; }
+details.card { margin-top: 1rem; }
+details summary { cursor: pointer; font-weight: 700; }
 @media (max-width: 40rem) {
   .nav-actions { width: 100%; margin-left: 0; justify-content: space-between; }
   .admin-shell { display: block; }
@@ -748,7 +753,14 @@ def action_result_page(
     return _document(localized_heading, content, locale)
 
 
-def guide_page(csrf_token: str, page: str, *, locale: AdminLocale = "en") -> str:
+def guide_page(
+    csrf_token: str,
+    page: str,
+    *,
+    locale: AdminLocale = "en",
+    skill_bundle: SkillBundle,
+    retrieval_available: bool,
+) -> str:
     csrf = escape(csrf_token, quote=True)
     if locale == "zh-CN":
         pages = {
@@ -832,6 +844,12 @@ secret store.</p>
             ),
         }
     title, body = pages[page]
+    if page == "guide":
+        body += api_guide(locale, retrieval_available=retrieval_available)
+    elif page == "agent":
+        body += skill_guide(locale, skill_bundle)
+    else:
+        body += mcp_guide(locale)
     localized_title = localize(locale, title)
     switch_path = {
         "guide": "/admin/guide",

@@ -55,6 +55,7 @@ from patchouli_lib.admin.passwords import password_matches
 from patchouli_lib.admin.read_model import AdminReadModel
 from patchouli_lib.admin.service import AdminActionService, DeliveredCredential
 from patchouli_lib.admin.session import AdminSession, AdminSessionCodec
+from patchouli_lib.api.agent_skill_routes import SkillBundle
 from patchouli_lib.auth.service import AuthenticationError, AuthorizationError
 from patchouli_lib.config import Settings
 from patchouli_lib.content.service import (
@@ -134,6 +135,8 @@ def create_admin_router(
     )
     service = action_service or AdminActionService(engine)
     read_model = AdminReadModel(engine)
+    skill_bundle = SkillBundle()
+    retrieval_available = settings.retrieval_cursor_signing_secret is not None
     router = APIRouter(prefix="/admin", include_in_schema=False)
 
     def secure_cookie(request: Request) -> bool:
@@ -954,21 +957,39 @@ def create_admin_router(
     def guide(request: Request) -> Response:
         return protected_page(
             request,
-            lambda csrf, locale: guide_page(csrf, "guide", locale=locale),
+            lambda csrf, locale: guide_page(
+                csrf,
+                "guide",
+                locale=locale,
+                skill_bundle=skill_bundle,
+                retrieval_available=retrieval_available,
+            ),
         )
 
     @router.get("/agent")
     def agent_guide(request: Request) -> Response:
         return protected_page(
             request,
-            lambda csrf, locale: guide_page(csrf, "agent", locale=locale),
+            lambda csrf, locale: guide_page(
+                csrf,
+                "agent",
+                locale=locale,
+                skill_bundle=skill_bundle,
+                retrieval_available=retrieval_available,
+            ),
         )
 
     @router.get("/mcp")
     def mcp_guide(request: Request) -> Response:
         return protected_page(
             request,
-            lambda csrf, locale: guide_page(csrf, "mcp", locale=locale),
+            lambda csrf, locale: guide_page(
+                csrf,
+                "mcp",
+                locale=locale,
+                skill_bundle=skill_bundle,
+                retrieval_available=retrieval_available,
+            ),
         )
 
     @router.get("/style.css")
