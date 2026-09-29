@@ -59,7 +59,7 @@ class CredentialPersistenceError(RuntimeError):
 
 
 class CredentialIssuer:
-    """Create one-time credentials without storing or replaying their raw value."""
+    """Issue credentials; only new Agent values are stored for later reveal."""
 
     def __init__(
         self,
@@ -80,20 +80,24 @@ class CredentialIssuer:
             raise AuthenticationError
 
         issued = generate_token()
+        credential = NewCredential(
+            id=self._id_factory(),
+            library_id=caller.library_id,
+            caller_id=caller.id,
+            selector=issued.selector,
+            token_version=issued.version,
+            verifier=issued.verifier,
+            expires_at=expires_at,
+            created_at=created_at,
+            updated_at=created_at,
+        )
         try:
-            stored = self._repository.add_credential(
-                NewCredential(
-                    id=self._id_factory(),
-                    library_id=caller.library_id,
-                    caller_id=caller.id,
-                    selector=issued.selector,
-                    token_version=issued.version,
-                    verifier=issued.verifier,
-                    expires_at=expires_at,
-                    created_at=created_at,
-                    updated_at=created_at,
+            if caller.kind is CallerKind.AGENT:
+                stored = self._repository.add_agent_credential_with_value(
+                    credential, token_value=issued.value
                 )
-            )
+            else:
+                stored = self._repository.add_credential(credential)
         except SQLAlchemyError:
             pass
         else:

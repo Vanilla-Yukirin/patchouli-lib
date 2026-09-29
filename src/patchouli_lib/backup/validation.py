@@ -13,11 +13,13 @@ from urllib.parse import quote
 
 from pydantic import Field
 
+from patchouli_lib.auth.tokens import InvalidTokenError, parse_token, verify_token
 from patchouli_lib.backup.errors import BackupDatabaseError
 from patchouli_lib.backup.manifest import (
     FILE_SET_SCHEMA_REVISION,
     INTERMEDIATE_SCHEMA_REVISION,
     LEGACY_SCHEMA_REVISION,
+    LIBRARY_POLICY_SCHEMA_REVISION,
     LIFECYCLE_SCHEMA_REVISION,
     OCCURRENCE_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
@@ -359,6 +361,24 @@ _EXPECTED_SQL_HASHES_0014: Final = _EXPECTED_SQL_HASHES_0013 | {
         "4e565589ff5232218294b3b5a8242a9b99d04fe242a78b4cedb0e1297ffb32d5"
     ),
 }
+_EXPECTED_SQL_HASHES_0015: Final = _EXPECTED_SQL_HASHES_0014 | {
+    # Generated from an empty Alembic 0015 database with _canonical_schema_sql.
+    ("table", "auth_agent_token_values"): (
+        "9613b1ce738ebad3069cc68ddfaed201b0335620d61dfd9ee4a9fa33c2b6c9ae"
+    ),
+    ("trigger", "trg_auth_agent_token_values_agent_only"): (
+        "93d58518f6842ce38d8b1e96ad08de08899df7a12df7139f21820f8aae07a8b0"
+    ),
+    ("trigger", "trg_auth_agent_token_values_immutable"): (
+        "35b1f05c838bd960d6eebb54726383ad75ea60d6408808734cae6723208d0432"
+    ),
+    ("trigger", "trg_auth_agent_token_values_revoke"): (
+        "6690c0078b2dc95a9ef5827e2dc99a4749fd335598b46d83dcd02db70ffab9de"
+    ),
+    ("trigger", "trg_auth_agent_token_values_disable"): (
+        "c65d2ee5c3cdba8d1d59c3a0900ab3cdb7ce4b256de1c61e2e97ac2a3e996313"
+    ),
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
     PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
@@ -367,9 +387,12 @@ _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     OCCURRENCE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0011,
     LIFECYCLE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0012,
     FILE_SET_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0013,
-    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0014,
+    LIBRARY_POLICY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0014,
+    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0015,
 }
-_FILE_SET_REVISIONS: Final = frozenset({FILE_SET_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION})
+_FILE_SET_REVISIONS: Final = frozenset(
+    {FILE_SET_SCHEMA_REVISION, LIBRARY_POLICY_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}
+)
 _LIFECYCLE_REVISIONS: Final = _FILE_SET_REVISIONS | {LIFECYCLE_SCHEMA_REVISION}
 _OCCURRENCE_REVISIONS: Final = _LIFECYCLE_REVISIONS | {OCCURRENCE_SCHEMA_REVISION}
 
@@ -1154,6 +1177,55 @@ def _require_revision_seals(connection: sqlite3.Connection) -> None:
         raise BackupDatabaseError
 
 
+def _require_agent_token_values(connection: sqlite3.Connection) -> None:
+    """Check every revealable value against its exact, still-active Agent row.
+
+    Expiry is deliberately not compared with the validation clock: a sound
+    historical backup must not become invalid merely because time advanced.
+    """
+
+    rows = connection.execute(
+        "SELECT v.credential_id, v.token_value, k.id, k.selector, "
+        "k.token_version, k.verifier, k.revoked_at, k.rotated_at, "
+        "a.kind, a.disabled_at FROM auth_agent_token_values AS v "
+        "LEFT JOIN auth_credentials AS k ON k.id = v.credential_id "
+        "LEFT JOIN auth_callers AS a ON a.id = k.caller_id "
+        "AND a.library_id = k.library_id"
+    )
+    for (
+        credential_id,
+        token_value,
+        stored_id,
+        selector,
+        token_version,
+        verifier,
+        revoked_at,
+        rotated_at,
+        kind,
+        disabled_at,
+    ) in rows:
+        if (
+            not isinstance(credential_id, str)
+            or not isinstance(token_value, str)
+            or stored_id != credential_id
+            or kind != "agent"
+            or disabled_at is not None
+            or revoked_at is not None
+            or rotated_at is not None
+        ):
+            raise BackupDatabaseError
+        try:
+            parsed = parse_token(token_value)
+        except InvalidTokenError:
+            raise BackupDatabaseError from None
+        if (
+            parsed.version != token_version
+            or parsed.selector != selector
+            or not verify_token(parsed, verifier)
+        ):
+            raise BackupDatabaseError
+
+
 def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) -> None:
     invalid_bootstrap = _one_integer(
         connection,
@@ -1176,7 +1248,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
     if invalid_grants:
         raise BackupDatabaseError
 
-    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+    if schema_revision in {LIBRARY_POLICY_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
         invalid_library_policies = _one_integer(
             connection,
             "SELECT count(*) FROM auth_credential_library_policies AS p "
@@ -1188,6 +1260,9 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         )
         if invalid_library_policies:
             raise BackupDatabaseError
+
+    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+        _require_agent_token_values(connection)
 
     rotations: dict[str, tuple[str, str, str | None, int | None, int | None, int]] = {}
     for (

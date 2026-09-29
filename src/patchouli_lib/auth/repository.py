@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy import Connection, delete, insert, select, update
 
 from patchouli_lib.auth.models import (
+    AgentTokenValue,
     AuditEvent,
     BootstrapMarker,
     Caller,
@@ -22,6 +23,7 @@ from patchouli_lib.auth.schemas import (
     SectionGrantRecord,
     StoredCredential,
 )
+from patchouli_lib.auth.tokens import InvalidTokenError, parse_token, verify_token
 from patchouli_lib.library.models import Library, Section
 
 
@@ -86,6 +88,16 @@ class AuthRepository:
         result = self._connection.execute(statement)
         if result.rowcount != 1:
             return self.get_caller(library_id, caller_id)
+        self._connection.execute(
+            delete(AgentTokenValue).where(
+                AgentTokenValue.credential_id.in_(
+                    select(Credential.id).where(
+                        Credential.library_id == library_id,
+                        Credential.caller_id == caller_id,
+                    )
+                )
+            )
+        )
         return self.get_caller(library_id, caller_id)
 
     def increment_policy_version(
@@ -136,6 +148,92 @@ class AuthRepository:
         values = credential.model_dump()
         self._connection.execute(insert(Credential), values)
         return StoredCredential.model_validate(values)
+
+    def add_agent_credential_with_value(
+        self, credential: NewCredential, *, token_value: str
+    ) -> StoredCredential:
+        """Persist verifier and revealable Agent value in one savepoint.
+
+        A caller may catch issuance errors and commit its outer transaction.
+        Rolling back this savepoint prevents a verifier-only half-issuance.
+        """
+        try:
+            parsed = parse_token(token_value)
+        except InvalidTokenError:
+            raise ValueError("Agent token value does not match credential.") from None
+        if (
+            parsed.selector != credential.selector
+            or parsed.version != credential.token_version
+            or not verify_token(parsed, credential.verifier)
+        ):
+            raise ValueError("Agent token value does not match credential.")
+        with self._connection.begin_nested():
+            stored = self.add_credential(credential)
+            self._connection.execute(
+                insert(AgentTokenValue),
+                {"credential_id": credential.id, "token_value": token_value},
+            )
+        return stored
+
+    def get_active_agent_token_value(
+        self,
+        library_id: str,
+        caller_id: str,
+        credential_id: str,
+        *,
+        active_at: int,
+    ) -> str | None:
+        """Fetch a raw value only for a currently active Agent credential.
+
+        The management caller must be authenticated separately before using
+        this method. Legacy credentials intentionally return ``None``.
+        """
+        statement = (
+            select(
+                AgentTokenValue.token_value,
+                Credential.selector,
+                Credential.token_version,
+                Credential.verifier,
+            )
+            .join(Credential, Credential.id == AgentTokenValue.credential_id)
+            .join(
+                Caller,
+                (Caller.id == Credential.caller_id) & (Caller.library_id == Credential.library_id),
+            )
+            .where(
+                Credential.id == credential_id,
+                Credential.caller_id == caller_id,
+                Credential.library_id == library_id,
+                Credential.created_at <= active_at,
+                Credential.expires_at > active_at,
+                Credential.revoked_at.is_(None),
+                Credential.rotated_at.is_(None),
+                Caller.kind == "agent",
+                Caller.disabled_at.is_(None),
+            )
+        )
+        row = self._connection.execute(statement).one_or_none()
+        if row is None:
+            return None
+        token_value, selector, token_version, verifier = row
+        if (
+            not isinstance(token_value, str)
+            or not isinstance(selector, str)
+            or type(token_version) is not int
+            or not isinstance(verifier, bytes)
+        ):
+            return None
+        try:
+            parsed = parse_token(token_value)
+        except InvalidTokenError:
+            return None
+        if (
+            parsed.selector != selector
+            or parsed.version != token_version
+            or not verify_token(parsed, verifier)
+        ):
+            return None
+        return token_value
 
     def list_active_credentials(
         self,
@@ -197,7 +295,11 @@ class AuthRepository:
             )
             .values(revoked_at=revoked_at, updated_at=revoked_at)
         )
-        self._connection.execute(statement)
+        result = self._connection.execute(statement)
+        if result.rowcount == 1:
+            self._connection.execute(
+                delete(AgentTokenValue).where(AgentTokenValue.credential_id == credential.id)
+            )
         return self.get_credential(
             credential.library_id,
             credential.caller_id,
@@ -230,6 +332,9 @@ class AuthRepository:
         result = self._connection.execute(statement)
         if result.rowcount != 1:
             return None
+        self._connection.execute(
+            delete(AgentTokenValue).where(AgentTokenValue.credential_id == credential.id)
+        )
         return self.get_credential(
             credential.library_id,
             credential.caller_id,

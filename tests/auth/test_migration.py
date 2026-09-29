@@ -11,6 +11,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 AUTH_TABLES = {
     "auth_callers",
     "auth_credentials",
+    "auth_agent_token_values",
     "auth_section_grants",
     "auth_audit_events",
     "operator_bootstrap_markers",
@@ -36,7 +37,7 @@ def _assert_head(database_url: str) -> None:
             assert second.exec_driver_sql("PRAGMA foreign_key_check").all() == []
             assert (
                 first.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-                == "20260929_0014"
+                == "20260929_0015"
             )
     finally:
         engine.dispose()

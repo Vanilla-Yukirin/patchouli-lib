@@ -119,8 +119,13 @@ def test_existing_credential_migrates_without_implicit_grants_and_empty_round_tr
         == FILE_SET_SCHEMA_REVISION
     )
 
-    command.upgrade(config, "head")
-    assert validate_database(tmp_path / "library-policy.db").schema_revision == "20260929_0014"
+    command.upgrade(config, "20260929_0014")
+    assert (
+        validate_database(
+            tmp_path / "library-policy.db", schema_revision="20260929_0014"
+        ).schema_revision
+        == "20260929_0014"
+    )
     engine = build_engine(url)
     try:
         assert {
@@ -158,8 +163,6 @@ def test_existing_credential_migrates_without_implicit_grants_and_empty_round_tr
             assert authenticated.caller.id == CALLER
     finally:
         engine.dispose()
-    command.check(config)
-
     command.downgrade(config, "20260929_0013")
     engine = build_engine(url)
     try:
@@ -176,7 +179,7 @@ def test_downgrade_refuses_to_discard_credential_policy_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     url, config = _config(tmp_path / "library-policy-nonempty.db", monkeypatch)
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260929_0014")
     _seed_legacy_credential(url)
     engine = build_engine(url)
     try:
@@ -229,7 +232,9 @@ def test_downgrade_refuses_to_discard_credential_policy_data(
                 },
             )
         assert (
-            validate_database(tmp_path / "library-policy-nonempty.db").schema_revision
+            validate_database(
+                tmp_path / "library-policy-nonempty.db", schema_revision="20260929_0014"
+            ).schema_revision
             == "20260929_0014"
         )
         corrupt = tmp_path / "policy-operator.db"
@@ -239,7 +244,7 @@ def test_downgrade_refuses_to_discard_credential_policy_data(
             connection.execute("UPDATE auth_callers SET kind = 'operator' WHERE id = ?", (CALLER,))
             connection.commit()
         with pytest.raises(BackupDatabaseError):
-            validate_database(corrupt)
+            validate_database(corrupt, schema_revision="20260929_0014")
         for statement in (
             update(CredentialLibraryPolicy).values(created_at=4_000_000),
             delete(CredentialLibraryPolicy),
@@ -259,7 +264,7 @@ def test_downgrade_refuses_to_discard_credential_policy_data(
         engine.dispose()
 
 
-def test_0014_policy_grant_survives_verified_backup_restore(
+def test_0014_policy_grant_survives_0015_verified_backup_restore(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = tmp_path / "policy-backup-source.db"
@@ -298,11 +303,11 @@ def test_0014_policy_grant_survives_verified_backup_restore(
             artifact_identity=artifact,
             app_version="0.0.0-test",
         )
-        assert result.manifest.schema_revision == "20260929_0014"
+        assert result.manifest.schema_revision == "20260929_0015"
         assert verify_backup_bundle(bundle, app_version="0.0.0-test") == result.manifest
         restored = tmp_path / "policy-restored.db"
         restore_backup(bundle, restored, app_version="0.0.0-test")
-        assert validate_database(restored).schema_revision == "20260929_0014"
+        assert validate_database(restored).schema_revision == "20260929_0015"
         restored_engine = build_engine(f"sqlite:///{restored.as_posix()}")
         try:
             with restored_engine.connect() as connection:

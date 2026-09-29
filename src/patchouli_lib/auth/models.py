@@ -17,6 +17,7 @@ from patchouli_lib.library.models import NAME_MAX_LENGTH, OPAQUE_ID_LENGTH
 from patchouli_lib.models import Base
 
 SELECTOR_LENGTH = 22
+RAW_TOKEN_LENGTH = 71
 KIND_MAX_LENGTH = 16
 ACTION_MAX_LENGTH = 100
 REQUEST_ID_MAX_LENGTH = 100
@@ -155,6 +156,32 @@ class Credential(Base):
     revoked_at: Mapped[int | None] = mapped_column(BigInteger)
     rotated_at: Mapped[int | None] = mapped_column(BigInteger)
     rotated_to_credential_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
+
+
+class AgentTokenValue(Base):
+    """Separately stored raw value for newly issued Agent credentials only.
+
+    Authentication queries intentionally select ``Credential`` alone. This table
+    must be queried only after management authorization and active-state checks.
+    """
+
+    __tablename__ = "auth_agent_token_values"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["credential_id"],
+            ["auth_credentials.id"],
+            name="fk_auth_agent_token_values_credential",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "typeof(token_value) = 'text' AND length(token_value) = 71 "
+            "AND substr(token_value, 1, 5) = 'plb1.'",
+            name="ck_auth_agent_token_values_format",
+        ),
+    )
+
+    credential_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    token_value: Mapped[str] = mapped_column(String(RAW_TOKEN_LENGTH), nullable=False)
 
 
 class SectionGrant(Base):
@@ -450,6 +477,7 @@ class BootstrapMarker(Base):
 
 
 __all__ = [
+    "AgentTokenValue",
     "AdminStructureAuditEvent",
     "AuditEvent",
     "BootstrapMarker",
