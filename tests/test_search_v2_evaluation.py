@@ -132,7 +132,14 @@ def test_normalized_duplicate_keywords_do_not_increase_experimental_rank() -> No
         distinct,
         keywords=("Straße", "STRASSE", "共同主题", "共同主题"),
     )
-    fields = ("page-00000", "Straße 共同主题", "", "[]", "[]", set())
+    fields: tuple[str, str, str, str, str, set[tuple[str, str]]] = (
+        "page-00000",
+        "Straße 共同主题",
+        "",
+        "[]",
+        "[]",
+        set(),
+    )
     assert rank(*fields, distinct) == rank(*fields, repeated)
 
 
