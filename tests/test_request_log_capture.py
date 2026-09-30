@@ -71,11 +71,15 @@ def _seed_agent(engine: Engine) -> tuple[str, str, str, str]:
                 updated_at=now,
             )
         )
-        token = CredentialIssuer(
-            auth,
-            id_factory=lambda: "5" * 32,
-            clock=lambda: now,
-        ).issue(caller, expires_at=now + 3_600_000_000).value
+        token = (
+            CredentialIssuer(
+                auth,
+                id_factory=lambda: "5" * 32,
+                clock=lambda: now,
+            )
+            .issue(caller, expires_at=now + 3_600_000_000)
+            .value
+        )
     return caller.id, structure.library.id, "5" * 32, token
 
 
@@ -252,8 +256,6 @@ def test_lifespan_runs_retention_on_startup_and_again_periodically(
     monkeypatch.setattr(
         "patchouli_lib.request_log.middleware.cleanup_request_logs_once", observe_cleanup
     )
-    monkeypatch.setattr(
-        "patchouli_lib.request_log.middleware._RETENTION_INTERVAL_SECONDS", 0.01
-    )
+    monkeypatch.setattr("patchouli_lib.request_log.middleware._RETENTION_INTERVAL_SECONDS", 0.01)
     with TestClient(app):
         assert repeated.wait(timeout=2)

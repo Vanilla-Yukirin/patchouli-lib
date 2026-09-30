@@ -45,9 +45,7 @@ def browser(tmp_path: Path) -> Iterator[tuple[TestClient, Engine]]:
 
 
 def _login(client: TestClient, password: str) -> None:
-    response = client.post(
-        "/admin/login", data={"password": password}, headers={"Origin": _ORIGIN}
-    )
+    response = client.post("/admin/login", data={"password": password}, headers={"Origin": _ORIGIN})
     assert response.status_code == 303
 
 
@@ -138,10 +136,7 @@ def test_request_log_page_is_master_only_and_bounded(browser: tuple[TestClient, 
     assert f"req_{2:032x}" in second.text
     assert f"req_{1:032x}" in second.text
     assert f"req_{3:032x}" not in second.text
-    assert (
-        f'href="/admin/requests?before={cursor.replace(":", "%3A")}&amp;lang=en"'
-        in second.text
-    )
+    assert f'href="/admin/requests?before={cursor.replace(":", "%3A")}&amp;lang=en"' in second.text
     assert client.get("/admin/requests?before=0").status_code == 404
     assert client.get("/admin/requests?before=1&before=2").status_code == 404
 

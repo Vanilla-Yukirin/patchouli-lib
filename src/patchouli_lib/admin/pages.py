@@ -393,9 +393,7 @@ _ZH_CN: dict[str, str] = {
     "Duration": "耗时",
     "Interrupted": "已中断",
     "Unknown identity": "未知身份",
-    _REQUEST_LOG_HELP: (
-        "接口请求元数据在线保留 30 天，不记录 Token、正文或搜索词。"
-    ),
+    _REQUEST_LOG_HELP: ("接口请求元数据在线保留 30 天，不记录 Token、正文或搜索词。"),
     "Administrator": "管理员",
     "Created a page": "创建了页面",
     "Revised a page": "更新了页面",
@@ -900,7 +898,7 @@ def request_log_page(
         switch_path,
         f'<p class="section-help">'
         f"{localize(locale, _REQUEST_LOG_HELP)}"
-        f"</p><section class=\"card\">{body}</section>",
+        f'</p><section class="card">{body}</section>',
         current_section="requests",
     )
 
@@ -1228,7 +1226,7 @@ def caller_page(
     if allow_master_actions:
         body += (
             f'<p><a href="{escape(activity_path, quote=True)}/requests">'
-            f'{localize(locale, "API requests by this identity")}</a></p>'
+            f"{localize(locale, 'API requests by this identity')}</a></p>"
         )
     if allow_master_actions and view.kind == "agent":
         path = f"/admin/libraries/{view.library_id}/callers/{view.id}/metadata"
