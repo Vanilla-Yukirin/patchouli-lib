@@ -34,12 +34,33 @@ from patchouli_lib.content.models import (
 from patchouli_lib.content.service import page_current_etag
 from patchouli_lib.identifiers.page_ids import InvalidPageIdError, validate_page_id
 from patchouli_lib.library.models import Book, Library, Section
+from patchouli_lib.request_log.models import RequestLogRecord
 from patchouli_lib.tags.models import PageTag, Tag
 
 _MAX_FILE_SET_PREVIEW_BYTES = 64 * 1024
 _PAGE_HISTORY_SIZE = 20
 _ACTIVITY_PAGE_SIZE = 20
 _BOOK_PAGE_SIZE = 20
+_REQUEST_LOG_PAGE_SIZE = 20
+
+
+def _parse_request_log_cursor(value: str | None) -> tuple[int, int] | None:
+    if value is None:
+        return None
+    if len(value) > 39:
+        raise ValueError("Invalid request log cursor.")
+    timestamp, separator, row_id = value.partition(":")
+    if separator != ":" or not timestamp or not row_id:
+        raise ValueError("Invalid request log cursor.")
+    if any(
+        not item.isascii() or not item.isdecimal() or (len(item) > 1 and item[0] == "0")
+        for item in (timestamp, row_id)
+    ):
+        raise ValueError("Invalid request log cursor.")
+    parsed_timestamp, parsed_id = int(timestamp), int(row_id)
+    if parsed_timestamp > (1 << 63) - 1 or not 1 <= parsed_id <= (1 << 63) - 1:
+        raise ValueError("Invalid request log cursor.")
+    return parsed_timestamp, parsed_id
 
 
 def _lower_hex_id(value: str) -> bool:
@@ -285,6 +306,27 @@ class ContentActivityPage:
 
 
 @dataclass(frozen=True)
+class RequestLogItem:
+    id: int
+    request_id: str
+    method: str
+    route_template: str
+    status_code: int | None
+    completion: str
+    occurred_at: int
+    duration_us: int
+    caller_id: str | None
+    home_library_id: str | None
+    credential_id: str | None
+
+
+@dataclass(frozen=True)
+class RequestLogPage:
+    items: tuple[RequestLogItem, ...]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True)
 class CallerView:
     library_id: str
     id: str
@@ -341,6 +383,54 @@ class AdminReadModel:
 
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
+
+    def request_log_page(
+        self, *, before: str | None = None, actor: tuple[str, str] | None = None
+    ) -> RequestLogPage:
+        """Read a bounded keyset page; authentication is enforced by the router."""
+
+        cursor = _parse_request_log_cursor(before)
+        retained_from = max(0, time_ns() // 1_000 - 30 * 86_400_000_000)
+        statement = select(
+            RequestLogRecord.id,
+            RequestLogRecord.request_id,
+            RequestLogRecord.method,
+            RequestLogRecord.route_template,
+            RequestLogRecord.status_code,
+            RequestLogRecord.completion,
+            RequestLogRecord.occurred_at,
+            RequestLogRecord.duration_us,
+            RequestLogRecord.caller_id,
+            RequestLogRecord.home_library_id,
+            RequestLogRecord.credential_id,
+        ).where(RequestLogRecord.occurred_at >= retained_from)
+        if actor is not None:
+            statement = statement.where(
+                RequestLogRecord.home_library_id == actor[0],
+                RequestLogRecord.caller_id == actor[1],
+            )
+        if cursor is not None:
+            statement = statement.where(
+                or_(
+                    RequestLogRecord.occurred_at < cursor[0],
+                    and_(
+                        RequestLogRecord.occurred_at == cursor[0],
+                        RequestLogRecord.id < cursor[1],
+                    ),
+                )
+            )
+        statement = statement.order_by(
+            RequestLogRecord.occurred_at.desc(), RequestLogRecord.id.desc()
+        ).limit(_REQUEST_LOG_PAGE_SIZE + 1)
+        with self._engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
+        visible = rows[:_REQUEST_LOG_PAGE_SIZE]
+        return RequestLogPage(
+            tuple(RequestLogItem(**row) for row in visible),
+            f"{visible[-1]['occurred_at']}:{visible[-1]['id']}"
+            if len(rows) > _REQUEST_LOG_PAGE_SIZE
+            else None,
+        )
 
     def list_libraries(self) -> tuple[LibraryItem, ...]:
         with self._engine.connect() as connection:

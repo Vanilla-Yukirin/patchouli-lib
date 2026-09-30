@@ -15,6 +15,7 @@ from patchouli_lib.admin.read_model import (
     LibraryItem,
     LibraryView,
     PageView,
+    RequestLogItem,
     SectionView,
     TagDirectoryView,
     TagView,
@@ -42,6 +43,10 @@ _GRANT_SCOPE_HELP = (
 _CREDENTIAL_META_HELP = (
     "Only a master session can reveal a newly issued, active Agent Token. "
     "Older values cannot be recovered."
+)
+_REQUEST_LOG_HELP = (
+    "API request metadata is kept online for 30 days. "
+    "Tokens, content and search terms are not recorded."
 )
 
 REVEAL_SCRIPT = """
@@ -378,6 +383,19 @@ _ZH_CN: dict[str, str] = {
     "Content activity": "内容近况",
     "Content activity by this identity": "此身份的内容近况",
     "Older activity": "更早的内容活动",
+    "API requests": "接口请求记录",
+    "API requests by this identity": "此身份的接口请求",
+    "Older requests": "更早的请求",
+    "No API requests in the retained period.": "保留期内暂无接口请求记录。",
+    "Request ID": "请求 ID",
+    "Endpoint": "接口",
+    "HTTP status": "HTTP 状态",
+    "Duration": "耗时",
+    "Interrupted": "已中断",
+    "Unknown identity": "未知身份",
+    _REQUEST_LOG_HELP: (
+        "接口请求元数据在线保留 30 天，不记录 Token、正文或搜索词。"
+    ),
     "Administrator": "管理员",
     "Created a page": "创建了页面",
     "Revised a page": "更新了页面",
@@ -784,6 +802,7 @@ def dashboard_page(
     activities: tuple[ContentActivityItem, ...] = (),
     activity_next_cursor: str | None = None,
     activity_before_cursor: str | None = None,
+    show_request_logs: bool = False,
 ) -> str:
     csrf = escape(csrf_token, quote=True)
     switch_path = (
@@ -794,6 +813,11 @@ def dashboard_page(
     timeline = _content_activity_timeline(
         activities, locale, next_cursor=activity_next_cursor, base_path="/admin"
     )
+    request_logs_link = (
+        f'<p><a href="/admin/requests">{localize(locale, "API requests")}</a></p>'
+        if show_request_logs
+        else ""
+    )
     content = f"""
 {_header(csrf, locale, switch_path=switch_path)}
 <div class="admin-shell">
@@ -801,10 +825,84 @@ def dashboard_page(
 <main>
   <h1>{localize(locale, "Home")}</h1>
   {timeline}
+  {request_logs_link}
 </main>
 </div>
 """
     return _document(localize(locale, "Home"), content, locale)
+
+
+def request_log_page(
+    csrf_token: str,
+    items: tuple[RequestLogItem, ...],
+    *,
+    locale: AdminLocale = "en",
+    next_cursor: str | None = None,
+    before_cursor: str | None = None,
+    actor: tuple[str, str] | None = None,
+) -> str:
+    base_path = (
+        "/admin/requests"
+        if actor is None
+        else f"/admin/libraries/{quote(actor[0], safe='')}/callers/"
+        f"{quote(actor[1], safe='')}/requests"
+    )
+    switch_path = (
+        base_path
+        if before_cursor is None
+        else f"{base_path}?before={quote(before_cursor, safe='')}"
+    )
+    rows: list[str] = []
+    for item in items:
+        if item.home_library_id is not None and item.caller_id is not None:
+            identity_path = (
+                f"/admin/libraries/{quote(item.home_library_id, safe='')}/callers/"
+                f"{quote(item.caller_id, safe='')}"
+            )
+            identity = (
+                f'<a href="{escape(identity_path, quote=True)}">'
+                f"<code>{escape(item.caller_id)}</code></a>"
+            )
+        else:
+            identity = localize(locale, "Unknown identity")
+        status = (
+            str(item.status_code)
+            if item.completion == "completed" and item.status_code is not None
+            else localize(locale, "Interrupted")
+        )
+        rows.append(
+            "<li>"
+            f"<code>{escape(item.method)} {escape(item.route_template)}</code>"
+            f'<p class="meta">{_time(item.occurred_at)} · '
+            f"{localize(locale, 'HTTP status')}: {escape(status)} · "
+            f"{localize(locale, 'Duration')}: {item.duration_us / 1000:.1f} ms · "
+            f"{identity}</p>"
+            f'<p class="meta">{localize(locale, "Request ID")}: '
+            f"<code>{escape(item.request_id)}</code></p>"
+            "</li>"
+        )
+    body = (
+        f'<ul class="item-list">{"".join(rows)}</ul>'
+        if rows
+        else f"<p>{localize(locale, 'No API requests in the retained period.')}</p>"
+    )
+    if next_cursor is not None:
+        body += (
+            f'<nav aria-label="{localize(locale, "API requests")}">'
+            f'<a href="{escape(base_path, quote=True)}?before={escape(next_cursor, quote=True)}">'
+            f"{localize(locale, 'Older requests')}</a></nav>"
+        )
+    title = "API requests" if actor is None else "API requests by this identity"
+    return _browser_document(
+        csrf_token,
+        locale,
+        localize(locale, title),
+        switch_path,
+        f'<p class="section-help">'
+        f"{localize(locale, _REQUEST_LOG_HELP)}"
+        f"</p><section class=\"card\">{body}</section>",
+        current_section="requests",
+    )
 
 
 def _content_activity_timeline(
@@ -1127,6 +1225,11 @@ def caller_page(
         f"{identity_activity}"
         f'<p><a href="/admin">{localize(locale, "Back to activity")}</a></p>'
     )
+    if allow_master_actions:
+        body += (
+            f'<p><a href="{escape(activity_path, quote=True)}/requests">'
+            f'{localize(locale, "API requests by this identity")}</a></p>'
+        )
     if allow_master_actions and view.kind == "agent":
         path = f"/admin/libraries/{view.library_id}/callers/{view.id}/metadata"
         body += (
@@ -2208,7 +2311,7 @@ def _browser_document(
 
 
 def _sidebar(locale: AdminLocale, *, current: str) -> str:
-    entries = (
+    entries = [
         ("home", "Home", "/admin"),
         ("libraries", "Libraries", "/admin/libraries"),
         ("tags", "Tags", "/admin/tags"),
@@ -2218,7 +2321,9 @@ def _sidebar(locale: AdminLocale, *, current: str) -> str:
         ("guide", "Guide", "/admin/guide"),
         ("agent", "Agent", "/admin/agent"),
         ("mcp", "MCP", "/admin/mcp"),
-    )
+    ]
+    if current == "requests":
+        entries.insert(5, ("requests", "API requests", "/admin/requests"))
     links = "".join(
         f'<a href="{path}"'
         + (' aria-current="page"' if key == current else "")

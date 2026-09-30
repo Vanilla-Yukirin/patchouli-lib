@@ -57,6 +57,7 @@ from patchouli_lib.admin.pages import (
     login_page,
     operations_page,
     page_preview_page,
+    request_log_page,
     restore_error_page,
     section_page,
     tag_detail_page,
@@ -618,9 +619,53 @@ def create_admin_router(
                 activities=activity.items,
                 activity_next_cursor=activity.next_cursor,
                 activity_before_cursor=before,
+                show_request_logs=isinstance(current_session(request), MasterAdminSession),
             )
 
         return protected_page(request, render)
+
+    def request_log_view(request: Request, *, actor: tuple[str, str] | None = None) -> Response:
+        locale = locale_for(request)
+        session = current_session(request)
+        if session is None:
+            response = redirect("/admin/login")
+            _clear_cookie(response, secure=secure_cookie(request))
+            remember_requested_locale(response, request)
+            return response
+        if not isinstance(session, MasterAdminSession):
+            return forbidden(request, "A master session is required.")
+        try:
+            before = activity_before(request)
+            if actor is not None and read_model.get_caller(*actor) is None:
+                raise ValueError("Unknown identity")
+            result = read_model.request_log_page(before=before, actor=actor)
+        except ValueError:
+            return html(
+                browser_not_found_page(session.csrf_token, locale=locale),
+                locale=locale,
+                status_code=404,
+            )
+        page_response = html(
+            request_log_page(
+                session.csrf_token,
+                result.items,
+                locale=locale,
+                next_cursor=result.next_cursor,
+                before_cursor=before,
+                actor=actor,
+            ),
+            locale=locale,
+        )
+        remember_requested_locale(page_response, request)
+        return page_response
+
+    @router.get("/requests")
+    def api_requests(request: Request) -> Response:
+        return request_log_view(request)
+
+    @router.get("/libraries/{library_id}/callers/{caller_id}/requests")
+    def caller_api_requests(request: Request, library_id: str, caller_id: str) -> Response:
+        return request_log_view(request, actor=(library_id, caller_id))
 
     @router.get("/setup")
     def setup(request: Request) -> Response:
