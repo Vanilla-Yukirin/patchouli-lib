@@ -612,6 +612,20 @@ def create_backup(
                     pages_per_step=pages,
                     cancel_check=cancel_check,
                 )
+                # Search is a disposable projection, never backup authority. A
+                # restored bundle must rebuild from the preserved Page history.
+                if destination.execute(
+                    "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'search_meta'"
+                ).fetchone():
+                    destination.execute("BEGIN IMMEDIATE")
+                    destination.execute(
+                        "UPDATE search_meta SET ready = 0, active_generation = NULL"
+                    )
+                    destination.execute("DELETE FROM search_terms")
+                    destination.execute("DELETE FROM search_documents")
+                    destination.execute("DELETE FROM search_page_state")
+                    destination.execute("DELETE FROM search_generations")
+                    destination.commit()
                 # A backup artifact is portable and never depends on source WAL sidecars.
                 destination.execute("PRAGMA journal_mode = DELETE")
                 destination.commit()

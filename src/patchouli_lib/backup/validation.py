@@ -32,6 +32,7 @@ from patchouli_lib.backup.manifest import (
     OCCURRENCE_SCHEMA_REVISION,
     PAGE_TITLE_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
+    REQUEST_LOG_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
     TAG_SCHEMA_REVISION,
 )
@@ -510,6 +511,156 @@ _EXPECTED_SQL_HASHES_0023: Final = _EXPECTED_SQL_HASHES_0022 | {
         "f9d817faaf404a7183b30b6ff702b0f85400b36e6a3829e4606487933099645c"
     ),
 }
+_EXPECTED_SQL_HASHES_0024: Final = _EXPECTED_SQL_HASHES_0023 | {
+    # Derived from a fresh Alembic 0024 database with _canonical_schema_sql.
+    # The FTS5 virtual table and its SQLite-managed shadow tables are all covered.
+    (
+        "index",
+        "ix_search_dirty_pages_seq",
+    ): "15966f8f6ccc2da7566fd59537d05ae6a3d85f343f4835a95e3a49a0a074d5a6",
+    (
+        "index",
+        "ix_search_documents_page",
+    ): "4ca8f2af69a224d6b2c0be65ee1846985401409e4a2affdfb5a79af55882216b",
+    (
+        "index",
+        "ix_search_page_state_scope_time",
+    ): "7f95b156dfc79a300f064452ddbc5ae4bc49e5f20dd1f5d23bc225be62e289e0",
+    (
+        "table",
+        "search_dirty_pages",
+    ): "e176c290ce5cfecaec5f95bb8966a1ec857af68e34f3388f54ff4d7ad387eb89",
+    (
+        "table",
+        "search_documents",
+    ): "e65fd91688c975993252db7838dae914b4db75cdd92aba9278fa7bba134c0f7f",
+    (
+        "table",
+        "search_generations",
+    ): "3a402a674f989e64d67354c1a9f2fb6897d9c6cd7b9af9566b2630bdc742b118",
+    ("table", "search_meta"): "91f0f113e3edfcb21fcac3e4b6089ee7ebbaf00e2258dc904a59044b82902cf5",
+    (
+        "table",
+        "search_page_state",
+    ): "bfb3458e5047ad5fcee45935212cfc7b516e64eb0a0041a5a07fdfe1a167cbb1",
+    ("table", "search_terms"): "2da48a6e618833323abfc98cedd2e1f5063bcaeeba19ac084b30279517aa8322",
+    (
+        "table",
+        "search_terms_config",
+    ): "ac81c9eecdf7490e9839aee2fd11adf44087dfbe152eb2433bce8c4de43a59d4",
+    (
+        "table",
+        "search_terms_content",
+    ): "3bc8a6703cd17e356a92dfbad39c8e1164ec97a77da881247dfd284853208c2d",
+    (
+        "table",
+        "search_terms_data",
+    ): "7e3fda5217d2c18242c47b7331cf9c471efdceac34323c75d54ae2b5242c0be5",
+    (
+        "table",
+        "search_terms_docsize",
+    ): "e6b7e3509cbdd97d8946fb2b5dff64c580ce266dd3f1e462779ffa60ff801b2b",
+    (
+        "table",
+        "search_terms_idx",
+    ): "14dc41b2569e9ba4796256ba024d65ba68446042fbe2a1a6c5bbf6e589268a2f",
+    (
+        "trigger",
+        "trg_search_page_tags_delete",
+    ): "3e2a033c722308ab703d8692ef9bd30fcf5182d986ab17edbc84d7be38b8dd71",
+    (
+        "trigger",
+        "trg_search_page_tags_insert",
+    ): "2a13b5f4dccce1668a0c6c83d0bd5ff563be527cf36d884552901d69e09b65ac",
+    (
+        "trigger",
+        "trg_search_page_tags_update",
+    ): "79b8fff6b51fe40e927a9b077a9dc968c68168e458e6ea0ba591667f611c813e",
+    (
+        "trigger",
+        "trg_search_page_tags_update_old",
+    ): "870de7c4d3dd76c1434d9b6ad9c3406e31d94cf9246a74a2f6c51055be2fe637",
+    (
+        "trigger",
+        "trg_search_pages_delete",
+    ): "5ce715b0db2686564e3c5ef4893c97b49c727acdfae05048443279881377dd9f",
+    (
+        "trigger",
+        "trg_search_pages_insert",
+    ): "2165f882a0b21d73ec2f02281eb4686b2c5c46ab4b186b931810a2d3e6608815",
+    (
+        "trigger",
+        "trg_search_pages_update_new",
+    ): "17b1da77103015a6a9d63717898e33e08cb6d9d5935496251a2683d8e0d7aa94",
+    (
+        "trigger",
+        "trg_search_pages_update_old",
+    ): "a511665c24f240e2dceb6fb2ced61d8cfbd119c17348eb2506c7ab44525722a5",
+    (
+        "trigger",
+        "trg_search_revision_file_seals_delete",
+    ): "773f9deab99bc49c55e60f3f3f7810d93612f2660fb6d13a448579b6c51e28bc",
+    (
+        "trigger",
+        "trg_search_revision_file_seals_insert",
+    ): "e7823aa9e8ac9b76dbd5b13efdd2eabc1c758621dfb256f26595d8155c6b60b5",
+    (
+        "trigger",
+        "trg_search_revision_file_seals_update",
+    ): "fc0de58a4b50bcdfd980f1159b0d33d5b302408798d21b472415bee8ccdd5bc6",
+    (
+        "trigger",
+        "trg_search_revision_file_seals_update_old",
+    ): "b943e139b1e3b67e02acb57b3c9fd8632252c0408e760e755605323fec04451b",
+    (
+        "trigger",
+        "trg_search_revision_file_sets_delete",
+    ): "99e7d1b52816bb2751eb9f2b95d64ef3a984831a4b23e50842d646c997b66e8b",
+    (
+        "trigger",
+        "trg_search_revision_file_sets_insert",
+    ): "a4e0fe9aa24724583b32172253cd155e90de70cb4de49c054a6b5a5a1ba8a62d",
+    (
+        "trigger",
+        "trg_search_revision_file_sets_update",
+    ): "3e2c797b50143f188462e8d155e9fca6bca797c854ba9d3bf5ea3dfc87bd1313",
+    (
+        "trigger",
+        "trg_search_revision_file_sets_update_old",
+    ): "747d07aa3c4b3cb1f0a13430918adc9f89e597125d19f2769e848a6f11d0745d",
+    (
+        "trigger",
+        "trg_search_revision_files_delete",
+    ): "46ce2caa7cdc032c2ed3253e9594270fc29bfd4d048ac1d5e434cdcccbcdfbfd",
+    (
+        "trigger",
+        "trg_search_revision_files_insert",
+    ): "548e7ce057c7a7ff8a2548c83313cbefca03be0488b3e4c061cc92aefa08270d",
+    (
+        "trigger",
+        "trg_search_revision_files_update",
+    ): "a9f6a8d97ef9d6f1a2d483c2e31204c8ef798f57853b73c38a7cae528cfa94d9",
+    (
+        "trigger",
+        "trg_search_revision_files_update_old",
+    ): "582e5ae259f0221464ce52910cc8addcb0a7ff7e659f66604a86d6615ed7646a",
+    (
+        "trigger",
+        "trg_search_revisions_delete",
+    ): "34f7e06e518d1a16d0878f4a08ee010a09eba87500c3e79a5fa8166c6c6e60cd",
+    (
+        "trigger",
+        "trg_search_revisions_insert",
+    ): "76145ff6dd4090991e2cac083bafa0dc1a79c3ca5aa55dff2f5ed6366d58ea54",
+    (
+        "trigger",
+        "trg_search_revisions_update",
+    ): "1312aeebb8bd31849669d21bc5f10a490dd8e3e7f6fffb63611625fc0b86fdf0",
+    (
+        "trigger",
+        "trg_search_revisions_update_old",
+    ): "914ba93c68c2e702100b997de2be3be32f900ff605334960e8bd737e46d29187",
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
     PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
@@ -527,7 +678,8 @@ _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LIBRARY_DESCRIPTION_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0020,
     AUDIT_ACTOR_INDEX_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0021,
     PAGE_TITLE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0022,
-    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0023,
+    REQUEST_LOG_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0023,
+    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0024,
 }
 _FILE_SET_REVISIONS: Final = frozenset(
     {
@@ -541,6 +693,7 @@ _FILE_SET_REVISIONS: Final = frozenset(
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
         PAGE_TITLE_SCHEMA_REVISION,
+        REQUEST_LOG_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }
 )
@@ -550,6 +703,7 @@ _MASTER_LIFECYCLE_REVISIONS: Final = frozenset(
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
         PAGE_TITLE_SCHEMA_REVISION,
+        REQUEST_LOG_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }
 )
@@ -582,6 +736,9 @@ def _canonical_schema_sql(object_type: str, sql: str) -> str:
     normalized = " ".join(sql.split())
     if object_type != "table":
         return normalized
+    without_rowid = normalized.endswith(" WITHOUT ROWID")
+    if without_rowid:
+        normalized = normalized[: -len(" WITHOUT ROWID")]
     opening = normalized.find("(")
     if opening < 0 or not normalized.endswith(")"):
         raise BackupDatabaseError
@@ -621,7 +778,8 @@ def _canonical_schema_sql(object_type: str, sql: str) -> str:
     constraints = sorted(clause for clause in clauses if clause.startswith("CONSTRAINT "))
     if len(columns) + len(constraints) != len(clauses):
         raise BackupDatabaseError
-    return f"{prefix} ({', '.join((*columns, *constraints))})"
+    result = f"{prefix} ({', '.join((*columns, *constraints))})"
+    return f"{result} WITHOUT ROWID" if without_rowid else result
 
 
 def _require_schema(connection: sqlite3.Connection, schema_revision: str) -> str:
@@ -1009,7 +1167,11 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
         )
 
     first_titles: dict[tuple[str, bytes], str] = {}
-    if schema_revision in {PAGE_TITLE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
+    if schema_revision in {
+        PAGE_TITLE_SCHEMA_REVISION,
+        REQUEST_LOG_SCHEMA_REVISION,
+        SUPPORTED_SCHEMA_REVISION,
+    }:
         for row in connection.execute(
             "SELECT library_id, page_uid, sequence, old_title, new_title, "
             "old_updated_at, changed_at, at_revision_number, master_audit_event_id "
@@ -1584,7 +1746,8 @@ def _require_master_audit(connection: sqlite3.Connection, schema_revision: str) 
             ):
                 raise BackupDatabaseError
         if (
-            schema_revision in {PAGE_TITLE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}
+            schema_revision
+            in {PAGE_TITLE_SCHEMA_REVISION, REQUEST_LOG_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}
             and action == "content.page.title.edit"
         ):
             linked_events = connection.execute(
@@ -1691,6 +1854,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
         PAGE_TITLE_SCHEMA_REVISION,
+        REQUEST_LOG_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         invalid_library_policies = _one_integer(
@@ -1714,6 +1878,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
         PAGE_TITLE_SCHEMA_REVISION,
+        REQUEST_LOG_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_agent_token_values(connection)
@@ -1726,6 +1891,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
         PAGE_TITLE_SCHEMA_REVISION,
+        REQUEST_LOG_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_master_identity(connection)
@@ -1737,6 +1903,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
         PAGE_TITLE_SCHEMA_REVISION,
+        REQUEST_LOG_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_actor_home_graph(connection, schema_revision)
@@ -1747,6 +1914,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
         PAGE_TITLE_SCHEMA_REVISION,
+        REQUEST_LOG_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_master_audit(connection, schema_revision)
@@ -1995,7 +2163,11 @@ def _file_set_valid_current_etags(
         if action not in {"delete", "restore"} or type(changed_at) is not int:
             raise BackupDatabaseError
         events.append((changed_at, "lifecycle", action))
-    if schema_revision in {PAGE_TITLE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
+    if schema_revision in {
+        PAGE_TITLE_SCHEMA_REVISION,
+        REQUEST_LOG_SCHEMA_REVISION,
+        SUPPORTED_SCHEMA_REVISION,
+    }:
         for (changed_at,) in connection.execute(
             "SELECT changed_at FROM page_title_events "
             "WHERE library_id = ? AND page_uid = ? AND at_revision_number = ?",
@@ -2202,7 +2374,11 @@ def _page_title_at(
     current_title: str,
     at: int,
 ) -> str:
-    if schema_revision not in {PAGE_TITLE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
+    if schema_revision not in {
+        PAGE_TITLE_SCHEMA_REVISION,
+        REQUEST_LOG_SCHEMA_REVISION,
+        SUPPORTED_SCHEMA_REVISION,
+    }:
         return current_title
     row = connection.execute(
         "SELECT old_title FROM page_title_events "
@@ -2563,6 +2739,48 @@ def _require_request_log_graph(connection: sqlite3.Connection) -> None:
             raise BackupDatabaseError from None
 
 
+def _require_search_projection_reset(connection: sqlite3.Connection) -> None:
+    """A portable backup contains authority, not an apparently ready search cache."""
+
+    rows = connection.execute(
+        "SELECT active_generation, ready, dirty_sequence, index_version FROM search_meta"
+    ).fetchall()
+    if (
+        len(rows) != 1
+        or rows[0][0] is not None
+        or rows[0][1] != 0
+        or type(rows[0][2]) is not int
+        or rows[0][2] < 0
+        or type(rows[0][3]) is not str
+        or not rows[0][3]
+    ):
+        raise BackupDatabaseError
+    for table in (
+        "search_generations",
+        "search_page_state",
+        "search_documents",
+        "search_terms",
+    ):
+        if _one_integer(connection, f"SELECT count(*) FROM {table}") != 0:
+            raise BackupDatabaseError
+    for library_id, page_uid, seq in connection.execute(
+        "SELECT library_id, page_uid, seq FROM search_dirty_pages"
+    ):
+        if (
+            type(library_id) is not str
+            or type(page_uid) is not bytes
+            or len(page_uid) != 16
+            or type(seq) is not int
+            or not 1 <= seq <= rows[0][2]
+            or connection.execute(
+                "SELECT count(*) FROM pages WHERE library_id = ? AND page_uid = ?",
+                (library_id, page_uid),
+            ).fetchone()
+            != (1,)
+        ):
+            raise BackupDatabaseError
+
+
 def _validate_connection(
     connection: sqlite3.Connection, schema_revision: str
 ) -> DatabaseValidationReport:
@@ -2583,6 +2801,7 @@ def _validate_connection(
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
         PAGE_TITLE_SCHEMA_REVISION,
+        REQUEST_LOG_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_library_descriptions(connection)
@@ -2596,8 +2815,10 @@ def _validate_connection(
         _require_tag_graph(connection)
     _require_auth_graph(connection, schema_revision)
     _require_idempotency_graph(connection, schema_revision)
-    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+    if schema_revision in {REQUEST_LOG_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
         _require_request_log_graph(connection)
+    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+        _require_search_projection_reset(connection)
     return DatabaseValidationReport(
         schema_revision=schema_revision,
         sqlite_version=sqlite_version_row[0],

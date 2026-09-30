@@ -28,15 +28,19 @@ from patchouli_lib.backup import (
 from patchouli_lib.backup.manifest import (
     ACTOR_HOME_SCHEMA_REVISION,
     AGENT_TOKEN_VALUES_SCHEMA_REVISION,
+    AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
     FILE_SET_SCHEMA_REVISION,
     INTERMEDIATE_SCHEMA_REVISION,
     LEGACY_SCHEMA_REVISION,
+    LIBRARY_DESCRIPTION_SCHEMA_REVISION,
     LIBRARY_POLICY_SCHEMA_REVISION,
     LIFECYCLE_SCHEMA_REVISION,
     MASTER_AUDIT_SCHEMA_REVISION,
     MASTER_IDENTITY_SCHEMA_REVISION,
     MASTER_LIFECYCLE_SCHEMA_REVISION,
+    PAGE_TITLE_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
+    REQUEST_LOG_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
     TAG_SCHEMA_REVISION,
     BackupManifestV1,
@@ -356,6 +360,11 @@ def test_tag_schema_bundle_requires_explicit_revision_for_verify_and_restore(
 @pytest.mark.parametrize(
     "schema_revision",
     (
+        SUPPORTED_SCHEMA_REVISION,
+        REQUEST_LOG_SCHEMA_REVISION,
+        PAGE_TITLE_SCHEMA_REVISION,
+        AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
+        LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         AGENT_TOKEN_VALUES_SCHEMA_REVISION,
         LIBRARY_POLICY_SCHEMA_REVISION,
         FILE_SET_SCHEMA_REVISION,
@@ -364,7 +373,7 @@ def test_tag_schema_bundle_requires_explicit_revision_for_verify_and_restore(
         PREVIOUS_SCHEMA_REVISION,
     ),
 )
-def test_cli_accepts_each_additional_supported_exact_revision(
+def test_cli_accepts_current_and_historical_exact_revision_choices(
     tmp_path: Path, schema_revision: str
 ) -> None:
     missing_bundle = tmp_path / "missing-bundle"
