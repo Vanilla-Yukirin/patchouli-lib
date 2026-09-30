@@ -182,7 +182,8 @@ def _admin_probe(origin: str) -> str:
 def _page_target(
     debug_port: int, origin: str, process: subprocess.Popen[bytes], stderr_path: Path
 ) -> dict[str, Any]:
-    deadline = time.monotonic() + 10
+    # Hosted runners can start Chrome before its CDP HTTP endpoint responds.
+    deadline = time.monotonic() + 30
     last_error = "no response"
     last_targets: list[str] = []
     while time.monotonic() < deadline:
