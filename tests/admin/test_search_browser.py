@@ -11,6 +11,7 @@ from alembic import command
 from alembic.config import Config
 from content.helpers import insert_page_graph, page_graph_values, seed_library_structure
 from fastapi.testclient import TestClient
+from httpx2 import Response
 from sqlalchemy import Engine
 
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
@@ -60,17 +61,18 @@ def _master_login(client: TestClient, engine: Engine) -> str:
     return match.group(1)
 
 
-def _post(client: TestClient, csrf: str, **fields: object):
+def _post(client: TestClient, csrf: str, **fields: str | list[str]) -> Response:
+    data: dict[str, str | list[str]] = {
+        "csrf_token": csrf,
+        "keywords": "",
+        "library_id": "",
+        "occurred_from": "",
+        "occurred_before": "",
+    }
+    data.update(fields)
     return client.post(
         "/admin/search",
-        data={
-            "csrf_token": csrf,
-            "keywords": "",
-            "library_id": "",
-            "occurred_from": "",
-            "occurred_before": "",
-            **fields,
-        },
+        data=data,
         headers={"Origin": _ORIGIN},
     )
 
