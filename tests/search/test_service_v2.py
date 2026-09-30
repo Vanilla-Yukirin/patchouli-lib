@@ -313,6 +313,24 @@ def test_short_literal_matches_exactly_within_its_own_field(engine: Engine) -> N
     assert [item.page_id for item in _search(engine, context, keywords=["ß"])] == [folded_hit[1]]
 
 
+def test_page_top_k_uses_stable_tie_breaker_without_candidate_truncation(engine: Engine) -> None:
+    home = seed_library_structure(engine)
+    context = _agent(engine, home[0], home[1])
+    pages = [
+        _page(engine, home, page_byte=0x11, title="needle zeta", content=b"plain"),
+        _page(engine, home, page_byte=0x12, title="needle alpha", content=b"plain"),
+        _page(engine, home, page_byte=0x13, title="needle beta", content=b"plain"),
+    ]
+    rebuild_search_index(engine, clock=lambda: CLOCK)
+
+    all_hits = _search(engine, context, keywords=["needle"], limit=3)
+    top_two = _search(engine, context, keywords=["needle"], limit=2)
+    assert [item.page_id for item in all_hits] == sorted(page[1] for page in pages)
+    assert [item.page_id for item in top_two] == [item.page_id for item in all_hits[:2]]
+    assert len({item.page_id for item in top_two}) == 2
+    assert all(item.revision_number == 1 for item in top_two)
+
+
 def test_tag_time_unicode_binary_name_and_old_revision(engine: Engine) -> None:
     home = seed_library_structure(engine)
     context = _agent(engine, home[0], home[1])
@@ -358,6 +376,8 @@ def test_tag_time_unicode_binary_name_and_old_revision(engine: Engine) -> None:
     ]
     hit = _search(engine, context, keywords=["secret.bin"])
     assert [item.page_id for item in hit] == [later[1]]
+    assert hit[0].revision_id == f"rev_{'c' * 32}"
+    assert hit[0].revision_number == 2
     assert [source.kind for source in hit[0].match_sources] == ["file_name"]
     assert _search(engine, context, keywords=["hidden-byte-only"]) == ()
     assert _search(engine, context, keywords=["old only"]) == ()

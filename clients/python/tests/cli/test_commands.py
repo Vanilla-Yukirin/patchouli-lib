@@ -201,6 +201,10 @@ def test_search_reads_private_query_from_file_and_uses_post_json(tmp_path: Path)
                         "page_id": "page_synthetic",
                         "revision_id": "rev_synthetic",
                         "revision_number": 1,
+                        "revision_files_href": (
+                            f"/api/v1/libraries/{'a' * 32}/sections/sec_synthetic"
+                            "/pages/page_synthetic/revisions/rev_synthetic/files"
+                        ),
                         "title": "Synthetic",
                         "occurred_at": 1_000_000,
                         "match_sources": [{"kind": "title", "file_name": None}],

@@ -13,7 +13,12 @@ from sqlalchemy import Engine
 from starlette.responses import JSONResponse
 
 from patchouli_lib.api.authentication import BearerAuthentication
-from patchouli_lib.api.contracts import API_V1_PREFIX, PROTECTED_CACHE_CONTROL, WireModel
+from patchouli_lib.api.contracts import (
+    API_V1_PREFIX,
+    PROTECTED_CACHE_CONTROL,
+    WireModel,
+    build_api_v1_path,
+)
 from patchouli_lib.api.errors import (
     ApplicationProblem,
     invalid_token,
@@ -27,7 +32,7 @@ from patchouli_lib.search.query_v2 import (
     InvalidSearchQueryV2,
     parse_query_v2_json,
 )
-from patchouli_lib.search.service_v2 import SearchScopeError, search_pages_v2
+from patchouli_lib.search.service_v2 import SearchPageV2, SearchScopeError, search_pages_v2
 
 
 class SearchMatchSourceView(WireModel):
@@ -42,6 +47,7 @@ class SearchPageView(WireModel):
     page_id: str
     revision_id: str
     revision_number: int
+    revision_files_href: str
     title: str
     occurred_at: int
     match_sources: list[SearchMatchSourceView]
@@ -67,6 +73,23 @@ def _unavailable() -> ApplicationProblem:
         title="Service unavailable",
         detail="Search is temporarily unavailable while its index is rebuilt.",
     )
+
+
+def _search_page_view(item: SearchPageV2) -> SearchPageView:
+    # The relative link identifies the exact returned Revision, not a mutable
+    # current-Page endpoint. Its target performs its own authorization check.
+    href = build_api_v1_path(
+        "libraries",
+        item.library_id,
+        "sections",
+        item.section_id,
+        "pages",
+        item.page_id,
+        "revisions",
+        item.revision_id,
+        "files",
+    )
+    return SearchPageView.model_validate({**asdict(item), "revision_files_href": href})
 
 
 async def _read_query(request: Request) -> bytes:
@@ -104,9 +127,7 @@ def create_search_v2_router(engine: Engine, *, clock: Clock = utc_microseconds) 
             raise resource_not_found() from None
         except SearchIndexUnavailableError:
             raise _unavailable() from None
-        response = SearchResponse(
-            items=[SearchPageView.model_validate(asdict(item)) for item in found.items]
-        )
+        response = SearchResponse(items=[_search_page_view(item) for item in found.items])
         return JSONResponse(
             content=response.model_dump(mode="json"),
             headers={

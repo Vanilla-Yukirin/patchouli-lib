@@ -17,6 +17,7 @@ from sqlalchemy import Engine
 from patchouli_lib.api.auth_routes import create_auth_router
 from patchouli_lib.api.contracts import PROTECTED_CACHE_CONTROL
 from patchouli_lib.api.errors import PROBLEM_MEDIA_TYPE, install_api_exception_handlers
+from patchouli_lib.api.file_set_read_routes import create_file_set_read_router
 from patchouli_lib.api.request_ids import REQUEST_ID_HEADER, RequestIDMiddleware
 from patchouli_lib.api.search_routes_v2 import create_search_v2_router
 from patchouli_lib.auth.repository import AuthRepository
@@ -28,6 +29,8 @@ from patchouli_lib.auth.schemas import (
     SectionAction,
 )
 from patchouli_lib.auth.tokens import generate_token
+from patchouli_lib.content.file_manifest import build_file_manifest
+from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.database import build_engine, immediate_transaction
 from patchouli_lib.search.index_v2 import (
     SearchIndexUnavailableError,
@@ -139,7 +142,76 @@ def test_v2_search_requires_ready_index_and_never_leaks_query(search_v2_api: Sea
     assert response.headers[REQUEST_ID_HEADER] == REQUEST_ID
     assert response.json()["items"]
     assert all(item["library_id"] == search_v2_api.library_id for item in response.json()["items"])
-    assert response.json()["items"][0]["revision_number"] == 1
+    first = response.json()["items"][0]
+    assert first["revision_number"] == 1
+    assert first["revision_files_href"] == (
+        f"/api/v1/libraries/{first['library_id']}/sections/{first['section_id']}"
+        f"/pages/{first['page_id']}/revisions/{first['revision_id']}/files"
+    )
+
+    application = FastAPI()
+    install_api_exception_handlers(application)
+    application.include_router(
+        create_file_set_read_router(search_v2_api.engine, clock=lambda: 2_000_000)
+    )
+    with TestClient(application) as client:
+        denied = client.get(first["revision_files_href"])
+        exact = client.get(
+            first["revision_files_href"],
+            headers={"Authorization": f"Bearer {search_v2_api.token}"},
+        )
+    assert denied.status_code == 401
+    assert exact.status_code == 200
+    assert exact.json()["revision_id"] == first["revision_id"]
+
+
+def test_search_revision_link_stays_exact_and_rechecks_current_grant(
+    search_v2_api: SearchV2Api,
+) -> None:
+    rebuild_search_index(search_v2_api.engine)
+    found = _post_v2(
+        search_v2_api,
+        {"keywords": ["archive"]},
+        token=search_v2_api.token,
+    )
+    assert found.status_code == 200
+    item = found.json()["items"][0]
+    old_revision = item["revision_id"]
+
+    with immediate_transaction(search_v2_api.engine) as connection:
+        repository = ContentRepository(connection)
+        page = repository.get_page(item["library_id"], item["page_id"])
+        assert page is not None
+        new_revision = f"rev_{'f' * 32}"
+        repository.add_file_set_revision(
+            page,
+            revision_id=new_revision,
+            created_at=3_000_000,
+            manifest=build_file_manifest((("updated.md", b"# Updated\n"),)),
+        )
+        assert (
+            repository.advance_file_set_current_revision(
+                page, revision_id=new_revision, updated_at=3_000_000
+            )
+            is not None
+        )
+
+    application = FastAPI()
+    install_api_exception_handlers(application)
+    application.include_router(
+        create_file_set_read_router(search_v2_api.engine, clock=lambda: 2_000_000)
+    )
+    headers = {"Authorization": f"Bearer {search_v2_api.token}"}
+    with TestClient(application) as client:
+        exact = client.get(item["revision_files_href"], headers=headers)
+        assert exact.status_code == 200
+        assert exact.json()["revision_id"] == old_revision
+        with immediate_transaction(search_v2_api.engine) as connection:
+            assert AuthRepository(connection).remove_grant(
+                item["library_id"], CALLER_ID, item["section_id"], SectionAction.PAGE_READ
+            )
+        revoked = client.get(item["revision_files_href"], headers=headers)
+    assert revoked.status_code == 404
 
 
 def test_v2_search_rejects_invalid_body_and_missing_credential(search_v2_api: SearchV2Api) -> None:

@@ -17,6 +17,7 @@ from patchouli_lib.api.auth_contracts import (
     CapabilityConfiguration,
     capabilities_response,
 )
+from patchouli_lib.api.contracts import build_api_v1_path
 from patchouli_lib.content.file_manifest import build_file_manifest
 
 GuideLocale = Literal["en", "zh-CN"]
@@ -257,6 +258,17 @@ _SEARCH_V2_SUCCESS_EXAMPLE: dict[str, object] = {
             "page_id": "example-page",
             "revision_id": "rev_" + "3" * 32,
             "revision_number": 1,
+            "revision_files_href": build_api_v1_path(
+                "libraries",
+                "0" * 32,
+                "sections",
+                "1" * 32,
+                "pages",
+                "example-page",
+                "revisions",
+                "rev_" + "3" * 32,
+                "files",
+            ),
             "title": "示例页面",
             "occurred_at": 1_893_456_000_000_000,
             "match_sources": [{"kind": "title", "file_name": None}],

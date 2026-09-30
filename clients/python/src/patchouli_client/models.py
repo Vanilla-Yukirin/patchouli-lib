@@ -990,9 +990,21 @@ class CurrentPageSearchItem:
     page_id: str
     revision_id: str
     revision_number: int
+    revision_files_href: str
     title: str
     occurred_at: int
     match_sources: tuple[SearchMatchSource, ...]
+
+    def __post_init__(self) -> None:
+        require_canonical_api_path(self.revision_files_href, context="revision files href")
+        expected = (
+            f"/api/v1/libraries/{quote(self.library_id, safe='')}"
+            f"/sections/{quote(self.section_id, safe='')}"
+            f"/pages/{quote(self.page_id, safe='')}"
+            f"/revisions/{quote(self.revision_id, safe='')}/files"
+        )
+        if self.revision_files_href != expected:
+            raise ProtocolError("revision files href did not identify the returned Revision")
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> CurrentPageSearchItem:
@@ -1003,6 +1015,7 @@ class CurrentPageSearchItem:
             page_id=_string(data, "page_id"),
             revision_id=_string(data, "revision_id"),
             revision_number=_integer(data, "revision_number"),
+            revision_files_href=_string(data, "revision_files_href"),
             title=_string(data, "title"),
             occurred_at=_integer(data, "occurred_at"),
             match_sources=tuple(

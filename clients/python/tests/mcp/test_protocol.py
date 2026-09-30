@@ -255,6 +255,10 @@ def test_read_tools_use_exact_typed_client_requests_and_redact_credential_id(
                         "page_id": _PAGE_ID,
                         "revision_id": "rev_synthetic",
                         "revision_number": 1,
+                        "revision_files_href": (
+                            f"/api/v1/libraries/lib_synthetic/sections/sec_synthetic/pages/{_PAGE_ID}"
+                            "/revisions/rev_synthetic/files"
+                        ),
                         "title": "Synthetic",
                         "occurred_at": 1_000_000,
                         "match_sources": [{"kind": "title", "file_name": None}],

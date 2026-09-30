@@ -207,6 +207,10 @@ def test_current_page_search_uses_cross_library_contract() -> None:
                         "page_id": "page_synthetic",
                         "revision_id": "rev_synthetic",
                         "revision_number": 2,
+                        "revision_files_href": (
+                            f"/api/v1/libraries/{library_id}/sections/sec_synthetic"
+                            "/pages/page_synthetic/revisions/rev_synthetic/files"
+                        ),
                         "title": "技术报告",
                         "occurred_at": 1_000_000,
                         "match_sources": [{"kind": "file_text", "file_name": "report.md"}],
@@ -230,6 +234,9 @@ def test_current_page_search_uses_cross_library_contract() -> None:
         )
 
     assert result.value.items[0].revision_number == 2
+    assert result.value.items[0].revision_files_href.endswith(
+        "/pages/page_synthetic/revisions/rev_synthetic/files"
+    )
     assert result.value.items[0].match_sources[0].file_name == "report.md"
 
 

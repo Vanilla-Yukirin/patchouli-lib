@@ -679,11 +679,33 @@ def test_current_page_search_result_rejects_unknown_match_source() -> None:
         "page_id": "page",
         "revision_id": "revision",
         "revision_number": 1,
+        "revision_files_href": (
+            "/api/v1/libraries/lib/sections/section/pages/page/revisions/revision/files"
+        ),
         "title": "Synthetic",
         "occurred_at": 1_000_000,
         "match_sources": [{"kind": "unknown", "file_name": None}],
     }
     with pytest.raises(ProtocolError, match="unknown match source"):
+        CurrentPageSearchResult.from_dict({"items": [item]})
+
+
+def test_current_page_search_result_rejects_mismatched_revision_href() -> None:
+    item = {
+        "library_id": "lib",
+        "section_id": "section",
+        "book_id": "book",
+        "page_id": "page",
+        "revision_id": "revision",
+        "revision_number": 1,
+        "revision_files_href": (
+            "/api/v1/libraries/lib/sections/section/pages/page/revisions/other/files"
+        ),
+        "title": "Synthetic",
+        "occurred_at": 1_000_000,
+        "match_sources": [],
+    }
+    with pytest.raises(ProtocolError, match="returned Revision"):
         CurrentPageSearchResult.from_dict({"items": [item]})
 
 
