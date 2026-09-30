@@ -100,6 +100,37 @@ class ContentRepository:
         row = self._connection.execute(statement).mappings().one_or_none()
         return None if row is None else PageRecord.model_validate(dict(row))
 
+    def update_page_title(
+        self,
+        page: PageRecord,
+        *,
+        title: str,
+        updated_at: int,
+    ) -> PageRecord | None:
+        """Conditionally update display metadata in the caller's write transaction."""
+
+        if not self._connection.in_transaction():
+            raise RuntimeError("Page title update requires a write transaction.")
+        result = self._connection.execute(
+            update(Page)
+            .where(
+                Page.library_id == page.library_id,
+                Page.page_uid == page.page_uid,
+                Page.section_id == page.section_id,
+                Page.book_id == page.book_id,
+                Page.page_id == page.page_id,
+                Page.title == page.title,
+                Page.updated_at == page.updated_at,
+                Page.current_revision_id == page.current_revision_id,
+                Page.current_revision_number == page.current_revision_number,
+                Page.deleted_at.is_(None),
+            )
+            .values(title=title, updated_at=updated_at)
+        )
+        if result.rowcount != 1:
+            return None
+        return page.model_copy(update={"title": title, "updated_at": updated_at})
+
     def list_deleted_pages(
         self,
         library_id: str,

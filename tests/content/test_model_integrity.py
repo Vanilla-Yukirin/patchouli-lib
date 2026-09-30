@@ -826,7 +826,6 @@ def test_page_identity_is_stable_while_revision_advances_sequentially(
             update(Page)
             .where(Page.library_id == library_id, Page.page_uid == page.page_uid)
             .values(
-                title="Updated Synthetic Title",
                 current_revision_id=second_revision.revision_id,
                 current_revision_number=second_revision.revision_number,
                 updated_at=3_000_000,
@@ -845,7 +844,7 @@ def test_page_identity_is_stable_while_revision_advances_sequentially(
             .one()
         )
         record = PageRecord.model_validate(dict(row))
-        assert record.title == "Updated Synthetic Title"
+        assert record.title == page.title
         assert record.page_id == page.page_id
         assert record.current_revision_id == second_revision.revision_id
         assert record.current_revision_number == 2

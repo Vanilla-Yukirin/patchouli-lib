@@ -162,6 +162,45 @@ class Page(Base):
     deleted_at: Mapped[int | None] = mapped_column(BigInteger)
 
 
+class PageTitleEvent(Base):
+    """Immutable master-audited change of a Page's display title."""
+
+    __tablename__ = "page_title_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id", "page_uid"],
+            ["pages.library_id", "pages.page_uid"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["master_audit_event_id"], ["admin_master_audit_events.id"], ondelete="RESTRICT"
+        ),
+        UniqueConstraint("master_audit_event_id", name="uq_page_title_events_master_audit"),
+        CheckConstraint("sequence BETWEEN 1 AND 9223372036854775807"),
+        CheckConstraint("at_revision_number BETWEEN 1 AND 9223372036854775807"),
+        CheckConstraint(
+            "typeof(old_title) = 'text' AND length(old_title) >= 1 "
+            "AND instr(old_title, char(0)) = 0 AND "
+            "typeof(new_title) = 'text' AND length(new_title) >= 1 "
+            "AND instr(new_title, char(0)) = 0 AND old_title != new_title"
+        ),
+        CheckConstraint(
+            "old_updated_at >= 0 AND changed_at > old_updated_at "
+            "AND changed_at <= 9223372036854775807"
+        ),
+    )
+
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
+    sequence: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    old_title: Mapped[str] = mapped_column(Text, nullable=False)
+    new_title: Mapped[str] = mapped_column(Text, nullable=False)
+    old_updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    changed_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    at_revision_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    master_audit_event_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+
+
 class PageOccurrenceCorrection(Base):
     """Immutable audit of one declared-time correction, created by SQLite."""
 
@@ -890,6 +929,7 @@ __all__ = [
     "MAX_OCCURRENCE_MICROSECONDS",
     "MIN_OCCURRENCE_MICROSECONDS",
     "Page",
+    "PageTitleEvent",
     "PageOccurrenceCorrection",
     "PageOccurrenceCorrectionGuard",
     "PageLifecycleEvent",

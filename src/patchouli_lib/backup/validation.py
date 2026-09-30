@@ -19,6 +19,7 @@ from patchouli_lib.backup.errors import BackupDatabaseError
 from patchouli_lib.backup.manifest import (
     ACTOR_HOME_SCHEMA_REVISION,
     AGENT_TOKEN_VALUES_SCHEMA_REVISION,
+    AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
     FILE_SET_SCHEMA_REVISION,
     INTERMEDIATE_SCHEMA_REVISION,
     LEGACY_SCHEMA_REVISION,
@@ -474,6 +475,27 @@ _EXPECTED_SQL_HASHES_0021: Final = _EXPECTED_SQL_HASHES_0020 | {
         "2be933d76691f5d3cb03d618725a052dc0a87f34c5110cd6674a2c69bb0ee73d"
     ),
 }
+_EXPECTED_SQL_HASHES_0022: Final = _EXPECTED_SQL_HASHES_0021 | {
+    # Derived from a fresh Alembic 0022 database with _canonical_schema_sql.
+    ("table", "page_title_events"): (
+        "116d847b506abb91312a34213e32165955b63417c80fd3892f205ab285f4738d"
+    ),
+    ("trigger", "trg_pages_title_require_audit"): (
+        "e0714634ed0e909b8194703c1858cc2cc30f52fe0989e5f8751bcbd1fc74e9bf"
+    ),
+    ("trigger", "trg_page_title_events_validate_insert"): (
+        "54445aa108b342c034491d63cd0824486db7722eaf1b2f4746ba35af12162523"
+    ),
+    ("trigger", "trg_pages_title_record"): (
+        "07231402ac1a697f27c26ca7251c8af6f01a2bdb4bbfca30a212e4b6d2ccb0ef"
+    ),
+    ("trigger", "trg_page_title_events_no_update"): (
+        "d495a523de839773464634b97742449c063ddcc2141c80a0643eceda9e46c07e"
+    ),
+    ("trigger", "trg_page_title_events_no_delete"): (
+        "cecfbe938566ce8d1a802c0229786483aad5f7ad120319869783ef033ce5759f"
+    ),
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
     PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
@@ -489,7 +511,8 @@ _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     MASTER_AUDIT_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0018,
     MASTER_LIFECYCLE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0019,
     LIBRARY_DESCRIPTION_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0020,
-    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0021,
+    AUDIT_ACTOR_INDEX_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0021,
+    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0022,
 }
 _FILE_SET_REVISIONS: Final = frozenset(
     {
@@ -501,6 +524,7 @@ _FILE_SET_REVISIONS: Final = frozenset(
         MASTER_AUDIT_SCHEMA_REVISION,
         MASTER_LIFECYCLE_SCHEMA_REVISION,
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
+        AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }
 )
@@ -508,6 +532,7 @@ _MASTER_LIFECYCLE_REVISIONS: Final = frozenset(
     {
         MASTER_LIFECYCLE_SCHEMA_REVISION,
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
+        AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }
 )
@@ -881,9 +906,9 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
     if _one_integer(connection, "SELECT count(*) FROM page_lifecycle_guards"):
         raise BackupDatabaseError
 
-    pages: dict[tuple[str, bytes], tuple[str, str, str, int, int | None, int, int, int]] = {}
+    pages: dict[tuple[str, bytes], tuple[str, str, str, str, int, int | None, int, int, int]] = {}
     for row in connection.execute(
-        "SELECT library_id, page_uid, section_id, page_id, page_type, occurred_at, "
+        "SELECT library_id, page_uid, section_id, page_id, page_type, title, occurred_at, "
         "deleted_at, created_at, updated_at, current_revision_number FROM pages"
     ):
         (
@@ -892,6 +917,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
             section_id,
             page_id,
             page_type,
+            title,
             occurred_at,
             deleted_at,
             created_at,
@@ -904,6 +930,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
             or type(section_id) is not str
             or type(page_id) is not str
             or type(page_type) is not str
+            or type(title) is not str
             or type(occurred_at) is not int
             or (deleted_at is not None and type(deleted_at) is not int)
             or type(created_at) is not int
@@ -915,6 +942,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
             section_id,
             page_id,
             page_type,
+            title,
             occurred_at,
             deleted_at,
             created_at,
@@ -922,8 +950,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
             current_revision_number,
         )
 
-    # A Page's updated_at changes only for a Revision, an occurrence correction,
-    # or a lifecycle transition. Replay all three on a single logical clock.
+    # Replay all changes to the Page clock, including metadata-only title edits.
     first_revisions: dict[tuple[str, bytes], tuple[str, int]] = {}
     operations: dict[tuple[str, bytes], list[tuple[int, str, tuple[object, ...]]]] = {}
     for library_id, page_uid, number, revision_id, created_at in connection.execute(
@@ -963,6 +990,54 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
         operations.setdefault(key, []).append(
             (corrected_at, "correction", (sequence, old, new, number))
         )
+
+    first_titles: dict[tuple[str, bytes], str] = {}
+    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+        for row in connection.execute(
+            "SELECT library_id, page_uid, sequence, old_title, new_title, "
+            "old_updated_at, changed_at, at_revision_number, master_audit_event_id "
+            "FROM page_title_events ORDER BY library_id, page_uid, sequence"
+        ):
+            (
+                library_id,
+                page_uid,
+                sequence,
+                old_title,
+                new_title,
+                old_updated_at,
+                changed_at,
+                number,
+                audit_id,
+            ) = row
+            key = (library_id, page_uid)
+            if (
+                key not in pages
+                or type(sequence) is not int
+                or type(old_title) is not str
+                or type(new_title) is not str
+                or old_title == new_title
+                or type(old_updated_at) is not int
+                or type(changed_at) is not int
+                or type(number) is not int
+                or type(audit_id) is not str
+            ):
+                raise BackupDatabaseError
+            audit = connection.execute(
+                "SELECT action, target_type, target_id, occurred_at "
+                "FROM admin_master_audit_events WHERE id = ?",
+                (audit_id,),
+            ).fetchone()
+            if audit != (
+                "content.page.title.edit",
+                "page",
+                f"{library_id}:{page_uid.hex()}",
+                changed_at,
+            ):
+                raise BackupDatabaseError
+            first_titles.setdefault(key, old_title)
+            operations.setdefault(key, []).append(
+                (changed_at, "title", (sequence, old_title, new_title, old_updated_at, number))
+            )
 
     master_column = (
         "master_audit_event_id" if schema_revision in _MASTER_LIFECYCLE_REVISIONS else "NULL"
@@ -1068,6 +1143,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
         section_id,
         _page_id,
         page_type,
+        final_title,
         final_occurrence,
         final_deleted_at,
         created_at,
@@ -1079,10 +1155,12 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
             raise BackupDatabaseError
         revision_number = 1
         occurrence = first_occurrences.get(key, final_occurrence)
+        title = first_titles.get(key, final_title)
         replayed_deleted_at: int | None = None
         prior_time = created_at
         correction_sequence = 0
         lifecycle_sequence = 0
+        title_sequence = 0
         for time, kind, values in sorted(operations.get(key, []), key=lambda item: item[0]):
             if time <= prior_time:
                 raise BackupDatabaseError
@@ -1103,6 +1181,19 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
                     raise BackupDatabaseError
                 correction_sequence = sequence
                 occurrence = new
+            elif kind == "title":
+                sequence, old, new, old_updated_at, number = values
+                if (
+                    replayed_deleted_at is not None
+                    or sequence != title_sequence + 1
+                    or old != title
+                    or old_updated_at != prior_time
+                    or number != revision_number
+                    or new == old
+                ):
+                    raise BackupDatabaseError
+                title_sequence = sequence
+                title = new
             else:
                 sequence, action, event_section, old_deleted, old_updated, number, event_time = (
                     values
@@ -1126,6 +1217,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
             or final_deleted_at != replayed_deleted_at
             or final_revision != revision_number
             or final_occurrence != occurrence
+            or final_title != title
         ):
             raise BackupDatabaseError
 
@@ -1474,6 +1566,24 @@ def _require_master_audit(connection: sqlite3.Connection, schema_revision: str) 
                 or occurred_at != changed_at
             ):
                 raise BackupDatabaseError
+        if schema_revision == SUPPORTED_SCHEMA_REVISION and action == "content.page.title.edit":
+            linked_events = connection.execute(
+                "SELECT library_id, page_uid, changed_at FROM page_title_events "
+                "WHERE master_audit_event_id = ? LIMIT 2",
+                (event_id,),
+            ).fetchall()
+            if len(linked_events) != 1:
+                raise BackupDatabaseError
+            library_id, page_uid, changed_at = linked_events[0]
+            if (
+                type(library_id) is not str
+                or type(page_uid) is not bytes
+                or type(changed_at) is not int
+                or target_type != "page"
+                or target_id != f"{library_id}:{page_uid.hex()}"
+                or occurred_at != changed_at
+            ):
+                raise BackupDatabaseError
 
 
 def _require_actor_home_graph(connection: sqlite3.Connection, schema_revision: str) -> None:
@@ -1559,6 +1669,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         MASTER_AUDIT_SCHEMA_REVISION,
         MASTER_LIFECYCLE_SCHEMA_REVISION,
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
+        AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         invalid_library_policies = _one_integer(
@@ -1580,6 +1691,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         MASTER_AUDIT_SCHEMA_REVISION,
         MASTER_LIFECYCLE_SCHEMA_REVISION,
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
+        AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_agent_token_values(connection)
@@ -1590,6 +1702,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         MASTER_AUDIT_SCHEMA_REVISION,
         MASTER_LIFECYCLE_SCHEMA_REVISION,
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
+        AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_master_identity(connection)
@@ -1599,6 +1712,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         MASTER_AUDIT_SCHEMA_REVISION,
         MASTER_LIFECYCLE_SCHEMA_REVISION,
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
+        AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_actor_home_graph(connection, schema_revision)
@@ -1607,6 +1721,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         MASTER_AUDIT_SCHEMA_REVISION,
         MASTER_LIFECYCLE_SCHEMA_REVISION,
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
+        AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_master_audit(connection, schema_revision)
@@ -1827,6 +1942,7 @@ def _file_set_occurrence_at(
 def _file_set_valid_current_etags(
     connection: sqlite3.Connection,
     *,
+    schema_revision: str,
     library_id: str,
     page_uid: bytes,
     revision_id: str,
@@ -1854,6 +1970,15 @@ def _file_set_valid_current_etags(
         if action not in {"delete", "restore"} or type(changed_at) is not int:
             raise BackupDatabaseError
         events.append((changed_at, "lifecycle", action))
+    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+        for (changed_at,) in connection.execute(
+            "SELECT changed_at FROM page_title_events "
+            "WHERE library_id = ? AND page_uid = ? AND at_revision_number = ?",
+            (library_id, page_uid, revision_number),
+        ):
+            if type(changed_at) is not int:
+                raise BackupDatabaseError
+            events.append((changed_at, "title", 0))
     active = True
     for changed_at, kind, value in sorted(events, key=lambda event: event[0]):
         if changed_at <= revision_at:
@@ -1862,7 +1987,7 @@ def _file_set_valid_current_etags(
             if type(value) is not int:
                 raise BackupDatabaseError
             occurrence = value
-        else:
+        elif kind == "lifecycle":
             active = value == "restore"
         if active:
             valid.add(
@@ -1874,6 +1999,7 @@ def _file_set_valid_current_etags(
 def _require_file_set_replay(
     connection: sqlite3.Connection,
     *,
+    schema_revision: str,
     library_id: str,
     caller_id: str,
     method: str,
@@ -1999,6 +2125,7 @@ def _require_file_set_replay(
             )
             if etag not in _file_set_valid_current_etags(
                 connection,
+                schema_revision=schema_revision,
                 library_id=library_id,
                 page_uid=page_uid,
                 revision_id=body.revision_id,
@@ -2039,6 +2166,26 @@ def _require_file_set_replay(
     # mistake that earlier audit event for a mutation made by this no-op.
     if changed and audit != (1,):
         raise BackupDatabaseError
+
+
+def _page_title_at(
+    connection: sqlite3.Connection,
+    *,
+    schema_revision: str,
+    library_id: str,
+    page_uid: bytes,
+    current_title: str,
+    at: int,
+) -> str:
+    if schema_revision != SUPPORTED_SCHEMA_REVISION:
+        return current_title
+    row = connection.execute(
+        "SELECT old_title FROM page_title_events "
+        "WHERE library_id = ? AND page_uid = ? AND changed_at > ? "
+        "ORDER BY changed_at LIMIT 1",
+        (library_id, page_uid, at),
+    ).fetchone()
+    return current_title if row is None else row[0]
 
 
 def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: str) -> None:
@@ -2205,6 +2352,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
                 raise BackupDatabaseError
             _require_file_set_replay(
                 connection,
+                schema_revision=schema_revision,
                 library_id=library_id,
                 caller_id=caller_id,
                 method=method,
@@ -2269,7 +2417,15 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
                         break
         if (
             body.page.book_id != row[1]
-            or body.page.title != row[2]
+            or body.page.title
+            != _page_title_at(
+                connection,
+                schema_revision=schema_revision,
+                library_id=library_id,
+                page_uid=row[0],
+                current_title=row[2],
+                at=row[5],
+            )
             or body.page.type != row[3]
             or body.page.occurred_at != canonical_utc_wire(response_occurrence)
             or body.revision.created_at != canonical_utc_wire(row[5])
@@ -2358,7 +2514,11 @@ def _validate_connection(
     ):
         raise BackupDatabaseError
     _require_page_graph(connection, schema_revision)
-    if schema_revision in {LIBRARY_DESCRIPTION_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
+    if schema_revision in {
+        LIBRARY_DESCRIPTION_SCHEMA_REVISION,
+        AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
+        SUPPORTED_SCHEMA_REVISION,
+    }:
         _require_library_descriptions(connection)
     if schema_revision in _LIFECYCLE_REVISIONS:
         _require_lifecycle_graph(connection, schema_revision)
