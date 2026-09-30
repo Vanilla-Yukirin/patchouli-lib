@@ -7,6 +7,7 @@ from pathlib import Path
 from threading import Event
 from time import time_ns
 from types import SimpleNamespace
+from typing import cast
 
 import anyio
 import pytest
@@ -15,7 +16,7 @@ from sqlalchemy import Engine, func, select
 
 from patchouli_lib.app import create_app
 from patchouli_lib.auth.repository import AuthRepository
-from patchouli_lib.auth.schemas import CallerKind, NewCaller
+from patchouli_lib.auth.schemas import AuthenticatedCaller, CallerKind, NewCaller
 from patchouli_lib.auth.service import CredentialIssuer
 from patchouli_lib.config import Settings
 from patchouli_lib.database import immediate_transaction
@@ -94,9 +95,10 @@ def test_success_401_404_500_and_non_api_record_boundaries(tmp_path: Path) -> No
     app = _app_with_schema(tmp_path)
     caller_id, library_id, credential_id, token = _seed_agent(app.state.engine)
 
-    @app.get("/api/v1/synthetic-error")
     def synthetic_error() -> None:
         raise RuntimeError("private failure payload")
+
+    app.add_api_route("/api/v1/synthetic-error", synthetic_error, methods=["GET"])
 
     with TestClient(app, raise_server_exceptions=False) as client:
         success = client.get("/api/v1/auth/whoami", headers={"Authorization": f"Bearer {token}"})
@@ -148,7 +150,8 @@ def test_success_401_404_500_and_non_api_record_boundaries(tmp_path: Path) -> No
 
 def test_metadata_write_failure_does_not_change_response(tmp_path: Path) -> None:
     app = _app_with_schema(tmp_path)
-    RequestLogRecord.__table__.drop(app.state.engine)
+    with app.state.engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE api_request_log")
     with TestClient(app) as client:
         response = client.get("/api/v1/missing")
     assert response.status_code == 404
@@ -164,7 +167,9 @@ def test_identity_cell_is_isolated_across_worker_threads_and_concurrent_requests
                 caller=SimpleNamespace(id=suffix * 32, library_id="a" * 32),
                 credential=SimpleNamespace(id="b" * 32),
             )
-            await anyio.to_thread.run_sync(lambda: note_authenticated_identity(authenticated))
+            await anyio.to_thread.run_sync(
+                lambda: note_authenticated_identity(cast(AuthenticatedCaller, authenticated))
+            )
             await asyncio.sleep(0)
             return identity.caller_id, identity.credential_id
         finally:

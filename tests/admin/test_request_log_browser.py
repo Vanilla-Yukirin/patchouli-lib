@@ -6,7 +6,7 @@ from time import time_ns
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine
+from sqlalchemy import Engine, insert
 
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.passwords import hash_password
@@ -56,7 +56,7 @@ def _seed(engine: Engine) -> int:
             connection, identity_factory=lambda: "c" * 32
         ).initialize_from_local_cli(_MASTER_TOKEN, now=1_000)
         connection.execute(
-            Library.__table__.insert().values(
+            insert(Library).values(
                 id=_LIBRARY_ID,
                 name="Synthetic Library",
                 description="",
@@ -65,7 +65,7 @@ def _seed(engine: Engine) -> int:
             )
         )
         connection.execute(
-            Caller.__table__.insert().values(
+            insert(Caller).values(
                 id=_CALLER_ID,
                 library_id=_LIBRARY_ID,
                 kind="agent",

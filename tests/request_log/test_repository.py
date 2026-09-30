@@ -35,14 +35,14 @@ def database(
         engine.dispose()
 
 
-def _entry(n: int, *, at: int = 1, **overrides: object) -> RequestLogWrite:
+def _entry(n: int, **overrides: object) -> RequestLogWrite:
     values: dict[str, object] = {
         "request_id": f"req_{n:032x}",
         "method": "GET",
         "route_template": "/api/v1/libraries/{library_id}",
         "status_code": 200,
         "completion": "completed",
-        "occurred_at": at,
+        "occurred_at": 1,
         "duration_us": 42,
         "caller_id": "a" * 32,
         "home_library_id": "b" * 32,
@@ -129,7 +129,7 @@ def test_retention_is_batched_strict_and_transactional(
     engine, path, _ = database
     with immediate_transaction(engine) as connection:
         repository = RequestLogRepository(connection)
-        ids = [repository.add(_entry(n, at=n)) for n in range(1, 5)]
+        ids = [repository.add(_entry(n, occurred_at=n)) for n in range(1, 5)]
     with immediate_transaction(engine) as connection:
         repository = RequestLogRepository(connection)
         assert repository.delete_before(3, batch_size=1) == 1
@@ -140,7 +140,7 @@ def test_retention_is_batched_strict_and_transactional(
         repository = RequestLogRepository(connection)
         assert repository.delete_before(3) == 1
         assert repository.delete_before(3) == 0
-        assert repository.add(_entry(5, at=5)) > max(ids)
+        assert repository.add(_entry(5, occurred_at=5)) > max(ids)
     assert validate_database(path).schema_revision == SUPPORTED_SCHEMA_REVISION
 
 
