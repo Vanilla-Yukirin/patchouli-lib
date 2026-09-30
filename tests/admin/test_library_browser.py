@@ -816,6 +816,185 @@ def test_browser_reads_historical_revision_without_crossing_page_scope(
     assert "(正在查看)" in chinese.text
 
 
+def test_page_revision_history_is_bounded_and_keeps_selected_preview(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    library, section, book = _seed_structure(engine)
+    page_id = _insert_page(engine, library, section, book)
+    _, _, _, page_path = _paths(library, section, book, page_id)
+    with immediate_transaction(engine) as connection:
+        page = (
+            connection.execute(
+                Page.__table__.select().where(Page.library_id == library, Page.page_id == page_id)
+            )
+            .mappings()
+            .one()
+        )
+        for number in range(2, 46):
+            revision_id = f"rev_{number:032x}"
+            markdown = f"# Revision {number}\n".encode()
+            ContentRepository(connection).add_revision(
+                NewRevision(
+                    library_id=library,
+                    revision_id=revision_id,
+                    page_uid=page["page_uid"],
+                    revision_number=number,
+                    created_at=number * 1_000_000,
+                    **MarkdownContent.from_bytes(markdown).model_dump(),
+                )
+            )
+            connection.execute(
+                insert(RevisionFile).values(
+                    library_id=library,
+                    page_uid=page["page_uid"],
+                    revision_id=revision_id,
+                    revision_number=number,
+                    filename="content.md",
+                    content_bytes=markdown,
+                    size_bytes=len(markdown),
+                    content_sha256=sha256(markdown).digest(),
+                )
+            )
+        connection.execute(
+            update(Page)
+            .where(Page.library_id == library, Page.page_id == page_id)
+            .values(
+                current_revision_id=f"rev_{45:032x}",
+                current_revision_number=45,
+                updated_at=45_000_000,
+            )
+        )
+
+    _login(client)
+    first = client.get(page_path)
+    assert first.status_code == 200
+    first_history = first.text.split('<ul class="item-list revision-history">', 1)[1].split(
+        "</ul>", 1
+    )[0]
+    assert first_history.count("<li") == 20
+    assert f'href="{page_path}/revisions/45"' in first_history
+    assert f'href="{page_path}/revisions/26"' in first_history
+    assert f'href="{page_path}/revisions/25"' not in first_history
+    assert f'href="{page_path}?before_revision_number=26"' in first.text
+
+    second = client.get(f"{page_path}?before_revision_number=26")
+    assert second.status_code == 200
+    second_history = second.text.split('<ul class="item-list revision-history">', 1)[1].split(
+        "</ul>", 1
+    )[0]
+    assert second_history.count("<li") == 20
+    assert f'href="{page_path}/revisions/25?before_revision_number=26"' in second_history
+    assert f'href="{page_path}/revisions/6?before_revision_number=26"' in second_history
+    assert f'href="{page_path}?before_revision_number=6"' in second.text
+    assert f'href="{page_path}">Latest revisions</a>' in second.text
+    assert "# Revision 45" in second.text
+
+    third = client.get(f"{page_path}?before_revision_number=6")
+    third_history = third.text.split('<ul class="item-list revision-history">', 1)[1].split(
+        "</ul>", 1
+    )[0]
+    assert third_history.count("<li") == 5
+    assert "Older revisions" not in third.text
+    assert f'href="{page_path}/revisions/1?before_revision_number=6"' in third_history
+    selected_from_window = client.get(f"{page_path}/revisions/1?before_revision_number=6")
+    assert "# Synthetic archive" in selected_from_window.text
+    assert selected_from_window.text.count('aria-current="true"') == 1
+    translated = client.get(f"{page_path}/revisions/1?before_revision_number=6&lang=zh-CN")
+    assert "版本历史" in translated.text
+    assert f'href="{page_path}/revisions/1?before_revision_number=6&amp;lang=en"' in translated.text
+
+    selected = client.get(f"{page_path}/revisions/1")
+    assert selected.status_code == 200
+    assert "# Synthetic archive" in selected.text
+    assert "# Revision 45" not in selected.text
+    assert selected.text.count('aria-current="true"') == 1
+    assert f'href="{page_path}/revisions/1?before_revision_number=46"' in selected.text
+    latest = client.get(f"{page_path}/revisions/1?before_revision_number=46")
+    assert "# Synthetic archive" in latest.text
+    assert f'href="{page_path}/revisions/45"' in latest.text
+    assert f'href="{page_path}/revisions/1"' not in latest.text
+
+    invalid_cursors = (
+        "0",
+        "1",
+        "01",
+        "1e2",
+        "-2",
+        "２",
+        str(1 << 63),
+        "47",
+        "2&before_revision_number=3",
+    )
+    for cursor in invalid_cursors:
+        assert client.get(f"{page_path}?before_revision_number={cursor}").status_code == 404
+    assert client.get(f"{page_path}/revisions/1?before_revision_number=bad").status_code == 404
+
+
+def test_page_revision_history_accepts_maximum_revision_number_without_sqlite_overflow(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    library, section, book = _seed_structure(engine)
+    maximum = (1 << 63) - 1
+    page_id = _insert_page(engine, library, section, book)
+    _, _, _, page_path = _paths(library, section, book, page_id)
+    revision_id = "rev_" + "f" * 32
+    markdown = b"# Maximum revision\n"
+    with immediate_transaction(engine) as connection:
+        page = (
+            connection.execute(
+                Page.__table__.select().where(Page.library_id == library, Page.page_id == page_id)
+            )
+            .mappings()
+            .one()
+        )
+        ContentRepository(connection).add_revision(
+            NewRevision(
+                library_id=library,
+                revision_id=revision_id,
+                page_uid=page["page_uid"],
+                revision_number=maximum,
+                created_at=3_000_000,
+                **MarkdownContent.from_bytes(markdown).model_dump(),
+            )
+        )
+        connection.execute(
+            insert(RevisionFile).values(
+                library_id=library,
+                page_uid=page["page_uid"],
+                revision_id=revision_id,
+                revision_number=maximum,
+                filename="content.md",
+                content_bytes=markdown,
+                size_bytes=len(markdown),
+                content_sha256=sha256(markdown).digest(),
+            )
+        )
+        connection.execute(
+            update(Page)
+            .where(Page.library_id == library, Page.page_id == page_id)
+            .values(
+                current_revision_id=revision_id,
+                current_revision_number=maximum,
+                updated_at=3_000_000,
+            )
+        )
+    _login(client)
+
+    for path in (
+        page_path,
+        f"{page_path}?before_revision_number={maximum + 1}",
+        f"{page_path}/revisions/{maximum}",
+        f"{page_path}/revisions/{maximum}?before_revision_number={maximum + 1}",
+    ):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert "# Maximum revision" in response.text
+        assert f'href="{page_path}/revisions/{maximum}"' in response.text
+        assert response.text.count('aria-current="true"') == 1
+
+
 def test_browser_reads_mixed_and_binary_file_set_history_without_inline_binary(
     browser: tuple[TestClient, Engine],
 ) -> None:

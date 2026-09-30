@@ -221,6 +221,20 @@ def create_admin_router(
             return "zh-CN"
         return "en"
 
+    def revision_history_before(request: Request) -> int | None:
+        values = request.query_params.getlist("before_revision_number")
+        if not values:
+            return None
+        if len(values) != 1 or not 1 <= len(values[0]) <= 19:
+            raise ValueError("Invalid revision history cursor")
+        value = values[0]
+        if not value.isascii() or not value.isdecimal() or value[0] == "0":
+            raise ValueError("Invalid revision history cursor")
+        before = int(value)
+        if not 2 <= before <= 1 << 63:
+            raise ValueError("Invalid revision history cursor")
+        return before
+
     def html(
         content: str,
         *,
@@ -1596,7 +1610,13 @@ def create_admin_router(
         request: Request, library_id: str, section_id: str, book_id: str, page_id: str
     ) -> Response:
         def render(csrf: str, locale: AdminLocale) -> str | None:
-            view = read_model.get_page(library_id, section_id, book_id, page_id)
+            try:
+                before = revision_history_before(request)
+            except ValueError:
+                return None
+            view = read_model.get_page(
+                library_id, section_id, book_id, page_id, before_revision_number=before
+            )
             return (
                 None
                 if view is None
@@ -1688,7 +1708,18 @@ def create_admin_router(
         revision_number: int,
     ) -> Response:
         def render(csrf: str, locale: AdminLocale) -> str | None:
-            view = read_model.get_page(library_id, section_id, book_id, page_id, revision_number)
+            try:
+                before = revision_history_before(request)
+            except ValueError:
+                return None
+            view = read_model.get_page(
+                library_id,
+                section_id,
+                book_id,
+                page_id,
+                revision_number,
+                before_revision_number=before,
+            )
             return (
                 None
                 if view is None

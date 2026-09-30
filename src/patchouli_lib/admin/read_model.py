@@ -29,6 +29,7 @@ from patchouli_lib.library.models import Book, Library, Section
 from patchouli_lib.tags.models import PageTag, Tag
 
 _MAX_FILE_SET_PREVIEW_BYTES = 64 * 1024
+_PAGE_HISTORY_SIZE = 20
 
 
 def _lower_hex_id(value: str) -> bool:
@@ -169,6 +170,9 @@ class PageView:
     selected_revision_created_at: int
     files: tuple[RevisionFileItem, ...]
     revisions: tuple[RevisionItem, ...]
+    history_before_revision_number: int
+    older_revisions_before: int | None
+    history_is_latest: bool
     tag_choices: tuple[PageTagChoice, ...]
 
 
@@ -884,8 +888,11 @@ class AdminReadModel:
         book_id: str,
         page_id: str,
         revision_number: int | None = None,
+        before_revision_number: int | None = None,
     ) -> PageView | None:
         if revision_number is not None and not 1 <= revision_number <= (1 << 63) - 1:
+            return None
+        if before_revision_number is not None and not 2 <= before_revision_number <= 1 << 63:
             return None
         with self._engine.connect() as connection:
             library = _get_library(connection, library_id)
@@ -935,6 +942,12 @@ class AdminReadModel:
                 .one_or_none()
             )
             if row is None:
+                return None
+            current_revision_number = row["current_revision_number"]
+            if (
+                before_revision_number is not None
+                and before_revision_number > current_revision_number + 1
+            ):
                 return None
             files = tuple(
                 RevisionFileItem(
@@ -991,16 +1004,34 @@ class AdminReadModel:
                     ):
                         with suppress(UnicodeDecodeError):
                             markdown = content.decode("utf-8", errors="strict")
-            revisions = tuple(
-                RevisionItem(item["revision_number"], item["created_at"])
-                for item in connection.execute(
+            history_before = before_revision_number or current_revision_number + 1
+            if before_revision_number is None and (
+                current_revision_number - row["selected_revision_number"] >= _PAGE_HISTORY_SIZE
+            ):
+                history_before = row["selected_revision_number"] + 1
+            history_filter = (
+                Revision.revision_number <= (1 << 63) - 1
+                if history_before == 1 << 63
+                else Revision.revision_number < history_before
+            )
+            history_rows = tuple(
+                connection.execute(
                     select(Revision.revision_number, Revision.created_at)
                     .where(
                         Revision.library_id == library_id,
                         Revision.page_uid == row["page_uid"],
+                        history_filter,
                     )
                     .order_by(Revision.revision_number.desc())
+                    .limit(_PAGE_HISTORY_SIZE + 1)
                 ).mappings()
+            )
+            revisions = tuple(
+                RevisionItem(item["revision_number"], item["created_at"])
+                for item in history_rows[:_PAGE_HISTORY_SIZE]
+            )
+            older_revisions_before = (
+                revisions[-1].number if len(history_rows) > _PAGE_HISTORY_SIZE else None
             )
             tag_choices = tuple(
                 PageTagChoice(item["id"], item["display_name"], item["tag_id"] is not None)
@@ -1028,6 +1059,9 @@ class AdminReadModel:
                 row["selected_revision_created_at"],
                 files,
                 revisions,
+                history_before,
+                older_revisions_before,
+                history_before == current_revision_number + 1,
                 tag_choices,
             )
 

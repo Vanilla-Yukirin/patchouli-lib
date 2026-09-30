@@ -430,6 +430,8 @@ _ZH_CN: dict[str, str] = {
         "此版本没有可安全预览的 Markdown 正文。"
     ),
     "Version history": "版本历史",
+    "Older revisions": "更早的版本",
+    "Latest revisions": "最新的版本",
     "Version": "版本",
     "Viewing": "正在查看",
     "Recorded": "记录时间",
@@ -1951,10 +1953,15 @@ def page_preview_page(
     section_path = f"{library_path}/sections/{escape(view.section.id, quote=True)}"
     book_path = f"{section_path}/books/{escape(view.book.id, quote=True)}"
     base = f"{book_path}/pages/{escape(view.page.id, quote=True)}"
+    history_query = (
+        ""
+        if view.history_is_latest
+        else f"?before_revision_number={view.history_before_revision_number}"
+    )
     history = "".join(
         "<li"
         + (' aria-current="true"' if item.number == view.selected_revision_number else "")
-        + f'><a href="{base}/revisions/{item.number}">'
+        + f'><a href="{base}/revisions/{item.number}{history_query}">'
         f"{localize(locale, 'Version')} {item.number}</a>"
         + (
             f' <span class="selected-marker">({localize(locale, "Viewing")})</span>'
@@ -1971,6 +1978,22 @@ def page_preview_page(
         for item in view.files
     )
     current = view.selected_revision_number == view.page.revision_number
+    selected_path = base if current else f"{base}/revisions/{view.selected_revision_number}"
+    latest_path = (
+        base
+        if current
+        else f"{selected_path}?before_revision_number={view.page.revision_number + 1}"
+    )
+    history_navigation = (
+        f'<a href="{selected_path}?before_revision_number={view.older_revisions_before}">'
+        f"{localize(locale, 'Older revisions')}</a>"
+        if view.older_revisions_before is not None
+        else ""
+    ) + (
+        f' <a href="{latest_path}">{localize(locale, "Latest revisions")}</a>'
+        if not view.history_is_latest
+        else ""
+    )
     heading = "Current Markdown" if current else "Markdown body"
     no_preview = localize(locale, "No safe Markdown preview is available for this version.")
     body = (
@@ -1995,6 +2018,11 @@ def page_preview_page(
         f'<ul class="item-list revision-files">{files}</ul>'
         f"<h2>{localize(locale, 'Version history')}</h2>"
         f'<ul class="item-list revision-history">{history}</ul>'
+        + (
+            f'<nav aria-label="{localize(locale, "Version history")}">{history_navigation}</nav>'
+            if history_navigation
+            else ""
+        )
     )
     tag_path = f"{library_path}/tags"
     tag_choices = "".join(
@@ -2036,7 +2064,7 @@ def page_preview_page(
         csrf_token,
         locale,
         view.page.title,
-        base,
+        selected_path + history_query,
         body,
         crumbs=(
             (localize(locale, "Libraries"), "/admin/libraries"),
@@ -2170,12 +2198,13 @@ def _language_switch(locale: AdminLocale, path: str) -> str:
     english_current = ' aria-current="page"' if locale == "en" else ""
     chinese_current = ' aria-current="page"' if locale == "zh-CN" else ""
     escaped_path = escape(path, quote=True)
+    separator = "&amp;" if "?" in path else "?"
     return (
         f'<span class="language-switch" aria-label="{localize(locale, "Language")}">'
-        f'<a href="{escaped_path}?lang=zh-CN" hreflang="zh-CN" '
+        f'<a href="{escaped_path}{separator}lang=zh-CN" hreflang="zh-CN" '
         f'lang="zh-CN"{chinese_current}>中文</a>'
         '<span aria-hidden="true">/</span>'
-        f'<a href="{escaped_path}?lang=en" hreflang="en" '
+        f'<a href="{escaped_path}{separator}lang=en" hreflang="en" '
         f'lang="en"{english_current}>English</a>'
         "</span>"
     )
