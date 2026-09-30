@@ -69,7 +69,7 @@ class SearchQueryV2Wire(_StrictWireModel):
     )
     occurred_from_us: _FromMicros | None = None
     occurred_before_us: _BeforeMicros | None = None
-    libraries: Annotated[list[OpaqueId], Field(max_length=MAX_QUERY_LIBRARIES)] | None = None
+    libraries: Annotated[list[OpaqueId], Field(min_length=1, max_length=MAX_QUERY_LIBRARIES)] | None = None
     limit: Annotated[int, Field(ge=1, le=MAX_PAGE_LIMIT)] = DEFAULT_PAGE_LIMIT
 
     @field_validator("keywords")

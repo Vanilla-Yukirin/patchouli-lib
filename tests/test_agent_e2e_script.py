@@ -111,7 +111,7 @@ def test_command_failure_does_not_render_command_input_or_output(
             step="Synthetic command",
         )
 
-    assert str(captured.value) == "Synthetic command failed."
+    assert str(captured.value) == "Synthetic command failed (exit 1)."
     assert secret not in str(captured.value)
 
 

@@ -112,6 +112,7 @@ def test_invalid_time_bounds_fail(value: object) -> None:
         {"keywords": ["x"], "limit": "2"},
         {"keywords": ["x"], "unknown": "value"},
         {"keywords": ["x"], "libraries": ["A" * 32]},
+        {"keywords": ["x"], "libraries": []},
         {"keywords": ["x"], "tags_any": [{"library_id": LIBRARY_A, "tag_id": TAG_A, "x": 1}]},
     ],
 )
