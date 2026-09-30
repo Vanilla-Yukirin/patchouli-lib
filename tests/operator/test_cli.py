@@ -5,7 +5,7 @@ from io import StringIO
 from pathlib import Path
 
 import pytest
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, func, select, update
 
 from patchouli_lib import operator_cli
 from patchouli_lib.auth.models import (
@@ -257,6 +257,81 @@ def test_bootstrap_seeds_structure_and_outputs_secret_only_after_commit(
         assert connection.scalar(select(func.count()).select_from(Caller)) == 1
         assert connection.scalar(select(func.count()).select_from(Credential)) == 1
         assert connection.scalar(select(func.count()).select_from(AuditEvent)) == 1
+
+
+def test_bootstrap_normalizes_existing_library_name_before_opt_in_guard(
+    cli_database: tuple[Path, Engine, list[int]],
+) -> None:
+    _, engine, _ = cli_database
+    first_code, first_stdout, first_stderr = _run(_bootstrap_arguments())
+    assert first_code == 0
+    assert first_stderr == ""
+    first_token = _token(first_stdout)
+
+    arguments = _bootstrap_arguments()
+    arguments[arguments.index("--library-name") + 1] = f"  {_LIBRARY_NAME}  "
+    repeated_code, repeated_stdout, repeated_stderr = _run(arguments)
+
+    assert repeated_code == 1
+    assert repeated_stdout == ""
+    assert repeated_stderr == "Operator command failed.\n"
+    assert first_token not in repeated_stderr
+    with engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(Library)) == 1
+        assert connection.scalar(select(func.count()).select_from(Caller)) == 1
+        assert connection.scalar(select(func.count()).select_from(AuditEvent)) == 1
+
+
+def test_bootstrap_requires_opt_in_after_library_rename(
+    cli_database: tuple[Path, Engine, list[int]],
+) -> None:
+    _, engine, _ = cli_database
+    first_code, first_stdout, first_stderr = _run(_bootstrap_arguments())
+    assert first_code == 0
+    assert first_stderr == ""
+    first_token = _token(first_stdout)
+
+    renamed_name = "Renamed Local Library"
+    with engine.begin() as connection:
+        library_id = connection.scalar(select(Library.id).where(Library.name == _LIBRARY_NAME))
+        assert isinstance(library_id, str)
+        connection.execute(
+            update(Library)
+            .where(Library.id == library_id)
+            .values(name=renamed_name, updated_at=2_000_000)
+        )
+
+    blocked_code, blocked_stdout, blocked_stderr = _run(_bootstrap_arguments())
+    assert blocked_code == 2
+    assert blocked_stdout == ""
+    expected_error = "Library name not found in a non-empty database;"
+    expected_error += " pass --create-new-library to create one."
+    assert blocked_stderr == expected_error + "\n"
+    assert first_token not in blocked_stderr
+    assert _LIBRARY_NAME not in blocked_stderr
+    assert renamed_name not in blocked_stderr
+    with engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(Library)) == 1
+        assert connection.scalar(select(func.count()).select_from(Caller)) == 1
+        assert connection.scalar(select(func.count()).select_from(Credential)) == 1
+        assert connection.scalar(select(func.count()).select_from(AuditEvent)) == 1
+        assert (
+            connection.scalar(select(Library.name).where(Library.id == library_id)) == renamed_name
+        )
+
+    created_code, created_stdout, created_stderr = _run(
+        [*_bootstrap_arguments(), "--create-new-library"]
+    )
+    assert created_code == 0
+    assert created_stderr == ""
+    assert _token(created_stdout) != first_token
+    with engine.connect() as connection:
+        assert set(connection.scalars(select(Library.name))) == {_LIBRARY_NAME, renamed_name}
+        assert (
+            connection.scalar(select(Library.name).where(Library.id == library_id)) == renamed_name
+        )
+        assert connection.scalar(select(func.count()).select_from(Caller)) == 2
+        assert connection.scalar(select(func.count()).select_from(AuditEvent)) == 2
 
 
 def test_local_recovery_retires_prior_operator_token_without_replaying_it(

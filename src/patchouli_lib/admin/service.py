@@ -78,6 +78,7 @@ from patchouli_lib.library.schemas import (
     LibraryStructureSeed,
     SectionRecord,
     UpdateBookInput,
+    UpdateLibraryInput,
     UpdateSectionInput,
 )
 from patchouli_lib.library.service import LibrarySeedService, LibraryStructureService
@@ -235,6 +236,32 @@ class AdminActionService:
                     master_session=master_session,
                     target_type="section",
                     target_id=section_id,
+                )
+        return result
+
+    def update_library_as_master(
+        self,
+        library_id: str,
+        request: UpdateLibraryInput,
+        *,
+        master_session: MasterAdminSession,
+    ) -> LibraryRecord:
+        fingerprint = master_session.audit_fingerprint()
+        with immediate_transaction(self._engine) as connection:
+            self._require_current_admin_session(connection, master_session, fingerprint)
+            result, changed = LibraryStructureService(
+                LibraryRepository(connection), clock=self._clock
+            ).update_library(library_id, request)
+            if changed:
+                self._record_structure_event(
+                    connection,
+                    fingerprint,
+                    "library.update",
+                    library_id,
+                    result.updated_at,
+                    master_session=master_session,
+                    target_type="library",
+                    target_id=library_id,
                 )
         return result
 

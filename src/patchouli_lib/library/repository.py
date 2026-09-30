@@ -32,6 +32,18 @@ class LibraryRepository:
         self._connection.execute(insert(Library), values)
         return LibraryRecord.model_validate(values)
 
+    def update_library_metadata(self, library: LibraryRecord, *, expected_updated_at: int) -> bool:
+        result = self._connection.execute(
+            update(Library)
+            .where(Library.id == library.id, Library.updated_at == expected_updated_at)
+            .values(
+                name=library.name,
+                description=library.description,
+                updated_at=library.updated_at,
+            )
+        )
+        return result.rowcount == 1
+
     def get_section(self, library_id: str, section_id: str) -> SectionRecord | None:
         statement = select(Section.__table__).where(
             Section.library_id == library_id,

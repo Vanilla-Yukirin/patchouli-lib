@@ -17,6 +17,7 @@ from patchouli_lib.library.schemas import (
     SectionRecord,
     SeededLibraryStructure,
     UpdateBookInput,
+    UpdateLibraryInput,
     UpdateSectionInput,
 )
 
@@ -212,6 +213,32 @@ class LibraryStructureService:
                 updated_at=now,
             )
         )
+
+    def update_library(
+        self, library_id: str, request: UpdateLibraryInput
+    ) -> tuple[LibraryRecord, bool]:
+        current = self._repository.get_library(library_id)
+        if current is None:
+            raise LibraryStructureNotFoundError("Library was not found.")
+        if current.updated_at != request.expected_updated_at:
+            raise LibraryStructureVersionConflictError("Library changed since the form was opened.")
+        if current.name == request.name and current.description == request.description:
+            return current, False
+        same_name = self._repository.find_library_by_name(request.name)
+        if same_name is not None and same_name.id != library_id:
+            raise LibrarySeedConflictError("Library name already exists.")
+        updated = current.model_copy(
+            update={
+                "name": request.name,
+                "description": request.description,
+                "updated_at": max(self._clock(), current.updated_at + 1),
+            }
+        )
+        if not self._repository.update_library_metadata(
+            updated, expected_updated_at=request.expected_updated_at
+        ):
+            raise LibraryStructureVersionConflictError("Library changed since the form was opened.")
+        return updated, True
 
     def create_book(self, library_id: str, section_id: str, request: CreateBookInput) -> BookRecord:
         if self._repository.get_section(library_id, section_id) is None:

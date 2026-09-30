@@ -311,6 +311,11 @@ _ZH_CN: dict[str, str] = {
     "Library initialized": "知识库已初始化",
     "Library name": "知识库名称",
     "Library description": "知识库简介",
+    "Edit Library": "编辑知识库",
+    "Save Library": "保存知识库",
+    "The Library changed since this form was opened. Reload and try again.": (
+        "知识库已发生变化，请刷新后重试。"
+    ),
     "Optional. Briefly describe this knowledge space.": "选填。简要说明这个知识库的用途。",
     "Libraries": "知识库",
     "Home": "主页",
@@ -1512,6 +1517,7 @@ def library_page(
     view: LibraryView,
     *,
     locale: AdminLocale = "en",
+    master_mode: bool = False,
     message: str | None = None,
 ) -> str:
     base = f"/admin/libraries/{escape(view.library.id, quote=True)}"
@@ -1542,6 +1548,22 @@ def library_page(
         f'<button type="submit">{localize(locale, "Create Section")}</button>'
         "</form></section>"
     )
+    if master_mode:
+        body += (
+            f'<section class="card"><h2>{localize(locale, "Edit Library")}</h2>'
+            f'<form method="post" action="{base}" autocomplete="off">'
+            f"{_csrf(escape(csrf_token, quote=True))}"
+            f'<input type="hidden" name="expected_updated_at" '
+            f'value="{view.library.updated_at}">'
+            f'<label for="library-name">{localize(locale, "Library name")}</label>'
+            f'<input id="library-name" name="name" type="text" maxlength="200" '
+            f'value="{escape(view.library.name, quote=True)}" required>'
+            f'<label for="library-description">{localize(locale, "Library description")}</label>'
+            f'<textarea id="library-description" name="description" maxlength="4000" rows="3">'
+            f"{escape(view.library.description)}</textarea>"
+            f'<button type="submit">{localize(locale, "Save Library")}</button>'
+            "</form></section>"
+        )
     if message is not None:
         body = _notice(localize(locale, message), error=True) + body
     return _browser_document(

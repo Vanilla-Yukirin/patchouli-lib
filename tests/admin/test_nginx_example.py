@@ -12,7 +12,8 @@ def test_nginx_example_preserves_admin_security_and_archive_size_boundaries() ->
     assert "limit_req_zone $binary_remote_addr" in example
     assert "location = /admin/login" in example
     assert "limit_req zone=patchouli_admin_login" in example
-    assert example.count("client_max_body_size 16k") == 3
+    assert example.count("client_max_body_size 16k") == 2
+    assert "location ^~ /admin/ {\n        client_max_body_size 64k;" in example
     assert "client_max_body_size 2304k" in example
     assert "proxy_set_header Host $http_host" in example
     assert "proxy_set_header X-Forwarded-Proto https" in example

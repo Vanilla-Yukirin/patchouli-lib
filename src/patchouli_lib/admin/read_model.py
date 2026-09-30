@@ -42,6 +42,7 @@ class LibraryItem:
     description: str
     created_at: int
     page_count: int
+    updated_at: int
 
 
 @dataclass(frozen=True)
@@ -1038,13 +1039,16 @@ def _library_summary_query() -> Select[Any]:
             Library.name,
             Library.description,
             Library.created_at,
+            Library.updated_at,
             func.count(Page.page_uid).label("page_count"),
         )
         .outerjoin(
             Page,
             and_(Page.library_id == Library.id, Page.deleted_at.is_(None)),
         )
-        .group_by(Library.id, Library.name, Library.description, Library.created_at)
+        .group_by(
+            Library.id, Library.name, Library.description, Library.created_at, Library.updated_at
+        )
         .order_by(Library.name, Library.id)
     )
 
@@ -1184,7 +1188,12 @@ def _get_book(
 
 def _library_item(row: RowMapping) -> LibraryItem:
     return LibraryItem(
-        row["id"], row["name"], row["description"], row["created_at"], row["page_count"]
+        row["id"],
+        row["name"],
+        row["description"],
+        row["created_at"],
+        row["page_count"],
+        row["updated_at"],
     )
 
 

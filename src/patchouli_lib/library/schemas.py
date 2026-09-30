@@ -65,6 +65,12 @@ class CreateLibraryInput(LibrarySchema):
     description: BoundedText = ""
 
 
+class UpdateLibraryInput(LibrarySchema):
+    name: ResourceName
+    description: BoundedText
+    expected_updated_at: TimestampMicros
+
+
 class CreateSectionInput(LibrarySchema):
     name: ResourceName
     description: BoundedText = ""

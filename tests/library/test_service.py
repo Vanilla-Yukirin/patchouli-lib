@@ -15,6 +15,7 @@ from patchouli_lib.library.schemas import (
     CreateSectionInput,
     LibraryStructureSeed,
     UpdateBookInput,
+    UpdateLibraryInput,
     UpdateSectionInput,
 )
 from patchouli_lib.library.service import (
@@ -238,6 +239,66 @@ def test_book_metadata_edit_preserves_identity_and_has_monotonic_version(
             service.update_book(original.library_id, original.section_id, original.id, request)
         with pytest.raises(LibraryStructureNotFoundError):
             service.update_book(original.library_id, "f" * 32, original.id, request)
+
+
+def test_library_metadata_edit_preserves_identity_and_has_monotonic_version(
+    library_engine: Engine,
+) -> None:
+    with immediate_transaction(library_engine) as connection:
+        seeded = LibrarySeedService(
+            LibraryRepository(connection),
+            id_factory=_id_factory("1" * 32, "2" * 32, "3" * 32),
+            clock=lambda: 1_000_000,
+        ).seed(SYNTHETIC_SEED)
+        original = seeded.library
+        service = LibraryStructureService(LibraryRepository(connection), clock=lambda: 1)
+        request = UpdateLibraryInput(
+            name="Renamed", description="New description", expected_updated_at=original.updated_at
+        )
+        updated, changed = service.update_library(original.id, request)
+        assert changed
+        assert updated.id == original.id
+        assert updated.created_at == original.created_at
+        assert updated.updated_at == original.updated_at + 1
+        assert LibraryRepository(connection).get_library(original.id) == updated
+        assert (
+            LibraryRepository(connection).get_section(original.id, seeded.section.id)
+            == seeded.section
+        )
+        assert (
+            LibraryRepository(connection).get_book(original.id, seeded.section.id, seeded.book.id)
+            == seeded.book
+        )
+        no_change, changed = service.update_library(
+            original.id,
+            UpdateLibraryInput(
+                name=updated.name,
+                description=updated.description,
+                expected_updated_at=updated.updated_at,
+            ),
+        )
+        assert not changed and no_change == updated
+        with pytest.raises(LibraryStructureVersionConflictError):
+            service.update_library(original.id, request)
+        with pytest.raises(LibraryStructureNotFoundError):
+            service.update_library("f" * 32, request)
+
+
+def test_library_edit_name_is_globally_unique(library_engine: Engine) -> None:
+    with immediate_transaction(library_engine) as connection:
+        service = LibraryStructureService(LibraryRepository(connection), clock=lambda: 1_000_000)
+        original = service.create_library(CreateLibraryInput(name="Original"))
+        other = service.create_library(CreateLibraryInput(name="Other"))
+        with pytest.raises(LibrarySeedConflictError):
+            service.update_library(
+                original.id,
+                UpdateLibraryInput(
+                    name=other.name,
+                    description="",
+                    expected_updated_at=original.updated_at,
+                ),
+            )
+        assert LibraryRepository(connection).get_library(original.id) == original
 
 
 def test_section_metadata_edit_preserves_identity_and_has_monotonic_version(
