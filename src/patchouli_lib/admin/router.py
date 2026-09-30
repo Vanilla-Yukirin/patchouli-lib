@@ -11,13 +11,13 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from ipaddress import IPv6Address
 from typing import Final, cast
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, quote, urlsplit
 from uuid import uuid4
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from pydantic import SecretStr, ValidationError
-from sqlalchemy import Engine
+from sqlalchemy import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
 
@@ -39,6 +39,7 @@ from patchouli_lib.admin.contracts import (
     RevokeAgentCredentialInput,
     TagFormInput,
 )
+from patchouli_lib.admin.file_download import AdminFileDownloadService
 from patchouli_lib.admin.master_audit import MasterAuditRepository
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.pages import (
@@ -192,6 +193,7 @@ def create_admin_router(
     )
     service = action_service or AdminActionService(engine)
     read_model = AdminReadModel(engine)
+    file_download = AdminFileDownloadService(engine)
     skill_bundle = SkillBundle()
     retrieval_available = settings.retrieval_cursor_signing_secret is not None
     router = APIRouter(prefix="/admin", include_in_schema=False)
@@ -199,18 +201,21 @@ def create_admin_router(
     def secure_cookie(request: Request) -> bool:
         return request.scope["scheme"] == "https" or not settings.admin_allow_private_http
 
-    def current_session(request: Request) -> AdminSession | None:
+    def session_for_connection(request: Request, connection: Connection) -> AdminSession | None:
         encoded = request.cookies.get(_SESSION_COOKIE, "")
-        with engine.connect() as connection:
-            repository = MasterTokenRepository(connection)
-            if repository.has_identity():
-                master = codec.verify_master(encoded)
-                if master is not None and repository.is_session_generation_current(
-                    master.identity_id, master.session_generation
-                ):
-                    return master
-                return None
+        repository = MasterTokenRepository(connection)
+        if repository.has_identity():
+            master = codec.verify_master(encoded)
+            if master is not None and repository.is_session_generation_current(
+                master.identity_id, master.session_generation
+            ):
+                return master
+            return None
         return codec.verify(encoded) if password_hash is not None else None
+
+    def current_session(request: Request) -> AdminSession | None:
+        with engine.connect() as connection:
+            return session_for_connection(request, connection)
 
     def authenticate_master(candidate: str) -> tuple[bool, tuple[str, int] | None]:
         with engine.connect() as connection:
@@ -2138,6 +2143,80 @@ def create_admin_router(
             )
 
         return protected_page(request, render)
+
+    @router.get(
+        "/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages/{page_id}"
+        "/revisions/{revision_number}/files/{filename:path}"
+    )
+    async def download_page_file(
+        request: Request,
+        library_id: str,
+        section_id: str,
+        book_id: str,
+        page_id: str,
+        revision_number: str,
+        filename: str,
+    ) -> Response:
+        locale = locale_for(request)
+        session: AdminSession | None = None
+
+        def authorize(connection: Connection) -> bool:
+            nonlocal session
+            session = session_for_connection(request, connection)
+            return session is not None
+
+        # Invalid revision text still goes through session admission before a
+        # not-found result. Never coerce aliases such as '+1' or '01'.
+        number = (
+            int(revision_number)
+            if 1 <= len(revision_number) <= 19
+            and revision_number.isascii()
+            and revision_number.isdecimal()
+            and revision_number[0] != "0"
+            else 0
+        )
+        try:
+            file = await run_in_threadpool(
+                file_download.get_file,
+                library_id,
+                section_id,
+                book_id,
+                page_id,
+                number,
+                filename,
+                authorize=authorize,
+            )
+        except AuthenticationError:
+            response = redirect("/admin/login")
+            _clear_cookie(response, secure=secure_cookie(request))
+            remember_requested_locale(response, request)
+            return response
+        except Exception:
+            message = (
+                "无法下载此文件。" if locale == "zh-CN" else "The file could not be downloaded."
+            )
+            return PlainTextResponse(
+                message, status_code=500, headers={**_SECURITY_HEADERS, "Content-Language": locale}
+            )
+        if file is None:
+            assert session is not None
+            return html(
+                browser_not_found_page(session.csrf_token, locale=locale),
+                locale=locale,
+                status_code=404,
+            )
+        return Response(
+            content=file.content,
+            media_type="application/octet-stream",
+            headers={
+                **_SECURITY_HEADERS,
+                "Content-Language": locale,
+                "Content-Disposition": (
+                    "attachment; filename=\"download\"; filename*=UTF-8''"
+                    + quote(file.filename, safe="")
+                ),
+            },
+        )
 
     @router.post("/login")
     async def login_submit(request: Request) -> Response:

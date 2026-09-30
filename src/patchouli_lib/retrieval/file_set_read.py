@@ -64,7 +64,7 @@ class FileSetReadPersistenceError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True, repr=False)
-class _VerifiedSnapshot:
+class VerifiedRevisionSnapshot:
     page_id: str
     revision_id: str
     revision_number: int
@@ -77,6 +77,91 @@ class FileSetCurrentRead:
 
     manifest: FileSetRevisionManifestView
     etag: StrongPageETag
+
+
+def read_verified_revision_snapshot(
+    connection: Connection, page: PageRecord, revision_id: str
+) -> VerifiedRevisionSnapshot:
+    """Verify one complete stored Revision without making an authorization decision.
+
+    Callers must establish the Page's visibility first and keep that decision and
+    this read in the same database snapshot.
+    """
+
+    library_id = page.library_id
+    revision = connection.execute(
+        select(
+            Revision.revision_id,
+            Revision.revision_number,
+            Revision.content_md,
+            Revision.content_size_bytes,
+            Revision.content_sha256,
+            RevisionFileSet.storage_format,
+            RevisionFileSet.file_count,
+            RevisionFileSet.total_size_bytes,
+            RevisionFileSet.snapshot_sha256,
+        )
+        .outerjoin(
+            RevisionFileSet,
+            (RevisionFileSet.library_id == Revision.library_id)
+            & (RevisionFileSet.page_uid == Revision.page_uid)
+            & (RevisionFileSet.revision_id == Revision.revision_id)
+            & (RevisionFileSet.revision_number == Revision.revision_number),
+        )
+        .where(
+            Revision.library_id == library_id,
+            Revision.page_uid == page.page_uid,
+            Revision.revision_id == revision_id,
+        )
+    ).one_or_none()
+    if revision is None:
+        raise FileSetReadNotFoundError
+    revision_number = revision.revision_number
+    repository = RetrievalRepository(connection)
+    if not repository.has_revision_file_seal(
+        library_id, page.page_uid, revision_id, revision_number
+    ):
+        raise FileSetReadPersistenceError
+
+    try:
+        stored = repository.list_revision_files(
+            library_id, page.page_uid, revision_id, revision_number
+        )
+        manifest = build_file_manifest((entry.name, entry.content) for entry in stored)
+        if (
+            len(stored) != len(manifest.files)
+            or len(manifest.files) != revision.file_count
+            or manifest.total_size_bytes != revision.total_size_bytes
+            or any(
+                (entry.name, entry.content_size_bytes, entry.content_sha256)
+                != (original.name, original.size_bytes, original.content_sha256)
+                for entry, original in zip(manifest.files, stored, strict=True)
+            )
+        ):
+            raise ValueError("Stored file metadata does not match file bytes.")
+        if revision.storage_format == "legacy_markdown":
+            if (
+                len(manifest.files) != 1
+                or manifest.files[0].name != "content.md"
+                or manifest.files[0].content != revision.content_md
+                or manifest.files[0].content_size_bytes != revision.content_size_bytes
+                or manifest.files[0].content_sha256 != revision.content_sha256
+                or revision.snapshot_sha256 is not None
+            ):
+                raise ValueError("Legacy Markdown mirror does not match the file set.")
+        elif revision.storage_format == "file_set_v1":
+            if (
+                revision.content_md is not None
+                or revision.content_size_bytes is not None
+                or revision.content_sha256 is not None
+                or manifest.snapshot_sha256 != revision.snapshot_sha256
+            ):
+                raise ValueError("File snapshot digest or format is invalid.")
+        else:
+            raise ValueError("Stored file snapshot format is not supported.")
+    except (TypeError, ValueError, OverflowError, UnicodeError):
+        raise FileSetReadPersistenceError from None
+    return VerifiedRevisionSnapshot(page.page_id, revision_id, revision_number, manifest)
 
 
 class FileSetReadService:
@@ -236,7 +321,7 @@ class FileSetReadService:
         )
 
     @staticmethod
-    def _manifest_view(snapshot: _VerifiedSnapshot) -> FileSetRevisionManifestView:
+    def _manifest_view(snapshot: VerifiedRevisionSnapshot) -> FileSetRevisionManifestView:
         return FileSetRevisionManifestView(
             page_id=snapshot.page_id,
             revision_id=snapshot.revision_id,
@@ -272,7 +357,7 @@ class FileSetReadService:
         section_id: str,
         page_id: str,
         revision_id: str,
-    ) -> _VerifiedSnapshot:
+    ) -> VerifiedRevisionSnapshot:
         page = self._visible_page(library_id, section_id, page_id)
         validate_revision_id(revision_id)
         return self._verified_snapshot(page, revision_id)
@@ -310,80 +395,8 @@ class FileSetReadService:
             raise FileSetReadNotFoundError
         return page
 
-    def _verified_snapshot(self, page: PageRecord, revision_id: str) -> _VerifiedSnapshot:
-        library_id = page.library_id
-        revision = self._connection.execute(
-            select(
-                Revision.revision_id,
-                Revision.revision_number,
-                Revision.content_md,
-                Revision.content_size_bytes,
-                Revision.content_sha256,
-                RevisionFileSet.storage_format,
-                RevisionFileSet.file_count,
-                RevisionFileSet.total_size_bytes,
-                RevisionFileSet.snapshot_sha256,
-            )
-            .outerjoin(
-                RevisionFileSet,
-                (RevisionFileSet.library_id == Revision.library_id)
-                & (RevisionFileSet.page_uid == Revision.page_uid)
-                & (RevisionFileSet.revision_id == Revision.revision_id)
-                & (RevisionFileSet.revision_number == Revision.revision_number),
-            )
-            .where(
-                Revision.library_id == library_id,
-                Revision.page_uid == page.page_uid,
-                Revision.revision_id == revision_id,
-            )
-        ).one_or_none()
-        if revision is None:
-            raise FileSetReadNotFoundError
-        revision_number = revision.revision_number
-        if not self._repository.has_revision_file_seal(
-            library_id, page.page_uid, revision_id, revision_number
-        ):
-            raise FileSetReadPersistenceError
-
-        try:
-            stored = self._repository.list_revision_files(
-                library_id, page.page_uid, revision_id, revision_number
-            )
-            manifest = build_file_manifest((entry.name, entry.content) for entry in stored)
-            if (
-                len(stored) != len(manifest.files)
-                or len(manifest.files) != revision.file_count
-                or manifest.total_size_bytes != revision.total_size_bytes
-                or any(
-                    (entry.name, entry.content_size_bytes, entry.content_sha256)
-                    != (original.name, original.size_bytes, original.content_sha256)
-                    for entry, original in zip(manifest.files, stored, strict=True)
-                )
-            ):
-                raise ValueError("Stored file metadata does not match file bytes.")
-            if revision.storage_format == "legacy_markdown":
-                if (
-                    len(manifest.files) != 1
-                    or manifest.files[0].name != "content.md"
-                    or manifest.files[0].content != revision.content_md
-                    or manifest.files[0].content_size_bytes != revision.content_size_bytes
-                    or manifest.files[0].content_sha256 != revision.content_sha256
-                    or revision.snapshot_sha256 is not None
-                ):
-                    raise ValueError("Legacy Markdown mirror does not match the file set.")
-            elif revision.storage_format == "file_set_v1":
-                if (
-                    revision.content_md is not None
-                    or revision.content_size_bytes is not None
-                    or revision.content_sha256 is not None
-                    or manifest.snapshot_sha256 != revision.snapshot_sha256
-                ):
-                    raise ValueError("File snapshot digest or format is invalid.")
-            else:
-                raise ValueError("Stored file snapshot format is not supported.")
-        except (TypeError, ValueError, OverflowError, UnicodeError):
-            raise FileSetReadPersistenceError from None
-        return _VerifiedSnapshot(page.page_id, revision_id, revision_number, manifest)
+    def _verified_snapshot(self, page: PageRecord, revision_id: str) -> VerifiedRevisionSnapshot:
+        return read_verified_revision_snapshot(self._connection, page, revision_id)
 
     def _require_current_agent(self) -> tuple[CallerRecord, int]:
         authenticated = self._authenticated
@@ -421,4 +434,6 @@ __all__ = [
     "FileSetReadNotFoundError",
     "FileSetReadPersistenceError",
     "FileSetReadService",
+    "VerifiedRevisionSnapshot",
+    "read_verified_revision_snapshot",
 ]

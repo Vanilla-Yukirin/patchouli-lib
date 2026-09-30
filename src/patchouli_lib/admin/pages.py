@@ -465,6 +465,7 @@ _ZH_CN: dict[str, str] = {
     "Occurred": "发生时间",
     "Current revision": "当前版本",
     "Files in this version": "此版本的文件",
+    "Download file": "下载文件",
     "Page type": "页面类型",
     "Current Markdown": "当前 Markdown 正文",
     "Markdown body": "Markdown 正文",
@@ -2295,7 +2296,10 @@ def page_preview_page(
         for item in view.revisions
     )
     files = "".join(
-        f"<li><code>{escape(item.name)}</code>"
+        f'<li><a href="{base}/revisions/{view.selected_revision_number}/files/'
+        f'{quote(item.name, safe="")}" download '
+        f'aria-label="{escape(localize(locale, "Download file") + ": " + item.name, quote=True)}">'
+        f"<code>{escape(item.name)}</code></a>"
         f'<p class="meta">{item.size_bytes} B · SHA-256: '
         f"<code>{item.sha256_hex}</code></p></li>"
         for item in view.files
