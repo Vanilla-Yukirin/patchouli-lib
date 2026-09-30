@@ -32,6 +32,7 @@ from patchouli_lib.api.errors import (
     problem_response,
 )
 from patchouli_lib.api.request_ids import REQUEST_ID_HEADER, RequestIDMiddleware
+from patchouli_lib.api.search_routes_v2 import SearchResponse
 from patchouli_lib.retrieval.schemas import PageMetadata
 
 _FIXTURE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "api" / "agent_v1_wire.json"
@@ -129,12 +130,12 @@ def test_collection_vectors_use_server_models_and_flat_pagination() -> None:
 
     search = as_object(responses["search"])
     search_body = as_object(search["body"])
-    parsed_search = PaginatedResponse[dict[str, object]].model_validate(search_body)
+    parsed_search = SearchResponse.model_validate(search_body)
     assert parsed_search.model_dump(mode="json") == search_body
 
     for response in (sections, pages, search):
         body = as_object(response["body"])
-        assert set(body) == {"items", "next_cursor"}
+        assert set(body) == ({"items"} if response is search else {"items", "next_cursor"})
         headers = as_headers(response["headers"])
         assert headers["Content-Type"] == "application/json"
         assert headers["Cache-Control"] == PROTECTED_CACHE_CONTROL

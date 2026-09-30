@@ -32,8 +32,6 @@ from patchouli_client.models import (
     PageDocument,
     PageMetadata,
     ProblemDetails,
-    SearchHit,
-    SearchRequest,
     Section,
     WhoAmI,
     require_canonical_api_path,
@@ -145,25 +143,6 @@ class PatchouliClient:
         result = self._page_success(response, PageMetadata.from_dict)
         if any(item.page.section_id != section_id for item in result.value.items):
             raise ProtocolError("Page response did not match the requested Section")
-        return result
-
-    def search(
-        self,
-        section_id: str,
-        request: SearchRequest,
-        *,
-        token: BearerToken,
-    ) -> ClientResponse[CursorPage[SearchHit]]:
-        response = self._transport.send(
-            "POST",
-            f"/api/v1/sections/{self._segment(section_id)}/search",
-            token=token,
-            operation=OperationKind.READ,
-            json_body=request.to_wire(),
-        )
-        result = self._page_success(response, SearchHit.from_dict)
-        if any(hit.page.section_id != section_id for hit in result.value.items):
-            raise ProtocolError("search response did not match the requested Section")
         return result
 
     def search_pages(

@@ -32,6 +32,10 @@ PatchouliLib 的所有重要变更都会记录在本文件中。
 
 ### 变更
 
+- 开发分支将旧 `POST /api/v1/sections/{section_id}/search` 及客户端旧搜索入口退役，
+  改由 `POST /api/v1/search` 按凭据可读范围查询当前 Page；这是不兼容变更。
+  搜索索引未就绪时明确返回 `search_unavailable`，不返回空结果。本项尚未发布或部署。
+  `limits.max_query_bytes` 暂为旧客户端兼容保留字段；新搜索应读取 `limits.search`。
 - 管理面板移除固定入口地址配置和 Host 白名单，同一服务可通过多个入口访问；
   保留密码、签名会话、当前请求同源校验和 CSRF 防护。旧 `PATCHOULI_ADMIN_ORIGIN`
   会被忽略，启用面板只需密码校验值与会话签名密钥。HTTP 开关不再验证预设 IP，

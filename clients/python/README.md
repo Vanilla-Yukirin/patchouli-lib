@@ -92,9 +92,11 @@ Markdown 正文字节（包括换行符）被终端文本层规范化。
 搜索输入现在是 JSON 对象，例如
 `{"keywords":["技术","报告"],"tags_any":[],"libraries":null,"limit":20}`。
 可选时间字段 `occurred_from_us`／`occurred_before_us` 使用 UTC Unix 微秒。
-旧 `section search --section ...` 命令及其游标／片段响应不兼容新接口；迁移时需
-改用跨知识库 `search`，返回当前 Page 的准确 Revision ID／序号和命中来源。
+旧 `section search --section ...` 命令及其游标／片段响应已退役；请改用跨知识库
+`search`，返回当前 Page 的准确 Revision ID／序号和命中来源。
 服务未完成索引重建时会返回 `search_unavailable`，不是空结果。
+能力响应中的 `limits.max_query_bytes` 是兼容旧客户端保留的字段，不能用于截断新搜索；
+新搜索的请求、关键词及数组上限以索引就绪后公布的 `limits.search` 为准。
 
 `--output json` 会向 stdout 写入稳定的成功封装。供人阅读的输出也只用 stdout 返回
 数据。所有诊断都使用 stderr；错误输出经过脱敏，绝不显示内容、元数据、bearer 令牌

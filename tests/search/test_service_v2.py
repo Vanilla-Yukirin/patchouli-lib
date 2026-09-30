@@ -1,4 +1,4 @@
-"""Synthetic SQLite checks for the provisional search-v2 read boundary."""
+"""Synthetic SQLite checks for the current-Page search read boundary."""
 
 from __future__ import annotations
 

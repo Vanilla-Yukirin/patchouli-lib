@@ -249,7 +249,6 @@ def test_application_registers_exact_agent_access_routes(tmp_path: Path) -> None
                 "/api/v1/sections/{section_id}/pages/{page_id}/occurrence",
                 "PATCH",
             ),
-            ("/api/v1/sections/{section_id}/search", "POST"),
             ("/api/v1/search", "POST"),
         }
     finally:
@@ -381,7 +380,7 @@ def test_application_does_not_register_retrieval_without_cursor_secret(tmp_path:
         assert set(paths["/api/v1/sections/{section_id}/pages/{page_id}"]) == {"delete"}
         assert "/api/v1/sections/{section_id}/trash" not in paths
         assert "/api/v1/sections/{section_id}/trash/{page_id}" in paths
-        assert "/api/v1/sections/{section_id}/search" in paths
+        assert "/api/v1/sections/{section_id}/search" not in paths
         section_id, _book_id, token = _seed_agent(application.state.engine)
         with TestClient(application, raise_server_exceptions=False) as client:
             capabilities = client.get(
@@ -397,10 +396,16 @@ def test_application_does_not_register_retrieval_without_cursor_secret(tmp_path:
                 ).status_code
                 == 404
             )
-            unavailable = client.post(
+            retired = client.post(
                 f"/api/v1/sections/{section_id}/search",
                 headers={"Authorization": f"Bearer {token}"},
                 json={"query": "synthetic query"},
+            )
+            assert retired.status_code == 404
+            unavailable = client.post(
+                "/api/v1/search",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"keywords": ["synthetic query"]},
             )
             assert unavailable.status_code == 503
             assert unavailable.headers["content-type"].startswith("application/problem+json")
@@ -442,10 +447,16 @@ def test_integrated_archive_create_replay_and_revise(
             "successful_replay_retention": "indefinite-alpha",
         }
 
-        unavailable = client.post(
+        retired = client.post(
             f"/api/v1/sections/{section_id}/search",
             headers={"Authorization": f"Bearer {token}"},
             json={"query": "synthetic query"},
+        )
+        assert retired.status_code == 404
+        unavailable = client.post(
+            "/api/v1/search",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"keywords": ["synthetic query"]},
         )
         assert unavailable.status_code == 503
         assert unavailable.headers["content-type"].startswith("application/problem+json")

@@ -79,7 +79,7 @@ async def _read_query(request: Request) -> bytes:
 
 
 def create_search_v2_router(engine: Engine, *, clock: Clock = utc_microseconds) -> APIRouter:
-    """Create the new endpoint independently of the legacy 503-only route."""
+    """Create the protected current-Page search endpoint."""
 
     router = APIRouter(prefix=API_V1_PREFIX)
     authenticate = BearerAuthentication(engine, clock=clock)

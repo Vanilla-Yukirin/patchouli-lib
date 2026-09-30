@@ -122,12 +122,13 @@ API 直接暴露到不可信网络。本次入口改动不修改已有代理或�
 5. 查看只读的管理员、Agent 和 MCP 使用说明。`/admin/agent` 链接到公开的
    `/connect` 接入页，可复制不含凭据的 AI 原生指令。设备 Token 必须由使用者在
    本机交互式输入；Agent 可在鉴权后获取 `/api/v1/agent/skill/manifest` 及清单中
-   的 Skill 文件，并核对 SHA-256。标准 HTTP 不依赖专用 CLI/MCP；目前搜索和
-   多文件上传尚未由这份指南宣称可用。
+   的 Skill 文件，并核对 SHA-256。标准 HTTP 不依赖专用 CLI/MCP；指南列出统一
+   文件集与当前 Page 搜索入口，搜索需要就绪的索引。
    `/admin/guide` 还展示经过审核的固定 API 目录及明确标为合成、非实时的 JSON
    响应；`/admin/agent` 只读展示打包 Skill 的版本、摘要清单和文件正文；`/admin/mcp`
    展示当前工具名及合成返回格式。页面不调用内容 API，也不把管理会话 Cookie 当作
-   Bearer 凭据。`section_search` 当前对应的 HTTP 搜索路由仍返回 503。
+   Bearer 凭据。旧 `section_search` 已退役；当前搜索入口为受 Bearer 保护的
+   `POST /api/v1/search`，索引未就绪时返回 `search_unavailable`。
 6. 登录后逐层浏览已有知识库、分区、书籍和未删除 Page，查看当前及历史 Revision 的
    Markdown 正文安全转义文本、准确文件名、字节数与 SHA-256；已软删 Page 在此不可
    访问。在层级浏览页可分别新建知识库、分区和书籍；已有名称冲突会提示，不会覆盖

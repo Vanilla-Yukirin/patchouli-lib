@@ -1,9 +1,9 @@
-"""Pure text projection for the offline search-v2 candidate.
+"""Pure text projection shared by the current-Page search index.
 
 This module neither reads a database nor decides which Page files are text.
 Callers must explicitly identify UTF-8 text files; opaque files contribute only
-their names. The rules are experimental while the public search proposal is
-Proposed and must not be interpreted as an enabled production search contract.
+their names. This module defines extraction rules, not authorization or
+production-deployment readiness.
 """
 
 from __future__ import annotations

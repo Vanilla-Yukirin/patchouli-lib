@@ -19,7 +19,6 @@ from patchouli_client import (
     PageMetadata,
     ProblemDetails,
     ProtocolError,
-    SearchRequest,
     SearchTagRef,
     Section,
     SourceInput,
@@ -43,7 +42,7 @@ def test_collection_json_vectors_match_top_level_server_shape() -> None:
     responses = response_object(fixture["responses"])
 
     assert pagination == {"default_limit": DEFAULT_PAGE_LIMIT, "max_limit": MAX_PAGE_LIMIT}
-    for name in ("sections", "pages", "search"):
+    for name in ("sections", "pages"):
         response = response_object(responses[name])
         assert response["status"] == 200
         body = response_object(response["body"])
@@ -65,6 +64,12 @@ def test_collection_json_vectors_match_top_level_server_shape() -> None:
     assert page_item.page.page_id == page_item.citation.page_id
     assert page_item.page.current_revision_id == page_item.citation.revision_id
     assert page_item.page.current_revision_number == page_item.citation.revision_number
+
+    search = response_object(responses["search"])
+    assert search["status"] == 200
+    search_body = response_object(search["body"])
+    assert set(search_body) == {"items"}
+    assert CurrentPageSearchResult.from_dict(search_body).items
 
 
 def test_public_fixture_freezes_mutation_and_problem_envelopes() -> None:
@@ -227,7 +232,7 @@ def test_request_models_are_strict_and_canonical() -> None:
     with pytest.raises(ValueError, match="source must be SourceInput"):
         ArchiveCreateMetadata(title="Synthetic session")
     with pytest.raises(TypeError):
-        SearchRequest(query="synthetic", future=True)  # type: ignore[call-arg]
+        CurrentPageSearchRequest(keywords=("synthetic",), future=True)  # type: ignore[call-arg]
     with pytest.raises(ValueError, match="UTC offset"):
         ArchiveCreateMetadata(
             title="Synthetic",
@@ -353,7 +358,7 @@ def test_sensitive_request_and_response_fields_are_omitted_from_repr() -> None:
         occurred_at=datetime(2026, 8, 11, 17, 15, tzinfo=UTC),
         source=SourceInput(kind="conversation", locator="private:synthetic-locator"),
     )
-    search = SearchRequest(query="private synthetic query")
+    search = CurrentPageSearchRequest(keywords=("private synthetic query",))
     document = PageDocument.from_dict(sample_page(content="private synthetic body"))
     problem = ProblemDetails.from_dict(
         {
@@ -629,14 +634,6 @@ def test_request_value_invariants_are_strict() -> None:
             occurred_at=datetime(2026, 8, 11, tzinfo=UTC),
             source=SourceInput(kind="conversation"),
         )
-    with pytest.raises(ValueError, match="query"):
-        SearchRequest(query="")
-    with pytest.raises(ValueError, match="limit"):
-        SearchRequest(query="synthetic", limit=101)
-    with pytest.raises(ValueError, match="integer"):
-        SearchRequest(query="synthetic", limit=True)
-    with pytest.raises(ValueError, match="cursor"):
-        SearchRequest(query="synthetic", cursor=3)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="bytes"):
         MarkdownContent("synthetic")  # type: ignore[arg-type]
 

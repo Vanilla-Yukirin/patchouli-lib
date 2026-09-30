@@ -222,13 +222,6 @@ _API_ENDPOINTS = (
     ),
     (
         "POST",
-        "/api/v1/sections/{section_id}/search",
-        "Search: unavailable (503)",
-        "搜索：不可用（503）",
-        "unavailable",
-    ),
-    (
-        "POST",
         "/api/v1/search",
         "Current-Page search (requires a rebuilt index)",
         "当前页面搜索（需先重建索引）",
@@ -240,7 +233,7 @@ _SEARCH_EXAMPLE: dict[str, object] = {
     "type": "about:blank",
     "title": "Service unavailable",
     "status": 503,
-    "detail": "Search is temporarily unavailable.",
+    "detail": "Search is temporarily unavailable while its index is rebuilt.",
     "code": "search_unavailable",
     "request_id": "req_00000000000000000000000000000000",
     "details": {},
@@ -253,6 +246,22 @@ _SEARCH_V2_REQUEST_EXAMPLE: dict[str, object] = {
     "occurred_from_us": None,
     "occurred_before_us": None,
     "limit": 20,
+}
+
+_SEARCH_V2_SUCCESS_EXAMPLE: dict[str, object] = {
+    "items": [
+        {
+            "library_id": "0" * 32,
+            "section_id": "1" * 32,
+            "book_id": "2" * 32,
+            "page_id": "example-page",
+            "revision_id": "rev_" + "3" * 32,
+            "revision_number": 1,
+            "title": "示例页面",
+            "occurred_at": 1_893_456_000_000_000,
+            "match_sources": [{"kind": "title", "file_name": None}],
+        }
+    ]
 }
 
 
@@ -325,7 +334,11 @@ _MCP_TOOLS = (
     ("whoami", "Read caller identity and grants", "读取调用方身份与授权"),
     ("sections_list", "List granted Sections", "列出已授权分区"),
     ("books_list", "List Books in a Section", "列出分区中的书籍"),
-    ("section_search", "Unavailable while HTTP search returns 503", "HTTP 搜索返回 503，暂不可用"),
+    (
+        "pages_search",
+        "Search current Pages when the index is ready",
+        "索引就绪后搜索当前页面",
+    ),
     ("page_current", "Read current Page", "读取当前页面"),
     ("page_revision", "Read an exact Revision", "读取指定版本"),
     ("archive_create", "Create one Markdown Archive", "创建单份 Markdown 归档"),
@@ -400,10 +413,13 @@ def api_guide(locale: GuideLocale, *, retrieval_available: bool) -> str:
             "This lists the registered v1 interfaces, not a request console. "
             "Content API and protected Skill downloads require a separate Bearer token; "
             "the admin login cookie does not authorize them. Confirm actual features with "
-            "capabilities. This page sends no content API requests.",
+            "capabilities. limits.max_query_bytes is a deprecated legacy field; current "
+            "search uses limits.search when the index is ready. This page sends no "
+            "content API requests.",
             "这里列出已注册的 v1 接口，不是请求控制台。内容 API 和受保护的 Skill "
             "下载需要独立的 Bearer Token；管理登录 Cookie 不能代替它。实际能力请以 "
-            "capabilities 为准。本页不会调用内容 API。",
+            "capabilities 为准。limits.max_query_bytes 是旧接口遗留字段；当前搜索在索引就绪时"
+            "使用 limits.search。本页不会调用内容 API。",
         )
         + "</p>"
         + (
@@ -428,7 +444,7 @@ def api_guide(locale: GuideLocale, *, retrieval_available: bool) -> str:
         )
         + _preview(
             "search-preview",
-            "POST /api/v1/sections/{section_id}/search · 503",
+            "POST /api/v1/search · 503 before index rebuild",
             _SEARCH_EXAMPLE,
             locale,
         )
@@ -436,6 +452,12 @@ def api_guide(locale: GuideLocale, *, retrieval_available: bool) -> str:
             "search-v2-preview",
             "POST /api/v1/search · JSON request",
             _SEARCH_V2_REQUEST_EXAMPLE,
+            locale,
+        )
+        + _preview(
+            "search-success-preview",
+            "POST /api/v1/search · 200 synthetic response",
+            _SEARCH_V2_SUCCESS_EXAMPLE,
             locale,
         )
         + _preview(
@@ -501,13 +523,12 @@ def mcp_guide(locale: GuideLocale) -> str:
             "do not accept a token, endpoint, local file path, or journal path as input. "
             "The whoami result reports the caller name, description, policy_mode and "
             "library_grants without a credential ID. "
-            "Older servers leave both fields unknown. The search tool is listed for "
-            "compatibility but currently returns an error.",
+            "Older servers leave both fields unknown. The pages_search tool requires "
+            "a ready search index; otherwise it reports search_unavailable.",
             "MCP 通过独立的本地 stdio 适配器提供，是可选接入方式。工具参数不接收 "
             "Token、服务地址、本地文件路径或日志路径。whoami 结果会报告调用方名称、"
             "说明、policy_mode 和 library_grants，但不包含凭据 ID；连接旧服务时后两个"
-            "字段为未知。"
-            "搜索工具保留兼容入口，但目前返回错误。",
+            "字段为未知。pages_search 需要搜索索引就绪；否则会报告 search_unavailable。",
         )
         + '</p><ul class="item-list interface-list">'
         + rows
@@ -516,7 +537,7 @@ def mcp_guide(locale: GuideLocale) -> str:
             "mcp-success-preview", "whoami · structuredContent", _MCP_SUCCESS_EXAMPLE, locale
         )
         + _preview(
-            "mcp-error-preview", "section_search · structuredContent", _MCP_ERROR_EXAMPLE, locale
+            "mcp-error-preview", "pages_search · structuredContent", _MCP_ERROR_EXAMPLE, locale
         )
     )
 

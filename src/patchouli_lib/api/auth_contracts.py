@@ -87,6 +87,8 @@ class ApiLimits(WireModel):
     max_content_bytes: Annotated[int, Field(ge=1)] = MAX_CONTENT_BYTES
     default_page_size: Annotated[int, Field(ge=1)] = DEFAULT_PAGE_LIMIT
     max_page_size: Annotated[int, Field(ge=1)] = MAX_PAGE_LIMIT
+    # Deprecated v1 field retained for older clients. The current search uses
+    # limits.search and is advertised only while its index is ready.
     max_query_bytes: Annotated[int, Field(ge=1)] = MAX_QUERY_BYTES
     file_set: FileSetLimits | None = None
     search: SearchLimits | None = None

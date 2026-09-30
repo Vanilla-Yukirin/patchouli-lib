@@ -1,8 +1,7 @@
-"""Bounded, pure candidate input contract for the proposed search-v2 query.
+"""Bounded input contract for the current-Page search endpoint.
 
-This module does not authorize Libraries, resolve Tags, query an index, or
-register a route. A future HTTP adapter must use ``parse_query_v2_json`` (or
-apply equivalent raw-body and duplicate-key checks) before using the query.
+This module does not authorize Libraries, resolve Tags, or query an index.
+The HTTP adapter uses ``parse_query_v2_json`` after bounded body reading.
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ _BeforeMicros = Annotated[
 
 
 class InvalidSearchQueryV2(ValueError):
-    """A deliberately non-echoing error for a future HTTP boundary."""
+    """A deliberately non-echoing error for the HTTP boundary."""
 
     def __init__(self) -> None:
         super().__init__("Invalid search-v2 query.")
@@ -59,7 +58,7 @@ class SearchQueryV2:
 
 
 class SearchQueryV2Wire(_StrictWireModel):
-    """Provisional JSON shape, not an accepted public API or FastAPI route."""
+    """Strict JSON request shape for current-Page search."""
 
     keywords: Annotated[list[str], Field(max_length=MAX_QUERY_KEYWORDS, repr=False)] = Field(
         default_factory=list, repr=False
@@ -69,7 +68,9 @@ class SearchQueryV2Wire(_StrictWireModel):
     )
     occurred_from_us: _FromMicros | None = None
     occurred_before_us: _BeforeMicros | None = None
-    libraries: Annotated[list[OpaqueId], Field(min_length=1, max_length=MAX_QUERY_LIBRARIES)] | None = None
+    libraries: (
+        Annotated[list[OpaqueId], Field(min_length=1, max_length=MAX_QUERY_LIBRARIES)] | None
+    ) = None
     limit: Annotated[int, Field(ge=1, le=MAX_PAGE_LIMIT)] = DEFAULT_PAGE_LIMIT
 
     @field_validator("keywords")

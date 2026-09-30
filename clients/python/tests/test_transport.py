@@ -56,10 +56,10 @@ def test_read_retries_accepted_transient_statuses(status: int) -> None:
     with _transport(handler) as transport:
         response = transport.send(
             "POST",
-            "/api/v1/sections/sec_synthetic/search",
+            "/api/v1/search",
             token=BearerToken("cred_synthetic_123"),
             operation=OperationKind.READ,
-            json_body={"query": "synthetic", "limit": 20},
+            json_body={"keywords": ["synthetic"], "limit": 20},
         )
 
     assert response.status_code == 200

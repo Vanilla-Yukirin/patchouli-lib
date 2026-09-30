@@ -62,33 +62,23 @@
         "Cache-Control": "private, no-store"
       },
       "request": {
-        "query": "synthetic query",
+        "keywords": ["synthetic"],
         "limit": 20
       },
       "body": {
         "items": [
           {
-            "page": {
-              "section_id": "sec_synthetic",
-              "book_id": "book_synthetic",
-              "page_id": "20260811t091500123z-synthetic-session",
-              "title": "Synthetic session",
-              "type": "archive",
-              "occurred_at": "2026-08-11T09:15:00.123456Z",
-              "current_revision_id": "rev_0123456789abcdef0123456789abcdef",
-              "current_revision_number": 1
-            },
-            "citation": {
-              "section_id": "sec_synthetic",
-              "page_id": "20260811t091500123z-synthetic-session",
-              "revision_id": "rev_0123456789abcdef0123456789abcdef",
-              "revision_number": 1,
-              "href": "/api/v1/sections/sec_synthetic/pages/20260811t091500123z-synthetic-session/revisions/1"
-            },
-            "snippet": "Synthetic snippet"
+            "library_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "section_id": "11111111111111111111111111111111",
+            "book_id": "22222222222222222222222222222222",
+            "page_id": "20260811t091500123z-synthetic-session",
+            "revision_id": "rev_0123456789abcdef0123456789abcdef",
+            "revision_number": 1,
+            "title": "Synthetic session",
+            "occurred_at": 1786439700123456,
+            "match_sources": [{"kind": "title", "file_name": null}]
           }
-        ],
-        "next_cursor": null
+        ]
       }
     }
   },
@@ -285,7 +275,7 @@
         "type": "about:blank",
         "title": "Service unavailable",
         "status": 503,
-        "detail": "Search is temporarily unavailable.",
+        "detail": "Search is temporarily unavailable while its index is rebuilt.",
         "code": "search_unavailable",
         "request_id": "req_cccccccccccccccccccccccccccccccc",
         "details": {}

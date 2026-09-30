@@ -195,7 +195,7 @@ class ApiLimits:
     max_content_bytes: int
     default_page_size: int
     max_page_size: int
-    max_query_bytes: int
+    max_query_bytes: int  # Deprecated legacy field; search_pages uses search limits.
     file_set: FileSetLimits | None = None
     search: SearchLimits | None = None
 
@@ -517,30 +517,6 @@ class PageDocument:
             revision=Revision.from_dict(_object(data.get("revision"), context="revision")),
             citation=Citation.from_dict(_object(data.get("citation"), context="citation")),
             occurrence_notice=notice,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class SearchHit:
-    page: Page
-    citation: Citation
-    snippet: str = field(repr=False)
-
-    def __post_init__(self) -> None:
-        if (
-            self.citation.page_id != self.page.page_id
-            or self.citation.section_id != self.page.section_id
-            or self.citation.revision_id != self.page.current_revision_id
-            or self.citation.revision_number != self.page.current_revision_number
-        ):
-            raise ProtocolError("search result citation did not identify the current Revision")
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, object]) -> SearchHit:
-        return cls(
-            page=Page.from_dict(_object(data.get("page"), context="page")),
-            citation=Citation.from_dict(_object(data.get("citation"), context="citation")),
-            snippet=_string(data, "snippet"),
         )
 
 
@@ -867,33 +843,6 @@ class FileSetRevisionResult:
         if not section_id:
             raise ProtocolError("file-set revision contained an empty Section identifier")
         return cls(_boolean(data, "changed"), section_id, manifest)
-
-
-@dataclass(frozen=True, slots=True)
-class SearchRequest:
-    query: str = field(repr=False)
-    limit: int = DEFAULT_PAGE_LIMIT
-    cursor: str | None = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.query, str) or not self.query:
-            raise ValueError("search query must not be empty")
-        if isinstance(self.limit, bool) or not isinstance(self.limit, int):
-            raise ValueError("search limit must be an integer")
-        if not 1 <= self.limit <= MAX_PAGE_LIMIT:
-            raise ValueError(f"search limit must be between 1 and {MAX_PAGE_LIMIT}")
-        if self.cursor is not None and (
-            not isinstance(self.cursor, str)
-            or not self.cursor
-            or len(self.cursor) > MAX_CURSOR_LENGTH
-        ):
-            raise ValueError("search cursor must be a non-empty bounded string or null")
-
-    def to_wire(self) -> dict[str, object]:
-        result: dict[str, object] = {"query": self.query, "limit": self.limit}
-        if self.cursor is not None:
-            result["cursor"] = self.cursor
-        return result
 
 
 @dataclass(frozen=True, slots=True)

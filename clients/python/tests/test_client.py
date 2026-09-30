@@ -19,7 +19,6 @@ from patchouli_client import (
     ProblemError,
     ProtocolError,
     RetryPolicy,
-    SearchRequest,
     SearchTagRef,
     SourceInput,
     WhoAmI,
@@ -179,44 +178,6 @@ def test_page_collection_rejects_non_object_item() -> None:
         pytest.raises(ProtocolError, match="response must be a JSON object"),
     ):
         client.list_pages("sec_synthetic", token=BearerToken("cred_synthetic_123"))
-
-
-def test_search_is_post_json_and_returns_exact_citation() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "POST"
-        assert request.url.path == "/api/v1/sections/sec_synthetic/search"
-        assert request.headers["Content-Type"].startswith("application/json")
-        assert json.loads(request.content) == {
-            "query": "synthetic query",
-            "limit": 10,
-            "cursor": "cursor_input",
-        }
-        return httpx.Response(
-            200,
-            headers=protected_headers(),
-            json={
-                "items": [
-                    {
-                        "page": sample_page(content=None)["page"],
-                        "citation": sample_page()["citation"],
-                        "snippet": "Synthetic snippet",
-                    }
-                ],
-                "next_cursor": None,
-            },
-        )
-
-    with PatchouliClient(
-        "https://patchouli.example.invalid", http_transport=httpx.MockTransport(handler)
-    ) as client:
-        result = client.search(
-            "sec_synthetic",
-            SearchRequest(query="synthetic query", limit=10, cursor="cursor_input"),
-            token=BearerToken("cred_synthetic_123"),
-        )
-
-    assert result.value.items[0].citation.revision_number == 1
-    assert result.value.items[0].citation.revision_id.startswith("rev_")
 
 
 def test_current_page_search_uses_cross_library_contract() -> None:
@@ -487,7 +448,7 @@ def test_current_and_exact_revision_fetch_keep_identifiers_opaque() -> None:
     assert exact.value.revision.revision_number == 1
 
 
-@pytest.mark.parametrize("operation", ["books", "pages", "search"])
+@pytest.mark.parametrize("operation", ["books", "pages"])
 def test_section_scoped_collections_validate_response_context(operation: str) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if operation == "books":
@@ -496,18 +457,6 @@ def test_section_scoped_collections_validate_response_context(operation: str) ->
                 "book_id": "book_synthetic",
                 "title": "Synthetic book",
             }
-        elif operation == "pages":
-            document = sample_page()
-            page = document["page"]
-            citation = document["citation"]
-            assert isinstance(page, dict)
-            assert isinstance(citation, dict)
-            page["section_id"] = "sec_other"
-            citation["section_id"] = "sec_other"
-            citation["href"] = (
-                "/api/v1/sections/sec_other/pages/20260811t091500123z-synthetic-session/revisions/1"
-            )
-            item = {"page": page, "citation": citation}
         else:
             document = sample_page()
             page = document["page"]
@@ -519,7 +468,7 @@ def test_section_scoped_collections_validate_response_context(operation: str) ->
             citation["href"] = (
                 "/api/v1/sections/sec_other/pages/20260811t091500123z-synthetic-session/revisions/1"
             )
-            item = {"page": page, "citation": citation, "snippet": "Synthetic snippet"}
+            item = {"page": page, "citation": citation}
         return httpx.Response(
             200,
             headers=protected_headers(),
@@ -534,14 +483,8 @@ def test_section_scoped_collections_validate_response_context(operation: str) ->
     ):
         if operation == "books":
             client.list_books("sec_synthetic", token=BearerToken("cred_synthetic_123"))
-        elif operation == "pages":
-            client.list_pages("sec_synthetic", token=BearerToken("cred_synthetic_123"))
         else:
-            client.search(
-                "sec_synthetic",
-                SearchRequest(query="synthetic"),
-                token=BearerToken("cred_synthetic_123"),
-            )
+            client.list_pages("sec_synthetic", token=BearerToken("cred_synthetic_123"))
 
 
 def test_current_page_validates_section_and_current_pointer() -> None:

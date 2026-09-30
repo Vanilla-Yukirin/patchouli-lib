@@ -1,7 +1,6 @@
-"""Provisional, transaction-consistent current-Page search reader.
+"""Transaction-consistent current-Page search reader for the v1 HTTP endpoint.
 
-This is an internal candidate service, not an enabled HTTP contract. In
-particular it does not implement cursors or expose scores or query literals.
+The current response has no cursor and does not expose scores or query literals.
 """
 
 from __future__ import annotations

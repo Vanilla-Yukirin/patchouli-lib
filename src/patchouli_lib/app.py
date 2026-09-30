@@ -18,7 +18,6 @@ from patchouli_lib.api.file_set_read_routes import create_file_set_read_router
 from patchouli_lib.api.file_set_write_routes import create_file_set_write_router
 from patchouli_lib.api.request_ids import RequestIDMiddleware
 from patchouli_lib.api.retrieval_routes import create_retrieval_router
-from patchouli_lib.api.search_routes import create_search_router
 from patchouli_lib.api.search_routes_v2 import create_search_v2_router
 from patchouli_lib.api.tag_routes import create_tag_router
 from patchouli_lib.config import Settings
@@ -95,7 +94,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(create_file_set_read_router(engine))
     application.include_router(create_file_set_write_router(engine))
     application.include_router(create_tag_router(engine))
-    application.include_router(create_search_router(engine))
     application.include_router(create_search_v2_router(engine))
     application.include_router(create_agent_skill_router(engine))
     if cursor_codec is not None:

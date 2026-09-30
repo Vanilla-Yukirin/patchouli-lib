@@ -16,10 +16,12 @@ from patchouli_lib.admin.passwords import hash_password
 from patchouli_lib.api.agent_skill_routes import SkillBundle
 from patchouli_lib.api.auth_contracts import CapabilitiesResponse
 from patchouli_lib.api.errors import ProblemDetails
+from patchouli_lib.api.search_routes_v2 import SearchResponse
 from patchouli_lib.app import create_app
 from patchouli_lib.auth.models import Caller
 from patchouli_lib.config import Settings
 from patchouli_lib.retrieval.file_set_read import FileSetRevisionManifestView
+from patchouli_lib.search.query_v2 import SearchQueryV2Wire
 from patchouli_lib.tags.schemas import TagCollection
 
 _ORIGIN = "https://admin.example.invalid"
@@ -109,7 +111,7 @@ def test_api_directory_and_synthetic_examples_match_reviewed_wire_shapes(
     assert "单份 Markdown 也用此接口" in response.text
     assert "/file-revisions" in response.text
     assert "/api/v1/libraries/{library_id}/tags/{tag_id}/pages" in response.text
-    assert "搜索：不可用（503）" in response.text
+    assert "当前页面搜索（需先重建索引）" in response.text
 
     capabilities = _preview(response.text, "capabilities-preview")
     parsed_capabilities = CapabilitiesResponse.model_validate(capabilities)
@@ -121,6 +123,12 @@ def test_api_directory_and_synthetic_examples_match_reviewed_wire_shapes(
     parsed_problem = ProblemDetails.model_validate(search_error)
     assert parsed_problem.status == 503
     assert parsed_problem.code == "search_unavailable"
+    request_example = SearchQueryV2Wire.model_validate(_preview(response.text, "search-v2-preview"))
+    assert request_example.keywords == ["示例", "example"]
+    success_example = SearchResponse.model_validate(
+        _preview(response.text, "search-success-preview")
+    )
+    assert success_example.items[0].match_sources[0].kind == "title"
 
     file_set = FileSetRevisionManifestView.model_validate(
         _preview(response.text, "file-set-preview")
@@ -150,7 +158,7 @@ def test_api_directory_matches_registered_v1_routes(retrieval_available: bool) -
     }
     directory = _directory_routes(api_guide("zh-CN", retrieval_available=retrieval_available))
     assert directory == registered
-    assert ("POST", "/api/v1/sections/{section_id}/search") in directory
+    assert ("POST", "/api/v1/sections/{section_id}/search") not in directory
     assert ("POST", "/api/v1/search") in directory
     if retrieval_available:
         assert ("GET", "/api/v1/sections") in directory
@@ -190,7 +198,7 @@ def test_mcp_inventory_and_synthetic_structured_content(
         "whoami",
         "sections_list",
         "books_list",
-        "section_search",
+        "pages_search",
         "page_current",
         "page_revision",
         "archive_create",

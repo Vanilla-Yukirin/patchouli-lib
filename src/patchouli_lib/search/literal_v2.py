@@ -3,7 +3,8 @@
 This module does not read a database or decide which files are indexable text.
 An index writer must add each complete, explicitly selected field separately;
 an FTS candidate is only a superset and must be checked with ``find_page_hits``.
-The proposed index and API are not enabled by this module.
+This module is used by the registered search endpoint but does not register
+or enable that endpoint on its own.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Candidate search-v2 query parsing; no route or index is enabled."""
+"""Strict request parsing for the registered current-Page search route."""
 
 from __future__ import annotations
 
