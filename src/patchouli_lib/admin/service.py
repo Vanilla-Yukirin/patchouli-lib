@@ -4,12 +4,14 @@ import hmac
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from time import time
+from typing import Literal
 from uuid import uuid4
 
 from sqlalchemy import Connection, Engine, delete, insert, select
 
 from patchouli_lib.admin.contracts import (
     BootstrapInput,
+    MasterDeletePageFormInput,
     MasterPageTagFormInput,
     MasterProvisionAgentInput,
     MasterRestoreArchiveFormInput,
@@ -1034,6 +1036,48 @@ class AdminActionService:
     ) -> None:
         """Restore a tombstoned Archive Page as the actual master identity."""
 
+        self._change_page_lifecycle_as_master(
+            library_id,
+            section_id,
+            page_id,
+            request.expected_etag,
+            action="restore",
+            master_session=master_session,
+        )
+
+    def delete_page_as_master(
+        self,
+        library_id: str,
+        section_id: str,
+        book_id: str,
+        page_id: str,
+        request: MasterDeletePageFormInput,
+        *,
+        master_session: MasterAdminSession,
+    ) -> None:
+        """Move a whole Page to Trash, preserving every Revision and file."""
+
+        self._change_page_lifecycle_as_master(
+            library_id,
+            section_id,
+            page_id,
+            request.expected_etag,
+            action="delete",
+            master_session=master_session,
+            book_id=book_id,
+        )
+
+    def _change_page_lifecycle_as_master(
+        self,
+        library_id: str,
+        section_id: str,
+        page_id: str,
+        expected_etag: str,
+        *,
+        action: Literal["delete", "restore"],
+        master_session: MasterAdminSession,
+        book_id: str | None = None,
+    ) -> None:
         with immediate_transaction(self._engine) as connection:
             self._require_current_admin_session(
                 connection, master_session, master_session.audit_fingerprint()
@@ -1044,6 +1088,7 @@ class AdminActionService:
                 page is None
                 or page.page_type != "archive"
                 or not hmac.compare_digest(page.section_id, section_id)
+                or (book_id is not None and page.book_id != book_id)
             ):
                 raise ArchiveNotFoundError
             current_etag = page_current_etag(
@@ -1053,9 +1098,9 @@ class AdminActionService:
                 page.occurred_at,
                 page.updated_at,
             )
-            if not hmac.compare_digest(request.expected_etag, current_etag):
+            if not hmac.compare_digest(expected_etag, current_etag):
                 raise ArchivePreconditionFailedError
-            if page.deleted_at is None:
+            if (action == "delete") != (page.deleted_at is None):
                 raise ArchiveLifecycleUnchangedError
             if page.updated_at >= (1 << 63) - 1:
                 raise ArchivePersistenceError
@@ -1069,7 +1114,7 @@ class AdminActionService:
                 identity_id=master_session.identity_id,
                 session_generation=master_session.session_generation,
                 session_fingerprint=master_session.audit_fingerprint(),
-                action="content.archive.restore",
+                action=f"content.archive.{action}",
                 target_type="page",
                 target_id=f"{library_id}:{page.page_uid.hex()}",
                 occurred_at=changed_at,
@@ -1077,7 +1122,7 @@ class AdminActionService:
             )
             content.transition_page_lifecycle(
                 page,
-                action="restore",
+                action=action,
                 actor_caller_id=None,
                 actor_home_library_id=None,
                 master_audit_event_id=event_id,

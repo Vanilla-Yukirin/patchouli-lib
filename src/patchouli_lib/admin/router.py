@@ -23,6 +23,7 @@ from starlette.concurrency import run_in_threadpool
 
 from patchouli_lib.admin.contracts import (
     BootstrapInput,
+    MasterDeletePageFormInput,
     MasterPageTagFormInput,
     MasterProvisionAgentInput,
     MasterRestoreArchiveFormInput,
@@ -58,6 +59,7 @@ from patchouli_lib.admin.pages import (
     library_scope_index_page,
     login_page,
     operations_page,
+    page_delete_error_page,
     page_preview_page,
     request_log_page,
     restore_error_page,
@@ -1904,6 +1906,71 @@ def create_admin_router(
             )
 
         return consume_tag_result(request, protected_page(request, render))
+
+    @router.post(
+        "/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages/{page_id}/delete"
+    )
+    async def delete_page(
+        request: Request, library_id: str, section_id: str, book_id: str, page_id: str
+    ) -> Response:
+        locale = locale_for(request)
+        if not _same_origin_submission(request):
+            return forbidden(request)
+        session = current_session(request)
+        if session is None:
+            return html(
+                login_page(locale=locale, message="Sign in again."), locale=locale, status_code=401
+            )
+        if not isinstance(session, MasterAdminSession):
+            return forbidden(request, "A master session is required.")
+        try:
+            values = await _read_form(
+                request,
+                allowed_fields=frozenset(MasterDeletePageFormInput.model_fields) | {"csrf_token"},
+            )
+            _require_csrf(values, session)
+            submitted = MasterDeletePageFormInput.model_validate(values)
+            await run_in_threadpool(
+                service.delete_page_as_master,
+                library_id,
+                section_id,
+                book_id,
+                page_id,
+                submitted,
+                master_session=session,
+            )
+        except _FormError as exc:
+            status, message = exc.status_code, exc.safe_message
+        except AuthenticationError:
+            status, message = 401, "Sign in again."
+        except ArchiveNotFoundError:
+            status, message = 404, "The requested local resource was not found."
+        except ArchivePreconditionFailedError:
+            status, message = (
+                412,
+                "The Page changed since this form was opened. Reload and try again.",
+            )
+        except ArchiveLifecycleUnchangedError:
+            status, message = 409, "The page has already been deleted."
+        except (ValidationError, ValueError):
+            status, message = 422, "Check the submitted fields and try again."
+        except Exception:
+            status, message = 500, "The action could not be completed."
+        else:
+            return redirect(f"/admin/libraries/{library_id}/sections/{section_id}/trash/{page_id}")
+        if status == 401:
+            response = html(
+                login_page(locale=locale, message=message), locale=locale, status_code=status
+            )
+            _clear_cookie(response, secure=secure_cookie(request))
+            return response
+        return html(
+            page_delete_error_page(
+                session.csrf_token, library_id, section_id, message, locale=locale
+            ),
+            locale=locale,
+            status_code=status,
+        )
 
     @router.post("/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages/{page_id}")
     async def update_page_title(

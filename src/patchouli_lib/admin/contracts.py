@@ -179,6 +179,12 @@ class MasterRestoreArchiveFormInput(AdminActionInput):
         return value
 
 
+class MasterDeletePageFormInput(MasterRestoreArchiveFormInput):
+    """Explicit confirmation and current ETag for a reversible Page deletion."""
+
+    confirm_delete: Literal["yes"]
+
+
 class RestoreArchiveFormInput(MasterRestoreArchiveFormInput):
     """Legacy one-request Operator credential and idempotent restore values."""
 
@@ -201,6 +207,7 @@ class RestoreArchiveFormInput(MasterRestoreArchiveFormInput):
 
 
 __all__ = [
+    "MasterDeletePageFormInput",
     "BootstrapInput",
     "ProvisionAgentInput",
     "RecoverOperatorInput",

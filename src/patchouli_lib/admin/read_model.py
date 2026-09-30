@@ -266,6 +266,7 @@ class PageView:
     older_revisions_before: int | None
     history_is_latest: bool
     tag_choices: tuple[PageTagChoice, ...]
+    current_etag: str
 
 
 @dataclass(frozen=True)
@@ -739,6 +740,7 @@ class AdminReadModel:
                 ).where(
                     MasterAuditEvent.action.in_(
                         (
+                            "content.archive.delete",
                             "content.archive.restore",
                             "content.page.title.edit",
                             "tag.create",
@@ -764,7 +766,11 @@ class AdminReadModel:
                 )
             for event in master_events:
                 parts = event["target_id"].split(":")
-                if event["action"] in ("content.archive.restore", "content.page.title.edit"):
+                if event["action"] in (
+                    "content.archive.delete",
+                    "content.archive.restore",
+                    "content.page.title.edit",
+                ):
                     if event["target_type"] != "page" or len(parts) != 2:
                         raise RuntimeError("Invalid content activity audit target.")
                     library_id, page_uid_hex = parts
@@ -1202,6 +1208,7 @@ class AdminReadModel:
                         Page.current_revision_number,
                         Page.updated_at,
                         Revision.content_md,
+                        Page.current_revision_id,
                         Revision.revision_id.label("selected_revision_id"),
                         Revision.revision_number.label("selected_revision_number"),
                         Revision.created_at.label("selected_revision_created_at"),
@@ -1347,6 +1354,13 @@ class AdminReadModel:
                 older_revisions_before,
                 history_before == current_revision_number + 1,
                 tag_choices,
+                page_current_etag(
+                    row["page_uid"],
+                    row["current_revision_id"],
+                    current_revision_number,
+                    row["occurred_at"],
+                    row["updated_at"],
+                ),
             )
 
 

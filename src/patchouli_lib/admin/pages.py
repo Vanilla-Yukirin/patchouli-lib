@@ -354,6 +354,14 @@ _ZH_CN: dict[str, str] = {
         "此处仅显示元数据，不提供已删除页面的正文。"
     ),
     "Restore page": "恢复页面",
+    "Move to trash": "移入回收站",
+    "Confirm moving this Page and all its versions to Trash.": (
+        "确认将整个页面及其全部版本移入回收站。"
+    ),
+    "Files and history are preserved. You can restore this Page from Trash.": (
+        "文件和历史版本都会保留，可以在回收站恢复。"
+    ),
+    "The page has already been deleted.": "此页面已经在回收站中。",
     "Restore this page and its complete revision history.": "恢复此页面及其完整历史版本。",
     _RESTORE_TOKEN_HELP: ("本次恢复需输入此知识库的管理员令牌；令牌不会保存在浏览器会话中。"),
     "The page changed since this form was opened. Reload the trash detail and try again.": (
@@ -2352,6 +2360,22 @@ def page_preview_page(
             "</form></section>"
         )
     tag_path = f"{library_path}/tags"
+    if current and master_mode:
+        delete_help = localize(
+            locale, "Files and history are preserved. You can restore this Page from Trash."
+        )
+        current_etag = escape(view.current_etag, quote=True)
+        body += (
+            f'<section class="card"><h2>{localize(locale, "Move to trash")}</h2>'
+            f'<p class="meta">{delete_help}</p>'
+            f'<form method="post" action="{base}/delete" autocomplete="off">'
+            f"{_csrf(escape(csrf_token, quote=True))}"
+            f'<input type="hidden" name="expected_etag" value="{current_etag}">'
+            '<label><input type="checkbox" name="confirm_delete" value="yes" required> '
+            f"{localize(locale, 'Confirm moving this Page and all its versions to Trash.')}</label>"
+            f'<button type="submit">{localize(locale, "Move to trash")}</button>'
+            "</form></section>"
+        )
     tag_choices = "".join(
         f'<option value="{escape(item.id, quote=True)}">{escape(item.name)}'
         + (" ✓" if item.attached else "")
@@ -2400,6 +2424,23 @@ def page_preview_page(
             (view.book.name, book_path),
         ),
     )
+
+
+def page_delete_error_page(
+    csrf_token: str,
+    library_id: str,
+    section_id: str,
+    message: str,
+    *,
+    locale: AdminLocale = "en",
+) -> str:
+    path = (
+        f"/admin/libraries/{escape(library_id, quote=True)}"
+        f"/sections/{escape(section_id, quote=True)}"
+    )
+    body = _notice(localize(locale, message), error=True)
+    body += f'<p><a href="{path}">{localize(locale, "Sections")}</a></p>'
+    return _browser_document(csrf_token, locale, localize(locale, "Move to trash"), path, body)
 
 
 def browser_not_found_page(csrf_token: str, *, locale: AdminLocale = "en") -> str:

@@ -278,8 +278,6 @@ class PageLifecycleEventRecord(ContentSchema):
             (self.actor_caller_id is None) != (self.actor_home_library_id is None)
         ):
             raise ValueError("Page lifecycle event needs exactly one actor kind.")
-        if master_actor and self.action != "restore":
-            raise ValueError("Master session cannot perform this Page lifecycle action.")
         canonical_utc_wire(self.changed_at)
         return self
 

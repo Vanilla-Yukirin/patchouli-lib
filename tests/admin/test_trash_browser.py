@@ -4,11 +4,13 @@ from collections.abc import Iterator
 from html import unescape
 from pathlib import Path
 from re import search
+from urllib.parse import urlencode
 
 import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
+from httpx2 import Response
 from sqlalchemy import Engine, func, insert, select, update
 
 from patchouli_lib.admin.master_audit import MasterAuditRepository
@@ -33,6 +35,7 @@ from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import LibraryStructureSeed
 from patchouli_lib.library.service import LibrarySeedService
 from patchouli_lib.operator.service import OperatorBootstrapService
+from patchouli_lib.search.index_v2 import rebuild_search_index
 
 _ORIGIN = "https://browser.example.invalid"
 _PASSWORD = "synthetic browser password"
@@ -228,6 +231,187 @@ def _master_restore_form(client: TestClient, detail: str) -> dict[str, str]:
 
 def _restore(client: TestClient, detail: str, values: dict[str, str]):  # type: ignore[no-untyped-def]
     return client.post(detail + "/restore", data=values, headers={"Origin": _ORIGIN})
+
+
+def _page_path(scope: tuple[str, str, str, str], page_id: str) -> str:
+    library, section, book, _ = scope
+    return f"/admin/libraries/{library}/sections/{section}/books/{book}/pages/{page_id}"
+
+
+def _delete_form(client: TestClient, path: str) -> dict[str, str]:
+    response = client.get(path)
+    assert response.status_code == 200
+    values = {"confirm_delete": "yes"}
+    for name in ("csrf_token", "expected_etag"):
+        match = search(rf'name="{name}" value="([^"]+)"', response.text)
+        assert match is not None
+        values[name] = unescape(match.group(1))
+    return values
+
+
+def _delete(client: TestClient, path: str, values: dict[str, str]) -> Response:
+    return client.post(path + "/delete", data=values, headers={"Origin": _ORIGIN})
+
+
+def test_master_delete_retains_history_and_can_be_restored(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    scope = _seed(engine, "1")
+    page_id = _page(engine, scope, 1, markdown=b"# searchable needle")
+    path = _page_path(scope, page_id)
+    _, _, detail = _paths(scope, page_id)
+    _login_master(client, engine)
+    assert "移入回收站" in client.get(path + "?lang=zh-CN").text
+    values = _delete_form(client, path)
+    rebuild_search_index(engine)
+    before = client.post(
+        "/admin/search",
+        data={
+            "csrf_token": values["csrf_token"],
+            "keywords": "needle",
+            "library_id": "",
+            "occurred_from": "",
+            "occurred_before": "",
+        },
+        headers={"Origin": _ORIGIN},
+    )
+    assert page_id in before.text
+    response = _delete(client, path, values)
+    assert response.status_code == 303
+    assert response.headers["location"] == detail
+    assert response.headers["cache-control"] == "no-store, max-age=0"
+    assert _delete(client, path, values).status_code == 412
+    assert client.get(path).status_code == 404
+    assert client.get(path + "/revisions/1").status_code == 404
+    assert client.get(detail).status_code == 200
+    after = client.post(
+        "/admin/search",
+        data={
+            "csrf_token": values["csrf_token"],
+            "keywords": "needle",
+            "library_id": "",
+            "occurred_from": "",
+            "occurred_before": "",
+        },
+        headers={"Origin": _ORIGIN},
+    )
+    assert after.status_code == 200 and page_id not in after.text
+    home = client.get("/admin").text
+    assert detail in home and "删除了页面" in home
+    with engine.connect() as connection:
+        page = ContentRepository(connection).get_page(scope[0], page_id)
+        assert page is not None and page.deleted_at is not None
+        assert page.current_revision_number == 1
+        event = connection.execute(select(PageLifecycleEvent.__table__)).mappings().one()
+        assert event["action"] == "delete"
+        assert event["actor_caller_id"] is None and event["actor_home_library_id"] is None
+        audit = connection.execute(select(MasterAuditEvent.__table__)).mappings().one()
+        assert event["master_audit_event_id"] == audit["id"]
+        assert audit["action"] == "content.archive.delete"
+        assert connection.scalar(select(func.count()).select_from(Revision)) == 1
+    assert _restore(client, detail, _master_restore_form(client, detail)).status_code == 303
+    assert client.get(path).status_code == 200
+    assert "# searchable needle" in client.get(path).text
+
+
+def test_master_delete_rejects_wrong_session_form_and_path(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    scope = _seed(engine, "1")
+    other = _seed(engine, "4")
+    page_id = _page(engine, scope, 1)
+    path = _page_path(scope, page_id)
+    assert _delete(client, path, {}).status_code == 401
+    _login(client)
+    assert '/delete"' not in client.get(path).text
+    assert _delete(client, path, {}).status_code == 403
+    _login_master(client, engine)
+    values = _delete_form(client, path)
+    assert (
+        client.post(
+            path + "/delete", data=values, headers={"Origin": "https://wrong.example.invalid"}
+        ).status_code
+        == 403
+    )
+    assert _delete(client, path, {**values, "csrf_token": "wrong"}).status_code == 403
+    assert _delete(client, path, {**values, "confirm_delete": "no"}).status_code == 422
+    assert _delete(client, path, {**values, "unexpected": "value"}).status_code == 422
+    duplicate = client.post(
+        path + "/delete",
+        content=urlencode(values) + "&confirm_delete=yes",
+        headers={"Origin": _ORIGIN, "Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert duplicate.status_code == 422
+    assert (
+        _delete(client, path, {**values, "expected_etag": '"page-v2-' + "0" * 64 + '"'}).status_code
+        == 412
+    )
+    for part, replacement in zip(scope[:3], other[:3], strict=True):
+        assert _delete(client, path.replace(part, replacement), values).status_code == 404
+    with engine.connect() as connection:
+        page = ContentRepository(connection).get_page(scope[0], page_id)
+        assert page is not None and page.deleted_at is None
+        assert connection.scalar(select(func.count()).select_from(PageLifecycleEvent)) == 0
+
+
+@pytest.mark.parametrize("failure", ["audit", "lifecycle", "index"])
+def test_master_delete_rolls_back_every_part_on_failure(
+    browser: tuple[TestClient, Engine], monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    import patchouli_lib.search.index_v2 as index
+
+    client, engine = browser
+    scope = _seed(engine, "1")
+    page_id = _page(engine, scope, 1)
+    path = _page_path(scope, page_id)
+    _login_master(client, engine)
+    values = _delete_form(client, path)
+
+    def reject(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("synthetic failure")
+
+    if failure == "audit":
+        monkeypatch.setattr(MasterAuditRepository, "add_success", reject)
+    elif failure == "lifecycle":
+        monkeypatch.setattr(ContentRepository, "transition_page_lifecycle", reject)
+    else:
+        monkeypatch.setattr(index, "flush_dirty_since", reject)
+    response = _delete(client, path, values)
+    assert response.status_code == 500 and "synthetic failure" not in response.text
+    with engine.connect() as connection:
+        page = ContentRepository(connection).get_page(scope[0], page_id)
+        assert page is not None and page.deleted_at is None
+        assert connection.scalar(select(func.count()).select_from(PageLifecycleEvent)) == 0
+        assert connection.scalar(select(func.count()).select_from(MasterAuditEvent)) == 0
+
+
+def test_master_delete_rechecks_generation_inside_write_transaction(
+    browser: tuple[TestClient, Engine], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, engine = browser
+    scope = _seed(engine, "1")
+    page_id = _page(engine, scope, 1)
+    path = _page_path(scope, page_id)
+    _login_master(client, engine)
+    values = _delete_form(client, path)
+    original = AdminActionService.delete_page_as_master
+
+    def delayed(self: AdminActionService, *args: object, **kwargs: object) -> None:
+        with immediate_transaction(engine) as connection:
+            MasterTokenRepository(connection).recover_from_local_cli(
+                "synthetic replacement token for delete race", now=2_000
+            )
+        original(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(AdminActionService, "delete_page_as_master", delayed)
+    assert _delete(client, path, values).status_code == 401
+    assert client.get("/admin").headers["location"] == "/admin/login"
+    with engine.connect() as connection:
+        page = ContentRepository(connection).get_page(scope[0], page_id)
+        assert page is not None and page.deleted_at is None
+        assert connection.scalar(select(func.count()).select_from(PageLifecycleEvent)) == 0
 
 
 def test_global_trash_index_requires_session_and_links_every_library(

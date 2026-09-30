@@ -12,6 +12,7 @@ from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, event, insert, update
 
+from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.passwords import hash_password
 from patchouli_lib.admin.read_model import AdminReadModel
 from patchouli_lib.app import create_app
@@ -45,6 +46,69 @@ from patchouli_lib.tags.models import Tag
 _ORIGIN = "https://admin.example.invalid"
 _PASSWORD = "synthetic browser password"
 _PASSWORD_HASH = hash_password(_PASSWORD, salt_factory=lambda size: b"b" * size, iterations=300_000)
+
+
+@pytest.mark.parametrize("mixed", [True, False])
+def test_master_delete_and_restore_preserve_flat_file_set_history(
+    guarded_browser: tuple[TestClient, Engine], mixed: bool
+) -> None:
+    client, engine = guarded_browser
+    library, section, book = _seed_structure(engine)
+    page_id = _insert_page(engine, library, section, book, sealed=True)
+    files: tuple[tuple[str, bytes], ...] = (("payload.bin", b"\x00\xff\x01"),)
+    if mixed:
+        files += (("content.md", b"# latest text"),)
+    _append_file_set_revision(engine, library, page_id, number=2, marker="3", files=files)
+    with immediate_transaction(engine) as connection:
+        MasterTokenRepository(connection).initialize_from_local_cli(
+            "synthetic master token for file set lifecycle", now=1_000
+        )
+    response = client.post(
+        "/admin/login",
+        data={"password": "synthetic master token for file set lifecycle"},
+        headers={"Origin": _ORIGIN},
+    )
+    assert response.status_code == 303
+    page_path = _paths(library, section, book, page_id)[-1]
+    historic_path = page_path + "/revisions/1"
+    assert 'name="confirm_delete"' not in client.get(historic_path).text
+    preview = client.get(page_path)
+    assert preview.status_code == 200 and "payload.bin" in preview.text
+    fields = {}
+    for name in ("csrf_token", "expected_etag"):
+        match = search(rf'name="{name}" value="([^"]+)"', preview.text)
+        assert match is not None
+        fields[name] = unescape(match.group(1))
+    tables = (Revision.__table__, RevisionFile.__table__, RevisionFileSet.__table__)
+    with engine.connect() as connection:
+        snapshots = [connection.execute(table.select()).all() for table in tables]
+    deleted = client.post(
+        page_path + "/delete",
+        data={**fields, "confirm_delete": "yes"},
+        headers={"Origin": _ORIGIN},
+    )
+    assert deleted.status_code == 303
+    trash_path = deleted.headers["location"]
+    assert client.get(page_path).status_code == 404
+    assert client.get(historic_path).status_code == 404
+    trash = client.get(trash_path)
+    assert trash.status_code == 200
+    restore_fields = {}
+    for name in ("csrf_token", "expected_etag"):
+        match = search(rf'name="{name}" value="([^"]+)"', trash.text)
+        assert match is not None
+        restore_fields[name] = unescape(match.group(1))
+    restored = client.post(
+        trash_path + "/restore", data=restore_fields, headers={"Origin": _ORIGIN}
+    )
+    assert restored.status_code == 303
+    assert "payload.bin" in client.get(page_path).text
+    assert "# Synthetic archive" in client.get(historic_path).text
+    with engine.connect() as connection:
+        for table, snapshot in zip(tables, snapshots, strict=True):
+            assert connection.execute(table.select()).all() == snapshot
+        page = ContentRepository(connection).get_page(library, page_id)
+        assert page is not None and page.deleted_at is None and page.current_revision_number == 2
 
 
 @pytest.fixture

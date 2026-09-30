@@ -9,6 +9,7 @@ from patchouli_lib.backup.manifest import (
     LEGACY_SCHEMA_REVISION,
     MANIFEST_SCHEMA_VERSION,
     REQUEST_LOG_SCHEMA_REVISION,
+    SEARCH_INDEX_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
     BackupManifestV1,
     canonical_utc_timestamp,
@@ -47,9 +48,9 @@ def test_manifest_is_exact_canonical_utf8_json() -> None:
 
 @pytest.mark.parametrize(
     "schema_revision",
-    [REQUEST_LOG_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION],
+    [REQUEST_LOG_SCHEMA_REVISION, SEARCH_INDEX_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION],
 )
-def test_request_log_and_current_manifests_parse_with_exact_revision_compatibility(
+def test_recent_manifests_parse_with_exact_revision_compatibility(
     schema_revision: str,
 ) -> None:
     expected = BackupManifestV1(**(asdict(manifest()) | {"schema_revision": schema_revision}))
