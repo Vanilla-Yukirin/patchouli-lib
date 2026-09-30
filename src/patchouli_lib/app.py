@@ -1,5 +1,6 @@
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Annotated, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -21,6 +22,7 @@ from patchouli_lib.api.search_routes import create_search_router
 from patchouli_lib.api.tag_routes import create_tag_router
 from patchouli_lib.config import Settings
 from patchouli_lib.database import DatabaseNotReadyError, build_engine, check_database
+from patchouli_lib.request_log.middleware import RequestLogMiddleware, run_request_log_retention
 from patchouli_lib.retrieval.cursor import CursorCodec
 
 
@@ -54,9 +56,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         application.state.engine = engine
+        retention = asyncio.create_task(run_request_log_retention(engine))
         try:
             yield
         finally:
+            retention.cancel()
+            with suppress(asyncio.CancelledError):
+                await retention
             engine.dispose()
 
     application = FastAPI(
@@ -67,6 +73,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.engine = engine
     install_api_exception_handlers(application)
     application.add_middleware(RequestIDMiddleware)
+    application.add_middleware(RequestLogMiddleware, engine=engine)
     application.include_router(
         create_auth_router(
             engine,

@@ -25,6 +25,7 @@ from patchouli_lib.auth.tokens import (
     parse_token,
     verify_token,
 )
+from patchouli_lib.request_log.identity import note_authenticated_identity
 
 IdFactory = Callable[[], str]
 Clock = Callable[[], int]
@@ -155,10 +156,12 @@ class AuthenticationService:
         ):
             stored = self._repository.touch_credential_last_used(stored, used_at=now)
 
-        return AuthenticatedCaller(
+        authenticated = AuthenticatedCaller(
             caller=caller,
             credential=credential_metadata(stored),
         )
+        note_authenticated_identity(authenticated)
+        return authenticated
 
     def require_operator(self, token_value: str, *, library_id: str) -> AuthenticatedCaller:
         authenticated = self.authenticate(token_value)
