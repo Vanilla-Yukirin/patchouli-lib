@@ -241,6 +241,11 @@ Token 明文保存在 SQLite 的独立受限存储中**。普通凭据模型、�
 开发分支；结构创建、Agent 签发、逐库模式精确凭据轮换和撤销以外的管理写操作身份与审计及实际部署
 尚未完成。旧 Agent／operator Bearer
 Token 目前不随主身份变动失效。
+开发分支已补本机 `recover --confirm-local-reset`：主 Token 遗失后，拥有该数据库
+本机访问权限的操作者只输入并确认新 Token，不需旧值。恢复保留主身份和
+Agent／operator 凭据，更新主 Token 校验值并增加会话代次，使旧主 Token 与旧管理
+会话失效；无主身份时拒绝，不提供公开恢复接口。这不是恢复历史数据库备份，
+不会回退文档或其他凭据；网页首次设置仍待完成，尚未合并或部署。
 开发分支另有 v2 签名 Cookie 编解码、主 Token 登录和逐请求数据库身份／代次
 核验；新会话可浏览管理页面，也可创建 Library／Section／Book、签发 Agent、轮换
 逐库模式的精确凭据、撤销精确 Agent 凭据、创建 Tag、维护 Page 的 Tag 关联，以及

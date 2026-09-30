@@ -4,6 +4,11 @@
 > 读取审计已写入代码，但尚未合并或部署。主 Token 与旧密码模式的区别及仍待
 > 审查的问题以[规范说明](admin-web-console.md#开发分支现状)为准。
 
+主 Token 遗失时，开发分支可由拥有数据库本机访问权限的操作者执行
+`patchouli-master-token recover --confirm-local-reset`，输入并确认新 Token。
+该操作令旧主 Token 和管理会话失效，不改变 Agent／operator 凭据；不是网页找回。
+执行前须核对数据库路径与迁移状态，完整步骤见上述规范说明；尚未合并或部署。
+
 本文件作为既有简体中文链接的兼容入口保留。规范入口
 [网页管理面板](admin-web-console.md) 同样使用简体中文。
 

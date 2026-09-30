@@ -95,6 +95,62 @@ def test_failed_reinit_or_rotation_never_changes_existing_token(migrated_databas
         assert repository.authenticate(_SECOND) is None
 
 
+def test_confirmed_local_recovery_without_old_token_invalidates_old_sessions(
+    migrated_database: Engine,
+) -> None:
+    assert _invoke(["initialize", "--stdin"], f"{_FIRST}\n{_FIRST}\n") == (0, "", "")
+    with migrated_database.connect() as connection:
+        first = MasterTokenRepository(connection).authenticate(_FIRST)
+        assert first is not None
+
+    assert _invoke(["recover", "--confirm-local-reset", "--stdin"], f"{_SECOND}\n{_SECOND}\n") == (
+        0,
+        "",
+        "",
+    )
+
+    with migrated_database.connect() as connection:
+        repository = MasterTokenRepository(connection)
+        recovered = repository.authenticate(_SECOND)
+        assert recovered is not None
+        assert recovered.identity_id == first.identity_id
+        assert recovered.session_generation == first.session_generation + 1
+        assert repository.authenticate(_FIRST) is None
+        assert not repository.is_session_generation_current(
+            first.identity_id, first.session_generation
+        )
+
+
+@pytest.mark.parametrize("new_token", [_FIRST, "short", "x" * 1_025])
+def test_failed_recovery_keeps_existing_token_and_generation(
+    migrated_database: Engine, new_token: str
+) -> None:
+    assert _invoke(["initialize", "--stdin"], f"{_FIRST}\n{_FIRST}\n")[0] == 0
+    with migrated_database.connect() as connection:
+        first = MasterTokenRepository(connection).authenticate(_FIRST)
+
+    status, output, errors = _invoke(
+        ["recover", "--confirm-local-reset", "--stdin"], f"{new_token}\n{new_token}\n"
+    )
+
+    assert status != 0
+    assert output == ""
+    assert new_token not in errors
+    assert _FIRST not in errors
+    with migrated_database.connect() as connection:
+        assert MasterTokenRepository(connection).authenticate(_FIRST) == first
+
+
+def test_local_recovery_does_not_create_master_identity(migrated_database: Engine) -> None:
+    assert _invoke(["recover", "--confirm-local-reset", "--stdin"], f"{_SECOND}\n{_SECOND}\n") == (
+        1,
+        "",
+        "Master token operation failed. No token was printed.\n",
+    )
+    with migrated_database.connect() as connection:
+        assert not MasterTokenRepository(connection).has_identity()
+
+
 @pytest.mark.parametrize(
     ("arguments", "text"),
     [
@@ -104,6 +160,14 @@ def test_failed_reinit_or_rotation_never_changes_existing_token(migrated_databas
         (["initialize", "--stdin"], f"{_FIRST}\n{_FIRST}\nextra"),
         (["rotate", "--stdin"], f"{_FIRST}\n{_SECOND}\n"),
         (["initialize", "--stdin"], "x" * 1_026),
+        (["recover"], f"{_SECOND}\n{_SECOND}\n"),
+        (["recover", "--stdin"], f"{_SECOND}\n{_SECOND}\n"),
+        (["recover", "--confirm-local-reset", _SECOND], ""),
+        (["recover", "--confirm-local-reset", "--stdin", _SECOND], ""),
+        (["recover", "--confirm-local-reset", "--stdin"], f"{_SECOND}\n"),
+        (["recover", "--confirm-local-reset", "--stdin"], f"{_SECOND}\n{_FIRST}\n"),
+        (["recover", "--confirm-local-reset", "--stdin"], f"{_SECOND}\n{_SECOND}\nextra"),
+        (["initialize", "--confirm-local-reset", "--stdin"], f"{_SECOND}\n{_SECOND}\n"),
     ],
 )
 def test_bad_command_and_input_are_redacted(
@@ -120,13 +184,17 @@ def test_bad_command_and_input_are_redacted(
         assert not MasterTokenRepository(connection).has_identity()
 
 
+@pytest.mark.parametrize("command", ["initialize", "recover"])
 def test_unmigrated_database_fails_closed_without_creating_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
 ) -> None:
     database_url = f"sqlite:///{(tmp_path / 'unmigrated.db').as_posix()}"
     monkeypatch.setenv("PATCHOULI_DATABASE_URL", database_url)
     monkeypatch.setenv("PATCHOULI_ENVIRONMENT", "test")
-    status, output, errors = _invoke(["initialize", "--stdin"], f"{_FIRST}\n{_FIRST}\n")
+    arguments = [command, "--stdin"]
+    if command == "recover":
+        arguments.insert(1, "--confirm-local-reset")
+    status, output, errors = _invoke(arguments, f"{_FIRST}\n{_FIRST}\n")
     assert status == 1
     assert output == ""
     assert errors == "Master token operation failed. No token was printed.\n"
@@ -134,8 +202,9 @@ def test_unmigrated_database_fails_closed_without_creating_identity(
     assert not (tmp_path / "unmigrated.db").exists()
 
 
+@pytest.mark.parametrize("command", ["initialize", "recover"])
 def test_existing_unmigrated_database_is_not_modified(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
 ) -> None:
     database_url = f"sqlite:///{(tmp_path / 'old-schema.db').as_posix()}"
     engine = build_engine(database_url)
@@ -146,7 +215,10 @@ def test_existing_unmigrated_database_is_not_modified(
     monkeypatch.setenv("PATCHOULI_DATABASE_URL", database_url)
     monkeypatch.setenv("PATCHOULI_ENVIRONMENT", "test")
 
-    status, output, errors = _invoke(["initialize", "--stdin"], f"{_FIRST}\n{_FIRST}\n")
+    arguments = [command, "--stdin"]
+    if command == "recover":
+        arguments.insert(1, "--confirm-local-reset")
+    status, output, errors = _invoke(arguments, f"{_FIRST}\n{_FIRST}\n")
 
     assert status == 1
     assert output == ""
@@ -174,10 +246,13 @@ class _InteractiveInput(StringIO):
         raise AssertionError("Interactive input must not be read after getpass.")
 
 
+@pytest.mark.parametrize("command", ["initialize", "recover"])
 def test_interactive_mode_uses_hidden_input_and_does_not_echo(
-    migrated_database: Engine, monkeypatch: pytest.MonkeyPatch
+    migrated_database: Engine, monkeypatch: pytest.MonkeyPatch, command: str
 ) -> None:
-    presented = iter((_FIRST, _FIRST))
+    if command == "recover":
+        assert _invoke(["initialize", "--stdin"], f"{_FIRST}\n{_FIRST}\n")[0] == 0
+    presented = iter((_SECOND, _SECOND))
     prompts: list[str] = []
 
     def hidden_input(prompt: str, *, stream: StringIO) -> str:
@@ -189,9 +264,10 @@ def test_interactive_mode_uses_hidden_input_and_does_not_echo(
     monkeypatch.setattr(master_token_cli, "getpass", hidden_input)
     output = StringIO()
     errors = StringIO()
-    assert master_token_cli.main(["initialize"], stdout=output, stderr=errors) == 0
+    arguments = [command] if command == "initialize" else [command, "--confirm-local-reset"]
+    assert master_token_cli.main(arguments, stdout=output, stderr=errors) == 0
     assert prompts == ["New master token: ", "Confirm new master token: "]
     assert output.getvalue() == errors.getvalue() == ""
-    assert _FIRST not in output.getvalue()
+    assert _SECOND not in output.getvalue()
     with immediate_transaction(migrated_database) as connection:
-        assert MasterTokenRepository(connection).authenticate(_FIRST) is not None
+        assert MasterTokenRepository(connection).authenticate(_SECOND) is not None

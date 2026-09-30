@@ -1,8 +1,8 @@
 """Storage primitives for the single-person administration identity.
 
-An empty table never authorizes remote initialization. Only a local setup
-command may call ``initialize_from_local_cli`` after verifying its execution
-context. The HTTP login reads the verifier but cannot create this identity.
+An empty table never authorizes remote initialization. Only local commands
+may initialize or recover the identity after verifying their execution
+context. The HTTP login reads the verifier but cannot create or recover it.
 """
 
 from __future__ import annotations
@@ -132,6 +132,23 @@ class MasterTokenRepository:
         stored = self._current()
         if stored is None or not _matches(old_token, stored.verifier):
             return None
+        return self._replace_token(stored, new_token, now=now)
+
+    def recover_from_local_cli(self, new_token: str, *, now: int) -> MasterTokenState | None:
+        """Reset a lost token using local database access, not an HTTP session.
+
+        The caller MUST be a local-only CLI with explicit reset confirmation.
+        This never creates an identity or changes Agent/operator credentials.
+        """
+
+        stored = self._current()
+        if stored is None:
+            return None
+        return self._replace_token(stored, new_token, now=now)
+
+    def _replace_token(
+        self, stored: _StoredMasterToken, new_token: str, *, now: int
+    ) -> MasterTokenState | None:
         if not _valid_time(now) or now < stored.updated_at:
             raise ValueError("Invalid master identity timestamp.")
         if stored.state.session_generation >= _MAX_SQLITE_INTEGER:

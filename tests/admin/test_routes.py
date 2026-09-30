@@ -590,6 +590,7 @@ def test_master_structure_write_requires_origin_csrf_and_committed_audit(
         assert connection.execute(select(MasterAuditEvent.id)).all() == []
 
 
+@pytest.mark.parametrize("operation", ["rotate", "recover"])
 @pytest.mark.parametrize(
     ("path", "expected_status"),
     [
@@ -601,13 +602,16 @@ def test_master_structure_write_requires_origin_csrf_and_committed_audit(
     ],
 )
 def test_rotated_master_session_is_rejected_on_management_get(
-    admin_web: AdminWeb, path: str, expected_status: int
+    admin_web: AdminWeb, path: str, expected_status: int, operation: str
 ) -> None:
     _initialize_master(admin_web)
     encoded, _ = _login_master(admin_web)
     with immediate_transaction(admin_web.engine) as connection:
-        state = MasterTokenRepository(connection).rotate(
-            _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
+        repository = MasterTokenRepository(connection)
+        state = (
+            repository.rotate(_MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001)
+            if operation == "rotate"
+            else repository.recover_from_local_cli(_ROTATED_MASTER_TOKEN, now=1_001)
         )
         assert state is not None
         assert state.session_generation == 2
@@ -617,6 +621,7 @@ def test_rotated_master_session_is_rejected_on_management_get(
     assert _MASTER_TOKEN not in response.text
 
 
+@pytest.mark.parametrize("operation", ["rotate", "recover"])
 @pytest.mark.parametrize(
     "path",
     [
@@ -628,17 +633,18 @@ def test_rotated_master_session_is_rejected_on_management_get(
     ],
 )
 def test_rotated_master_session_is_rejected_on_management_post(
-    admin_web: AdminWeb, path: str
+    admin_web: AdminWeb, path: str, operation: str
 ) -> None:
     _initialize_master(admin_web)
     encoded, csrf = _login_master(admin_web)
     with immediate_transaction(admin_web.engine) as connection:
-        assert (
-            MasterTokenRepository(connection).rotate(
-                _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
-            )
-            is not None
+        repository = MasterTokenRepository(connection)
+        state = (
+            repository.rotate(_MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001)
+            if operation == "rotate"
+            else repository.recover_from_local_cli(_ROTATED_MASTER_TOKEN, now=1_001)
         )
+        assert state is not None
 
     response = admin_web.client.post(
         path,

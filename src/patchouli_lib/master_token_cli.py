@@ -1,4 +1,4 @@
-"""Local-only setup and rotation of the single administration token.
+"""Local-only setup, rotation and lost-token recovery for administration.
 
 The token is never accepted as an argument, printed, or included in an error.
 An empty database does not enable an HTTP registration path.
@@ -25,7 +25,10 @@ from patchouli_lib.database import (
 )
 
 _MAX_INPUT_CHARACTERS = 1_024
-_USAGE = "Usage: patchouli-master-token {initialize|rotate} [--stdin]"
+_USAGE = (
+    "Usage: patchouli-master-token {initialize|rotate} [--stdin]\n"
+    "       patchouli-master-token recover --confirm-local-reset [--stdin]"
+)
 _BAD_INPUT = "Invalid master token command or input."
 _FAILED = "Master token operation failed. No token was printed."
 
@@ -58,7 +61,7 @@ def _read_line(stream: TextIO) -> str:
 def _read_tokens(command: str, use_stdin: bool, stream: TextIO, errors: TextIO) -> tuple[str, ...]:
     prompts = (
         ("New master token: ", "Confirm new master token: ")
-        if command == "initialize"
+        if command in {"initialize", "recover"}
         else ("Current master token: ", "New master token: ", "Confirm new master token: ")
     )
     if use_stdin:
@@ -85,6 +88,11 @@ def _parse(arguments: Sequence[str]) -> tuple[str, bool] | None:
         and arguments[1] == "--stdin"
     ):
         return arguments[0], True
+    if arguments and arguments[0] == "recover":
+        if list(arguments[1:]) == ["--confirm-local-reset"]:
+            return "recover", False
+        if list(arguments[1:]) == ["--confirm-local-reset", "--stdin"]:
+            return "recover", True
     raise _InputError
 
 
@@ -100,7 +108,7 @@ def main(
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
-    """Initialize or rotate from this host, without ever delivering token text."""
+    """Initialize, rotate or recover locally, without delivering token text."""
 
     arguments = sys.argv[1:] if argv is None else argv
     input_stream = sys.stdin if stdin is None else stdin
@@ -134,7 +142,10 @@ def main(
             repository = MasterTokenRepository(connection)
             if command == "initialize":
                 repository.initialize_from_local_cli(tokens[0], now=utc_microseconds())
-            elif repository.rotate(tokens[0], tokens[1], now=utc_microseconds()) is None:
+            elif command == "rotate":
+                if repository.rotate(tokens[0], tokens[1], now=utc_microseconds()) is None:
+                    raise RuntimeError("Master token operation was not accepted.")
+            elif repository.recover_from_local_cli(tokens[0], now=utc_microseconds()) is None:
                 raise RuntimeError("Master token operation was not accepted.")
     except Exception:
         _write_error(error_stream, _FAILED)

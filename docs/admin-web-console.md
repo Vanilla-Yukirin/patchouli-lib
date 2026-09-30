@@ -205,10 +205,29 @@ SQLite，并已由受同源、CSRF、凭据状态与审计保护的主 Token 会
 Token。执行前核对命令读取的 `PATCHOULI_DATABASE_URL` 或当前目录的 `.env` 指向
 **与服务相同且已迁移到当前结构**的 SQLite 数据库，避免误初始化另一份数据库。
 `rotate` 还要求当前主 Token。命令不把 Token 作为参数或打印出来。
-目前没有无凭据找回主 Token 的命令，不能承诺忘记后可在网页恢复。
+
+开发分支提供以下本机命令；它们不是网页或公开 HTTP 接口：
+
+```text
+patchouli-master-token initialize
+patchouli-master-token rotate
+patchouli-master-token recover --confirm-local-reset
+```
+
+`initialize` 仅在主身份尚未设置时创建。`rotate` 要依次输入旧 Token、新 Token、
+再次确认新 Token。忘记旧 Token 时，拥有数据库本机访问权限的操作者可使用
+`recover --confirm-local-reset`，仅输入并确认新 Token。输入过程不显示字符；新 Token
+不能与当前值相同。恢复不创建缺失的主身份，也不改变其身份 ID 或 Agent／operator
+凭据，但会立即使旧主 Token 和已有管理会话失效，须用新值重新登录。
+
+自动化输入可在命令末尾明确加上 `--stdin`：首次设置或遗失恢复读取两行相同的新
+Token，轮换读取旧值、新值、再次确认新值三行，随后须结束标准输入。不要把这些值
+写成命令行参数、Shell 历史、受跟踪文件或日志。命令只改变正在连接的数据库，不会
+寻找其他副本；同样不能阻止日后恢复更早的数据库备份把主 Token 状态回退。
+上述遗失恢复已经加入开发分支，尚未合并或部署；网页不提供免鉴权恢复入口。
 
 主 Token 初始化后，网页登录只接受主 Token，旧密码和旧 v1 会话均被拒绝；
-轮换后旧主会话失效。这不会自动吊销旧 operator Bearer 凭据，也不表示旧 API
+轮换或本机恢复后旧主会话失效。这不会自动吊销旧 operator Bearer 凭据，也不表示旧 API
 都已删除。主会话已能签发、轮换、吊销新 Agent Token、编辑逐 Library 读写授权，
 以及执行部分内容管理、Tag 与回收站操作；不需要在这些主会话表单再填 operator
 Token。旧 `/admin/setup` 的初始化等操作仍属旧流程，主会话不能直接使用。
@@ -220,7 +239,7 @@ Token。旧 `/admin/setup` 的初始化等操作仍属旧流程，主会话不�
 尚未完成。这些功能均不能因为已经写入分支而称为已合并或已部署。
 
 旧管理面板的[决定记录](decisions/0003-admin-web-console.md)仍是历史设计决定，
-未被本页自动修订。主 Token 遗失恢复、旧网页登录与 operator 流程的退出安排、
+未被本页自动修订。主 Token 的网页首次设置、旧网页登录与 operator 流程的退出安排、
 敏感 Token 再次显示是否要求近期重新验证，以及含 Agent Token 明文的 SQLite、
 WAL 和备份如何保管，仍须产品／安全审查。恢复旧备份会恢复到备份时的凭据状态，
 包括当时尚未吊销的 Token；不能在未核对备份与恢复后果前对有数据的服务启用迁移。
