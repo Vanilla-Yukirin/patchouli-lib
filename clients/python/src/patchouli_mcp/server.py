@@ -505,7 +505,12 @@ def _tool_inventory() -> list[types.Tool]:
                 },
                 "libraries": {
                     "anyOf": [
-                        {"type": "array", "items": _string_schema(), "maxItems": 256},
+                        {
+                            "type": "array",
+                            "items": _string_schema(),
+                            "minItems": 1,
+                            "maxItems": 256,
+                        },
                         {"type": "null"},
                     ]
                 },

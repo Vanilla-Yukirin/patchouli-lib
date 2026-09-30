@@ -128,6 +128,28 @@ def test_response_models_ignore_unknown_fields() -> None:
     assert capabilities.idempotency.content_mutations is True
 
 
+def test_structured_search_limits_are_separate_from_legacy_query_limit() -> None:
+    limits = ApiLimits.from_dict(
+        {
+            "max_content_bytes": 2 * 1024 * 1024,
+            "default_page_size": 20,
+            "max_page_size": 100,
+            "max_query_bytes": 4096,
+            "search": {
+                "max_request_bytes": 96 * 1024,
+                "max_keywords_bytes": 32 * 1024,
+                "max_keywords": 256,
+                "max_tags": 256,
+                "max_libraries": 256,
+            },
+        }
+    )
+    assert limits.search is not None
+    assert limits.search.max_request_bytes == 96 * 1024
+    assert limits.search.max_keywords_bytes == 32 * 1024
+    assert limits.max_query_bytes == 4096
+
+
 def test_page_and_revision_identifiers_remain_opaque() -> None:
     document = PageDocument.from_dict(sample_page())
 

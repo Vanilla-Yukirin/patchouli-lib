@@ -76,6 +76,9 @@ Library 授权执行，但目标 Library／Section／Book ID 仍需由管理员�
 关键词、Tag、时间条件不能全部为空；不填条件时改用浏览列表。返回按 Page 排序
 的 `items`，每项携带 Library、Section、Book、Page、准确 Revision ID／序号、
 标题、声明时间与命中字段；首版只返回前 `limit` 项，不提供游标或片段摘要。
+能力响应的 `limits.search` 给出 JSON 正文字节、关键词合计字节及数组项数上限；
+旧字段 `max_query_bytes` 不代表结构化搜索的正文上限。显式 `libraries: []`
+是无效范围，不等同于 `null`。
 索引未就绪时返回 `search_unavailable`，不得当作无结果。搜索词只放请求正文，
 不要放 URL、普通诊断或日志中。
 

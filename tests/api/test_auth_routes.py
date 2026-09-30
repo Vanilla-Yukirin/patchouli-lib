@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -268,6 +268,7 @@ def _build_app(
     fixture: AuthApiFixture,
     *,
     configuration: CapabilityConfiguration = DEFAULT_CAPABILITY_CONFIGURATION,
+    search_ready: Callable[[], bool] | None = None,
 ) -> FastAPI:
     application = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     install_api_exception_handlers(application)
@@ -279,6 +280,7 @@ def _build_app(
         create_auth_router(
             fixture.engine,
             capability_configuration=configuration,
+            search_ready=search_ready,
             clock=fixture.clock,
         )
     )
@@ -378,6 +380,7 @@ def test_router_inventory_and_default_capabilities_match_client_schema(
             "max_page_size": 100,
             "max_query_bytes": 4096,
             "file_set": None,
+            "search": None,
         },
         "idempotency": {
             "content_mutations": False,
@@ -395,7 +398,7 @@ def test_integrator_capability_configuration_is_explicit_and_immutable(
     auth_api: AuthApiFixture,
 ) -> None:
     configuration = CapabilityConfiguration(
-        features=("archive", "search"),
+        features=("archive",),
         content_mutation_idempotency=True,
         successful_replay_retention="indefinite-alpha",
     )
@@ -406,14 +409,40 @@ def test_integrator_capability_configuration_is_explicit_and_immutable(
         )
 
     parsed = CapabilitiesResponse.model_validate(response.json())
-    assert parsed.features == ("archive", "search")
+    assert parsed.features == ("archive",)
     assert parsed.limits.file_set is None
+    assert parsed.limits.search is None
     assert parsed.idempotency.content_mutations is True
     assert parsed.idempotency.successful_replay_retention == "indefinite-alpha"
     with pytest.raises(ValidationError):
         configuration.__setattr__("features", ("search",))
     with pytest.raises(ValidationError):
         CapabilityConfiguration(features=("search", "archive"))
+    with pytest.raises(ValidationError, match="Search availability"):
+        CapabilityConfiguration(features=("search",))
+
+
+def test_search_capability_and_limits_follow_index_readiness(auth_api: AuthApiFixture) -> None:
+    ready = False
+    application = _build_app(auth_api, search_ready=lambda: ready)
+    with TestClient(application) as client:
+        before = client.get("/api/v1/capabilities", headers=_authorization(auth_api.agent_token))
+        ready = True
+        after = client.get("/api/v1/capabilities", headers=_authorization(auth_api.agent_token))
+        ready = False
+        again = client.get("/api/v1/capabilities", headers=_authorization(auth_api.agent_token))
+    assert "search" not in before.json()["features"]
+    assert before.json()["limits"]["search"] is None
+    assert "search" in after.json()["features"]
+    assert after.json()["limits"]["search"] == {
+        "max_request_bytes": 96 * 1024,
+        "max_keywords_bytes": 32 * 1024,
+        "max_keywords": 256,
+        "max_tags": 256,
+        "max_libraries": 256,
+    }
+    assert "search" not in again.json()["features"]
+    assert again.json()["limits"]["search"] is None
 
 
 def test_file_set_limits_are_advertised_only_with_explicit_feature(
@@ -438,6 +467,7 @@ def test_file_set_limits_are_advertised_only_with_explicit_feature(
             "max_page_bytes": 64 * 1024 * 1024,
             "max_files_per_page": 64,
         },
+        "search": None,
     }
 
 

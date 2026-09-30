@@ -166,12 +166,38 @@ class FileSetLimits:
 
 
 @dataclass(frozen=True, slots=True)
+class SearchLimits:
+    max_request_bytes: int
+    max_keywords_bytes: int
+    max_keywords: int
+    max_tags: int
+    max_libraries: int
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> SearchLimits:
+        values = tuple(
+            _integer(data, key)
+            for key in (
+                "max_request_bytes",
+                "max_keywords_bytes",
+                "max_keywords",
+                "max_tags",
+                "max_libraries",
+            )
+        )
+        if any(value < 1 for value in values):
+            raise ProtocolError("search limits must be positive")
+        return cls(*values)
+
+
+@dataclass(frozen=True, slots=True)
 class ApiLimits:
     max_content_bytes: int
     default_page_size: int
     max_page_size: int
     max_query_bytes: int
     file_set: FileSetLimits | None = None
+    search: SearchLimits | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> ApiLimits:
@@ -183,6 +209,11 @@ class ApiLimits:
             file_set=(
                 FileSetLimits.from_dict(_object(data["file_set"], context="file_set"))
                 if data.get("file_set") is not None
+                else None
+            ),
+            search=(
+                SearchLimits.from_dict(_object(data["search"], context="search"))
+                if data.get("search") is not None
                 else None
             ),
         )

@@ -17,6 +17,13 @@ from patchouli_lib.auth.library_policy import LibraryAction
 from patchouli_lib.auth.schemas import CallerKind, SectionAction
 from patchouli_lib.content.file_manifest import MAX_FILE_BYTES, MAX_FILES_PER_PAGE, MAX_PAGE_BYTES
 from patchouli_lib.library.schemas import BoundedText, ResourceName
+from patchouli_lib.search.literal_v2 import MAX_QUERY_BYTES as MAX_SEARCH_KEYWORD_BYTES
+from patchouli_lib.search.literal_v2 import MAX_QUERY_KEYWORDS
+from patchouli_lib.search.query_v2 import (
+    MAX_QUERY_BODY_BYTES,
+    MAX_QUERY_LIBRARIES,
+    MAX_QUERY_TAGS,
+)
 
 MAX_CONTENT_BYTES = 2 * 1024 * 1024
 MAX_QUERY_BYTES = 4_096
@@ -49,6 +56,8 @@ class CapabilityConfiguration(BaseModel):
     def require_sorted_unique_values(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if value != tuple(sorted(set(value))):
             raise ValueError("Capability values must be sorted and unique.")
+        if "search" in value:
+            raise ValueError("Search availability is derived from index readiness.")
         return value
 
 
@@ -63,6 +72,16 @@ class FileSetLimits(WireModel):
     max_files_per_page: Annotated[int, Field(ge=1)] = MAX_FILES_PER_PAGE
 
 
+class SearchLimits(WireModel):
+    """Bounds for the structured current-Page search request."""
+
+    max_request_bytes: Annotated[int, Field(ge=1)] = MAX_QUERY_BODY_BYTES
+    max_keywords_bytes: Annotated[int, Field(ge=1)] = MAX_SEARCH_KEYWORD_BYTES
+    max_keywords: Annotated[int, Field(ge=1)] = MAX_QUERY_KEYWORDS
+    max_tags: Annotated[int, Field(ge=1)] = MAX_QUERY_TAGS
+    max_libraries: Annotated[int, Field(ge=1)] = MAX_QUERY_LIBRARIES
+
+
 class ApiLimits(WireModel):
     # Legacy single-Markdown content limit; file-set uploads have separate bounds.
     max_content_bytes: Annotated[int, Field(ge=1)] = MAX_CONTENT_BYTES
@@ -70,6 +89,7 @@ class ApiLimits(WireModel):
     max_page_size: Annotated[int, Field(ge=1)] = MAX_PAGE_LIMIT
     max_query_bytes: Annotated[int, Field(ge=1)] = MAX_QUERY_BYTES
     file_set: FileSetLimits | None = None
+    search: SearchLimits | None = None
 
 
 class IdempotencySupport(WireModel):
@@ -112,7 +132,8 @@ def capabilities_response(configuration: CapabilityConfiguration) -> Capabilitie
         api_versions=configuration.api_versions,
         features=configuration.features,
         limits=ApiLimits(
-            file_set=FileSetLimits() if FILE_SET_FEATURE in configuration.features else None
+            file_set=FileSetLimits() if FILE_SET_FEATURE in configuration.features else None,
+            search=SearchLimits() if "search" in configuration.features else None,
         ),
         idempotency=IdempotencySupport(
             content_mutations=configuration.content_mutation_idempotency,
