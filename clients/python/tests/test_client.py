@@ -12,6 +12,7 @@ from patchouli_client import (
     ArchiveCreateMetadata,
     ArchiveRevisionMetadata,
     BearerToken,
+    CurrentPageSearchRequest,
     IdempotencyKey,
     MarkdownContent,
     PatchouliClient,
@@ -19,6 +20,7 @@ from patchouli_client import (
     ProtocolError,
     RetryPolicy,
     SearchRequest,
+    SearchTagRef,
     SourceInput,
     WhoAmI,
 )
@@ -215,6 +217,59 @@ def test_search_is_post_json_and_returns_exact_citation() -> None:
 
     assert result.value.items[0].citation.revision_number == 1
     assert result.value.items[0].citation.revision_id.startswith("rev_")
+
+
+def test_current_page_search_uses_cross_library_contract() -> None:
+    library_id = "a" * 32
+    tag_id = "b" * 32
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/v1/search"
+        assert json.loads(request.content) == {
+            "keywords": ["技术", "report"],
+            "tags_any": [{"library_id": library_id, "tag_id": tag_id}],
+            "libraries": [library_id],
+            "occurred_from_us": 1_000_000,
+            "occurred_before_us": None,
+            "limit": 10,
+        }
+        return httpx.Response(
+            200,
+            headers=protected_headers(),
+            json={
+                "items": [
+                    {
+                        "library_id": library_id,
+                        "section_id": "sec_synthetic",
+                        "book_id": "book_synthetic",
+                        "page_id": "page_synthetic",
+                        "revision_id": "rev_synthetic",
+                        "revision_number": 2,
+                        "title": "技术报告",
+                        "occurred_at": 1_000_000,
+                        "match_sources": [{"kind": "file_text", "file_name": "report.md"}],
+                    }
+                ]
+            },
+        )
+
+    with PatchouliClient(
+        "https://patchouli.example.invalid", http_transport=httpx.MockTransport(handler)
+    ) as client:
+        result = client.search_pages(
+            CurrentPageSearchRequest(
+                keywords=("技术", "report"),
+                tags_any=(SearchTagRef(library_id, tag_id),),
+                libraries=(library_id,),
+                occurred_from_us=1_000_000,
+                limit=10,
+            ),
+            token=BearerToken("cred_synthetic_123"),
+        )
+
+    assert result.value.items[0].revision_number == 2
+    assert result.value.items[0].match_sources[0].file_name == "report.md"
 
 
 def test_create_archive_multipart_and_response_headers() -> None:

@@ -41,6 +41,7 @@ class SearchPageView(WireModel):
     book_id: str
     page_id: str
     revision_id: str
+    revision_number: int
     title: str
     occurred_at: int
     match_sources: list[SearchMatchSourceView]

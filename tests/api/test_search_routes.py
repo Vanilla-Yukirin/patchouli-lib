@@ -198,6 +198,7 @@ def test_v2_search_requires_ready_index_and_never_leaks_query(search_v2_api: Sea
     assert response.headers[REQUEST_ID_HEADER] == REQUEST_ID
     assert response.json()["items"]
     assert all(item["library_id"] == search_v2_api.library_id for item in response.json()["items"])
+    assert response.json()["items"][0]["revision_number"] == 1
 
 
 def test_v2_search_rejects_invalid_body_and_missing_credential(search_v2_api: SearchV2Api) -> None:

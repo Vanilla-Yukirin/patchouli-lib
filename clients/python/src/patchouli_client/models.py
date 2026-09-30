@@ -862,6 +862,130 @@ class SearchRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class SearchTagRef:
+    library_id: str
+    tag_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.library_id, str) or not self.library_id:
+            raise ValueError("search Tag Library identifier must not be empty")
+        if not isinstance(self.tag_id, str) or not self.tag_id:
+            raise ValueError("search Tag identifier must not be empty")
+
+    def to_wire(self) -> dict[str, str]:
+        return {"library_id": self.library_id, "tag_id": self.tag_id}
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentPageSearchRequest:
+    keywords: tuple[str, ...] = field(default=(), repr=False)
+    tags_any: tuple[SearchTagRef, ...] = ()
+    occurred_from_us: int | None = None
+    occurred_before_us: int | None = None
+    libraries: tuple[str, ...] | None = None
+    limit: int = DEFAULT_PAGE_LIMIT
+
+    def __post_init__(self) -> None:
+        if not (
+            self.keywords
+            or self.tags_any
+            or self.occurred_from_us is not None
+            or self.occurred_before_us is not None
+        ):
+            raise ValueError("search requires at least one keyword, Tag, or time bound")
+        if any(not isinstance(value, str) or not value for value in self.keywords):
+            raise ValueError("search keywords must be non-empty strings")
+        if any(not isinstance(value, SearchTagRef) for value in self.tags_any):
+            raise ValueError("search Tags must carry their Library identity")
+        if self.libraries is not None and any(
+            not isinstance(value, str) or not value for value in self.libraries
+        ):
+            raise ValueError("search Libraries must be non-empty identifiers")
+        for bound in (self.occurred_from_us, self.occurred_before_us):
+            if bound is not None and (isinstance(bound, bool) or not isinstance(bound, int)):
+                raise ValueError("search time bounds must be integer UTC microseconds")
+        if (
+            self.occurred_from_us is not None
+            and self.occurred_before_us is not None
+            and self.occurred_from_us >= self.occurred_before_us
+        ):
+            raise ValueError("search time interval must be non-empty")
+        if (
+            isinstance(self.limit, bool)
+            or not isinstance(self.limit, int)
+            or not 1 <= self.limit <= MAX_PAGE_LIMIT
+        ):
+            raise ValueError("search limit must be within the supported page range")
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "keywords": list(self.keywords),
+            "tags_any": [tag.to_wire() for tag in self.tags_any],
+            "occurred_from_us": self.occurred_from_us,
+            "occurred_before_us": self.occurred_before_us,
+            "libraries": None if self.libraries is None else list(self.libraries),
+            "limit": self.limit,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SearchMatchSource:
+    kind: str
+    file_name: str | None
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> SearchMatchSource:
+        kind = _string(data, "kind")
+        if kind not in {"title", "file_name", "file_text"}:
+            raise ProtocolError("search result contained an unknown match source")
+        return cls(kind, _required_nullable_string(data, "file_name"))
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentPageSearchItem:
+    library_id: str
+    section_id: str
+    book_id: str
+    page_id: str
+    revision_id: str
+    revision_number: int
+    title: str
+    occurred_at: int
+    match_sources: tuple[SearchMatchSource, ...]
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> CurrentPageSearchItem:
+        return cls(
+            library_id=_string(data, "library_id"),
+            section_id=_string(data, "section_id"),
+            book_id=_string(data, "book_id"),
+            page_id=_string(data, "page_id"),
+            revision_id=_string(data, "revision_id"),
+            revision_number=_integer(data, "revision_number"),
+            title=_string(data, "title"),
+            occurred_at=_integer(data, "occurred_at"),
+            match_sources=tuple(
+                SearchMatchSource.from_dict(_object(value, context="match source"))
+                for value in _object_list(data, "match_sources")
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentPageSearchResult:
+    items: tuple[CurrentPageSearchItem, ...]
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> CurrentPageSearchResult:
+        return cls(
+            tuple(
+                CurrentPageSearchItem.from_dict(_object(value, context="search item"))
+                for value in _object_list(data, "items")
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ProblemDetails:
     type: str
     title: str

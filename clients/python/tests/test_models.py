@@ -10,6 +10,8 @@ from patchouli_client import (
     ArchiveCreateMetadata,
     BearerToken,
     Capabilities,
+    CurrentPageSearchRequest,
+    CurrentPageSearchResult,
     IdempotencyKey,
     IdempotencySupport,
     MarkdownContent,
@@ -18,6 +20,7 @@ from patchouli_client import (
     ProblemDetails,
     ProtocolError,
     SearchRequest,
+    SearchTagRef,
     Section,
     SourceInput,
     WhoAmI,
@@ -614,6 +617,43 @@ def test_request_value_invariants_are_strict() -> None:
         SearchRequest(query="synthetic", cursor=3)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="bytes"):
         MarkdownContent("synthetic")  # type: ignore[arg-type]
+
+
+def test_current_page_search_request_rejects_invalid_scope_and_window() -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        CurrentPageSearchRequest()
+    with pytest.raises(ValueError, match="keywords"):
+        CurrentPageSearchRequest(keywords=("",))
+    with pytest.raises(ValueError, match="Tags"):
+        CurrentPageSearchRequest(tags_any=("tag",))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="Libraries"):
+        CurrentPageSearchRequest(keywords=("term",), libraries=("",))
+    with pytest.raises(ValueError, match="microseconds"):
+        CurrentPageSearchRequest(occurred_from_us=True)
+    with pytest.raises(ValueError, match="interval"):
+        CurrentPageSearchRequest(occurred_from_us=2, occurred_before_us=2)
+    with pytest.raises(ValueError, match="limit"):
+        CurrentPageSearchRequest(keywords=("term",), limit=101)
+    with pytest.raises(ValueError, match="Library identifier"):
+        SearchTagRef("", "tag")
+    with pytest.raises(ValueError, match="Tag identifier"):
+        SearchTagRef("lib", "")
+
+
+def test_current_page_search_result_rejects_unknown_match_source() -> None:
+    item = {
+        "library_id": "lib",
+        "section_id": "section",
+        "book_id": "book",
+        "page_id": "page",
+        "revision_id": "revision",
+        "revision_number": 1,
+        "title": "Synthetic",
+        "occurred_at": 1_000_000,
+        "match_sources": [{"kind": "unknown", "file_name": None}],
+    }
+    with pytest.raises(ProtocolError, match="unknown match source"):
+        CurrentPageSearchResult.from_dict({"items": [item]})
 
 
 def test_multipart_rejects_unsafe_boundary() -> None:

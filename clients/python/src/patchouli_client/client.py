@@ -18,6 +18,8 @@ from patchouli_client.models import (
     ArchiveRevisionMetadata,
     Book,
     Capabilities,
+    CurrentPageSearchRequest,
+    CurrentPageSearchResult,
     CursorPage,
     FileSetCreateMetadata,
     FileSetCreateResult,
@@ -163,6 +165,23 @@ class PatchouliClient:
         if any(hit.page.section_id != section_id for hit in result.value.items):
             raise ProtocolError("search response did not match the requested Section")
         return result
+
+    def search_pages(
+        self,
+        request: CurrentPageSearchRequest,
+        *,
+        token: BearerToken,
+    ) -> ClientResponse[CurrentPageSearchResult]:
+        """Search the current Page versions across readable Libraries."""
+
+        response = self._transport.send(
+            "POST",
+            "/api/v1/search",
+            token=token,
+            operation=OperationKind.READ,
+            json_body=request.to_wire(),
+        )
+        return self._success(response, {200}, CurrentPageSearchResult.from_dict)
 
     def get_page(
         self,

@@ -45,6 +45,7 @@ class SearchPageV2:
     book_id: str
     page_id: str
     revision_id: str
+    revision_number: int
     title: str
     occurred_at: int
     match_sources: tuple[SearchMatchSourceV2, ...]
@@ -237,7 +238,7 @@ def _rows_for_scope(
     count_parameters: tuple[object, ...] = tag_ids if query.tags_any else ()
     sql = (
         candidate_cte + "SELECT p.library_id, p.section_id, p.book_id, p.page_id, "
-        "p.current_revision_id, p.title, p.occurred_at, "
+        "p.current_revision_id, p.current_revision_number, p.title, p.occurred_at, "
         + tag_count
         + ", d.source_kind, d.file_name, d.normalized_text "
         "FROM search_page_state AS s "
@@ -310,7 +311,7 @@ def search_pages_v2(
                     best: dict[str, int] = {}
                     sources: set[SearchMatchSourceV2] = set()
                     for row in page_rows:
-                        kind, file_name, normalized_text = row[8:11]
+                        kind, file_name, normalized_text = row[9:12]
                         for keyword in needles:
                             if keyword in str(normalized_text):
                                 best[keyword] = max(best.get(keyword, 0), _FIELD_WEIGHT[str(kind)])
@@ -334,15 +335,16 @@ def search_pages_v2(
                         book_id=str(first[2]),
                         page_id=str(first[3]),
                         revision_id=str(first[4]),
-                        title=str(first[5]),
-                        occurred_at=cast("int", first[6]),
+                        revision_number=cast("int", first[5]),
+                        title=str(first[6]),
+                        occurred_at=cast("int", first[7]),
                         match_sources=ordered_sources,
                     )
                     if needles:
                         key: tuple[object, ...] = (
                             -len(best),
                             -sum(best.values()),
-                            -cast("int", first[7]),
+                            -cast("int", first[8]),
                             -item.occurred_at,
                             item.library_id,
                             item.page_id,
