@@ -11,6 +11,8 @@ from typing import cast
 
 from sqlalchemy import Connection, Engine
 
+from patchouli_lib.admin.master_token_store import MasterTokenRepository
+from patchouli_lib.admin.session import AdminSessionCodec
 from patchouli_lib.api.authentication import AuthenticatedRequestContext
 from patchouli_lib.auth.library_policy import LibraryAction
 from patchouli_lib.auth.repository import AuthRepository
@@ -104,6 +106,32 @@ def _current_scope(
         )
         readable = {identity.library_id: _Scope(identity.library_id, True)} if has_read else {}
 
+    return _select_scopes(connection, readable, query)
+
+
+def _master_scope(
+    connection: Connection,
+    identity_id: str,
+    session_generation: int,
+    query: SearchQueryV2,
+) -> tuple[_Scope, ...]:
+    if not MasterTokenRepository(connection).is_session_generation_current(
+        identity_id, session_generation
+    ):
+        raise AuthenticationError
+    readable = {
+        str(row[0]): _Scope(str(row[0]), False)
+        for row in connection.exec_driver_sql("SELECT id FROM libraries ORDER BY id")
+    }
+    return _select_scopes(connection, readable, query)
+
+
+def _select_scopes(
+    connection: Connection,
+    readable: dict[str, _Scope],
+    query: SearchQueryV2,
+) -> tuple[_Scope, ...]:
+
     if query.libraries is not None:
         if any(library_id not in readable for library_id in query.libraries):
             raise SearchScopeError
@@ -185,6 +213,7 @@ def _rows_for_scope(
     scope: _Scope,
     caller_id: str,
     query: SearchQueryV2,
+    needles: tuple[str, ...],
     candidate_expression: str | None,
 ) -> list[tuple[object, ...]]:
     parameters: list[object] = [generation, scope.library_id]
@@ -216,30 +245,56 @@ def _rows_for_scope(
         tag_count = "0"
     candidate_cte = ""
     candidate_join = ""
+    exact_document_join = ""
     candidate_parameters: tuple[object, ...] = ()
+    exact_short_keyword = len(needles) == 1 and len(needles[0]) <= 3
     if candidate_expression is not None:
-        # Evaluate FTS once per Library. A correlated MATCH under a Page scan
-        # reparses the same expression thousands of times on broad queries.
-        candidate_cte = (
-            "WITH candidate_pages AS MATERIALIZED ("
-            "SELECT DISTINCT candidate.library_id, candidate.page_uid "
-            "FROM search_terms JOIN search_documents AS candidate "
-            "ON candidate.id = search_terms.rowid "
-            "WHERE search_terms MATCH ? AND candidate.generation = ? "
-            "AND candidate.library_id = ?) "
-        )
-        candidate_join = (
-            "JOIN candidate_pages AS cp ON cp.library_id = s.library_id "
-            "AND cp.page_uid = s.page_uid "
-        )
-        candidate_parameters = (candidate_expression, generation, scope.library_id)
+        if exact_short_keyword:
+            # A complete 1/2/3-codepoint gram is the exact literal within one
+            # indexed field. Retain its document ID so a broad hit never scans
+            # or transfers every normalized file body just to confirm itself.
+            candidate_cte = (
+                "WITH candidate_documents AS MATERIALIZED ("
+                "SELECT search_terms.rowid FROM search_terms "
+                "JOIN search_documents AS candidate ON candidate.id = search_terms.rowid "
+                "WHERE search_terms MATCH ? AND candidate.generation = ? "
+                "AND candidate.library_id = ?) "
+            )
+            exact_document_join = "JOIN candidate_documents AS cd ON cd.rowid = d.id "
+            candidate_parameters = (candidate_expression, generation, scope.library_id)
+        else:
+            # Evaluate FTS once per Library. A correlated MATCH under a Page
+            # scan reparses the same expression thousands of times.
+            candidate_cte = (
+                "WITH candidate_pages AS MATERIALIZED ("
+                "SELECT DISTINCT candidate.library_id, candidate.page_uid "
+                "FROM search_terms JOIN search_documents AS candidate "
+                "ON candidate.id = search_terms.rowid "
+                "WHERE search_terms MATCH ? AND candidate.generation = ? "
+                "AND candidate.library_id = ?) "
+            )
+            candidate_join = (
+                "JOIN candidate_pages AS cp ON cp.library_id = s.library_id "
+                "AND cp.page_uid = s.page_uid "
+            )
+            candidate_parameters = (candidate_expression, generation, scope.library_id)
     # The count projection appears before WHERE placeholders in SQL.
     count_parameters: tuple[object, ...] = tag_ids if query.tags_any else ()
+    # Let SQLite test the exact literal against indexed text in C. Returning
+    # whole bodies to Python for every candidate makes broad matches transfer
+    # tens of MiB despite the response containing only Page metadata.
+    exact_columns = (
+        ", 1"
+        if exact_short_keyword
+        else "".join(", instr(d.normalized_text, ?) > 0" for _ in needles)
+    )
     sql = (
         candidate_cte + "SELECT p.library_id, p.section_id, p.book_id, p.page_id, "
         "p.current_revision_id, p.current_revision_number, p.title, p.occurred_at, "
         + tag_count
-        + ", d.source_kind, d.file_name, d.normalized_text "
+        + ", d.source_kind, d.file_name"
+        + exact_columns
+        + " "
         "FROM search_page_state AS s "
         + candidate_join
         + "JOIN pages AS p ON p.library_id = s.library_id AND p.page_uid = s.page_uid "
@@ -250,14 +305,21 @@ def _rows_for_scope(
         "JOIN search_documents AS d ON d.generation = s.generation "
         "AND d.library_id = s.library_id AND d.page_uid = s.page_uid "
         "AND d.revision_id = s.revision_id AND d.revision_number = s.revision_number "
-        "WHERE s.generation = ? AND "
+        + exact_document_join
+        + "WHERE s.generation = ? AND "
         + " AND ".join(conditions)
         + " ORDER BY p.library_id, p.page_id, d.id"
     )
     return [
         tuple(row)
         for row in connection.exec_driver_sql(
-            sql, (*candidate_parameters, *count_parameters, *parameters)
+            sql,
+            (
+                *candidate_parameters,
+                *count_parameters,
+                *(() if exact_short_keyword else needles),
+                *parameters,
+            ),
         ).all()
     ]
 
@@ -270,6 +332,46 @@ def search_pages_v2(
     clock: Callable[[], int] = utc_microseconds,
 ) -> SearchResultV2:
     """Search one concrete SQLite snapshot; never return a partial candidate Top K."""
+
+    def resolve(connection: Connection) -> tuple[tuple[_Scope, ...], str]:
+        return (
+            _current_scope(connection, context, query, clock()),
+            context.authenticated.caller.id,
+        )
+
+    return _search_pages(engine, query, resolve)
+
+
+def search_pages_for_master(
+    engine: Engine,
+    encoded_session: str,
+    codec: AdminSessionCodec,
+    query: SearchQueryV2,
+) -> SearchResultV2:
+    """Search as the verified single administrator, without an Agent token.
+
+    Verify the signed cookie and recheck its generation inside the same read
+    transaction used for scope, index readiness, and result selection.
+    """
+
+    session = codec.verify_master(encoded_session)
+    if session is None:
+        raise AuthenticationError
+
+    def resolve(connection: Connection) -> tuple[tuple[_Scope, ...], str]:
+        return (
+            _master_scope(connection, session.identity_id, session.session_generation, query),
+            "",
+        )
+
+    return _search_pages(engine, query, resolve)
+
+
+def _search_pages(
+    engine: Engine,
+    query: SearchQueryV2,
+    resolve: Callable[[Connection], tuple[tuple[_Scope, ...], str]],
+) -> SearchResultV2:
 
     if not isinstance(query, SearchQueryV2):
         raise TypeError("Expected a parsed search-v2 query.")
@@ -286,20 +388,19 @@ def search_pages_v2(
         # SQLite's legacy driver does not start a read transaction on SELECT.
         connection.exec_driver_sql("BEGIN")
         try:
-            scopes = _current_scope(connection, context, query, clock())
+            scopes, caller_id = resolve(connection)
             generation = require_ready_index(connection).generation
             for scope in scopes:
-                _check_scope_integrity(
-                    connection, generation, scope, context.authenticated.caller.id
-                )
+                _check_scope_integrity(connection, generation, scope, caller_id)
             ranked: list[tuple[tuple[object, ...], SearchPageV2]] = []
             for scope in scopes:
                 rows = _rows_for_scope(
                     connection,
                     generation,
                     scope,
-                    context.authenticated.caller.id,
+                    caller_id,
                     query,
+                    needles,
                     expression,
                 )
                 grouped: dict[str, list[tuple[object, ...]]] = {}
@@ -310,9 +411,9 @@ def search_pages_v2(
                     best: dict[str, int] = {}
                     sources: set[SearchMatchSourceV2] = set()
                     for row in page_rows:
-                        kind, file_name, normalized_text = row[9:12]
-                        for keyword in needles:
-                            if keyword in str(normalized_text):
+                        kind, file_name = row[9:11]
+                        for keyword, matched in zip(needles, row[11:], strict=True):
+                            if matched:
                                 best[keyword] = max(best.get(keyword, 0), _FIELD_WEIGHT[str(kind)])
                                 sources.add(
                                     SearchMatchSourceV2(str(kind), cast("str | None", file_name))
@@ -362,5 +463,6 @@ __all__ = [
     "SearchPageV2",
     "SearchResultV2",
     "SearchScopeError",
+    "search_pages_for_master",
     "search_pages_v2",
 ]

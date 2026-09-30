@@ -8,6 +8,7 @@ measurement, not part of the ordinary test suite.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import statistics
 import sys
@@ -125,6 +126,7 @@ def main() -> int:
     parser.add_argument("--pages", type=int, default=5_000)
     parser.add_argument("--bytes-per-page", type=int, default=10_240)
     parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument("--keyword", action="append", default=None)
     arguments = parser.parse_args()
     if not 1 <= arguments.pages <= 10_000 or not 1_024 <= arguments.bytes_per_page <= 65_536:
         parser.error("Synthetic dataset is outside the reviewed benchmark range.")
@@ -145,7 +147,10 @@ def main() -> int:
             seeded = time.perf_counter()
             rebuild_search_index(engine)
             rebuilt = time.perf_counter()
-            query = parse_query_v2_json('{"keywords":["技术"],"limit":20}'.encode())
+            keywords = arguments.keyword or ["技术"]
+            query = parse_query_v2_json(
+                json.dumps({"keywords": keywords, "limit": 20}, ensure_ascii=False).encode()
+            )
             timings = []
             for _ in range(arguments.repeats):
                 began = time.perf_counter()

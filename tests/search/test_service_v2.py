@@ -11,6 +11,8 @@ from alembic.config import Config
 from content.helpers import insert_page_graph, page_graph_values, seed_library_structure
 from sqlalchemy import Engine, insert
 
+from patchouli_lib.admin.master_token_store import MasterTokenRepository
+from patchouli_lib.admin.session import AdminSessionCodec
 from patchouli_lib.api.authentication import AuthenticatedRequestContext
 from patchouli_lib.auth.models import CredentialLibraryGrant, CredentialLibraryPolicy
 from patchouli_lib.auth.repository import AuthRepository
@@ -31,7 +33,12 @@ from patchouli_lib.database import build_engine, immediate_transaction
 from patchouli_lib.library.models import Book, Section
 from patchouli_lib.search.index_v2 import SearchIndexUnavailableError, rebuild_search_index
 from patchouli_lib.search.query_v2 import SearchQueryV2, parse_query_v2_json
-from patchouli_lib.search.service_v2 import SearchPageV2, SearchScopeError, search_pages_v2
+from patchouli_lib.search.service_v2 import (
+    SearchPageV2,
+    SearchScopeError,
+    search_pages_for_master,
+    search_pages_v2,
+)
 from patchouli_lib.tags.repository import TagRepository
 
 CALLER = "d" * 32
@@ -165,6 +172,52 @@ def _search(
     return search_pages_v2(engine, context, _query(**fields), clock=lambda: CLOCK).items
 
 
+def test_master_search_uses_signed_current_session_and_all_libraries(engine: Engine) -> None:
+    home = seed_library_structure(engine)
+    other = seed_library_structure(engine, prefix="4", label="Other")
+    local = _page(engine, home, page_byte=0x11, title="needle local", content=b"needle")
+    remote = _page(engine, other, page_byte=0x12, title="needle remote", content=b"needle")
+    rebuild_search_index(engine, clock=lambda: CLOCK)
+    with immediate_transaction(engine) as connection:
+        state = MasterTokenRepository(connection).initialize_from_local_cli(
+            "synthetic master search token material 0001", now=1_000
+        )
+    codec = AdminSessionCodec(b"s" * 32, ttl_seconds=3_600, clock=lambda: 1_000)
+    cookie, _session = codec.issue_master(state.identity_id, state.session_generation)
+    query = _query(keywords=["needle"])
+
+    assert {
+        item.page_id for item in search_pages_for_master(engine, cookie, codec, query).items
+    } == {
+        local[1],
+        remote[1],
+    }
+    assert [
+        item.page_id
+        for item in search_pages_for_master(
+            engine, cookie, codec, _query(keywords=["needle"], libraries=[other[0]])
+        ).items
+    ] == [remote[1]]
+    with pytest.raises(SearchScopeError):
+        search_pages_for_master(
+            engine, cookie, codec, _query(keywords=["needle"], libraries=["f" * 32])
+        )
+    with pytest.raises(AuthenticationError):
+        search_pages_for_master(engine, cookie + "x", codec, query)
+    legacy_cookie, _legacy_session = codec.issue()
+    with pytest.raises(AuthenticationError):
+        search_pages_for_master(engine, legacy_cookie, codec, query)
+    with immediate_transaction(engine) as connection:
+        rotated = MasterTokenRepository(connection).rotate(
+            "synthetic master search token material 0001",
+            "synthetic master search token material 0002",
+            now=1_001,
+        )
+        assert rotated is not None
+    with pytest.raises(AuthenticationError):
+        search_pages_for_master(engine, cookie, codec, query)
+
+
 def test_legacy_section_scope_and_current_grant_revocation(engine: Engine) -> None:
     home = seed_library_structure(engine)
     other = seed_library_structure(engine, prefix="4", label="Other")
@@ -238,6 +291,26 @@ def test_library_read_is_explicit_and_cross_library_results_are_stable(engine: E
         remote[1],
         local[1],
     ]
+
+
+def test_short_literal_matches_exactly_within_its_own_field(engine: Engine) -> None:
+    home = seed_library_structure(engine)
+    context = _agent(engine, home[0], home[1])
+    title_hit = _page(engine, home, page_byte=0x11, title="技术笔记", content=b"plain")
+    body_hit = _page(engine, home, page_byte=0x12, title="Other", content="这里有技术内容".encode())
+    _page(engine, home, page_byte=0x13, title="技", content="术分开".encode())
+    folded_hit = _page(engine, home, page_byte=0x14, title="Straße", content=b"plain")
+    rebuild_search_index(engine, clock=lambda: CLOCK)
+
+    hits = _search(engine, context, keywords=["技术"])
+    assert [item.page_id for item in hits] == [title_hit[1], body_hit[1]]
+    assert [source.kind for source in hits[0].match_sources] == ["title"]
+    assert [source.kind for source in hits[1].match_sources] == ["file_text"]
+    combined = _search(engine, context, keywords=["技术", "笔记"])
+    assert [item.page_id for item in combined] == [title_hit[1], body_hit[1]]
+    assert [source.kind for source in combined[0].match_sources] == ["title"]
+    assert [source.kind for source in combined[1].match_sources] == ["file_text"]
+    assert [item.page_id for item in _search(engine, context, keywords=["ß"])] == [folded_hit[1]]
 
 
 def test_tag_time_unicode_binary_name_and_old_revision(engine: Engine) -> None:

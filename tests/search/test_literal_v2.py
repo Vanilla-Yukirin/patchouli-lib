@@ -74,6 +74,20 @@ def test_candidate_is_a_superset_for_exhaustive_small_literals() -> None:
                 assert candidate_match_expression((keyword,)).strip('"') in indexed
 
 
+def test_complete_short_gram_is_exact_for_a_single_normalized_field() -> None:
+    fields = ("", "技术", "技 x 术", "a\x00🙂!", "Straße", "e\u0301", "ab", "🙂🙂")
+    keywords = ("技", "技术", "术", "技 x", "\x00", "\x00🙂", "🙂!", "ß", "SS", "é")
+    for field in fields:
+        indexed = set(encoded_grams(field))
+        normalized_field = normalize_literal(field)
+        for keyword in keywords:
+            normalized_keyword = normalize_literal(keyword)
+            if len(normalized_keyword) > 3:
+                continue
+            gram = candidate_match_expression((keyword,)).strip('"')
+            assert (gram in indexed) == (normalized_keyword in normalized_field)
+
+
 def test_fts5_receives_only_bound_generated_terms_and_needs_exact_recheck() -> None:
     connection = sqlite3.connect(":memory:")
     try:
