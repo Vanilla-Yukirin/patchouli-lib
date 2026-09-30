@@ -283,6 +283,11 @@ _ZH_CN: dict[str, str] = {
     "Agent name": "Agent 名称",
     "Book name": "书籍名称",
     "Book summary": "书籍摘要",
+    "Edit Section": "编辑分区",
+    "Save Section": "保存分区",
+    "The Section changed since this form was opened. Reload and try again.": (
+        "分区已发生变化，请刷新后重试。"
+    ),
     "Edit Book": "编辑书籍",
     "Save Book": "保存书籍",
     "The Book changed since this form was opened. Reload and try again.": (
@@ -1650,6 +1655,7 @@ def section_page(
     view: SectionView,
     *,
     locale: AdminLocale = "en",
+    master_mode: bool = False,
     message: str | None = None,
 ) -> str:
     library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
@@ -1677,6 +1683,22 @@ def section_page(
         f'<button type="submit">{localize(locale, "Create Book")}</button>'
         "</form></section>"
     )
+    if master_mode:
+        body += (
+            f'<section class="card"><h2>{localize(locale, "Edit Section")}</h2>'
+            f'<form method="post" action="{base}" autocomplete="off">'
+            f"{_csrf(escape(csrf_token, quote=True))}"
+            f'<input type="hidden" name="expected_updated_at" '
+            f'value="{view.section.updated_at}">'
+            f'<label for="section-name">{localize(locale, "Section name")}</label>'
+            f'<input id="section-name" name="name" type="text" maxlength="200" '
+            f'value="{escape(view.section.name, quote=True)}" required>'
+            f'<label for="section-description">{localize(locale, "Section description")}</label>'
+            f'<textarea id="section-description" name="description" maxlength="4000" rows="3">'
+            f"{escape(view.section.description)}</textarea>"
+            f'<button type="submit">{localize(locale, "Save Section")}</button>'
+            "</form></section>"
+        )
     if message is not None:
         body = _notice(localize(locale, message), error=True) + body
     return _browser_document(

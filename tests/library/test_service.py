@@ -15,6 +15,7 @@ from patchouli_lib.library.schemas import (
     CreateSectionInput,
     LibraryStructureSeed,
     UpdateBookInput,
+    UpdateSectionInput,
 )
 from patchouli_lib.library.service import (
     LibrarySeedConflictError,
@@ -237,6 +238,81 @@ def test_book_metadata_edit_preserves_identity_and_has_monotonic_version(
             service.update_book(original.library_id, original.section_id, original.id, request)
         with pytest.raises(LibraryStructureNotFoundError):
             service.update_book(original.library_id, "f" * 32, original.id, request)
+
+
+def test_section_metadata_edit_preserves_identity_and_has_monotonic_version(
+    library_engine: Engine,
+) -> None:
+    with immediate_transaction(library_engine) as connection:
+        original = (
+            LibrarySeedService(
+                LibraryRepository(connection),
+                id_factory=_id_factory("1" * 32, "2" * 32, "3" * 32),
+                clock=lambda: 1_000_000,
+            )
+            .seed(SYNTHETIC_SEED)
+            .section
+        )
+        service = LibraryStructureService(LibraryRepository(connection), clock=lambda: 1)
+        request = UpdateSectionInput(
+            name="Renamed", description="New description", expected_updated_at=original.updated_at
+        )
+        updated, changed = service.update_section(original.library_id, original.id, request)
+        assert changed
+        assert updated.id == original.id
+        assert updated.library_id == original.library_id
+        assert updated.created_at == original.created_at
+        assert updated.updated_at == original.updated_at + 1
+        assert (
+            LibraryRepository(connection).get_section(original.library_id, original.id) == updated
+        )
+        no_change, changed = service.update_section(
+            original.library_id,
+            original.id,
+            UpdateSectionInput(
+                name=updated.name,
+                description=updated.description,
+                expected_updated_at=updated.updated_at,
+            ),
+        )
+        assert not changed and no_change == updated
+        with pytest.raises(LibraryStructureVersionConflictError):
+            service.update_section(original.library_id, original.id, request)
+        with pytest.raises(LibraryStructureNotFoundError):
+            service.update_section("f" * 32, original.id, request)
+
+
+def test_section_edit_name_unique_only_within_its_library(library_engine: Engine) -> None:
+    with immediate_transaction(library_engine) as connection:
+        seeded = LibrarySeedService(
+            LibraryRepository(connection),
+            id_factory=_id_factory("1" * 32, "2" * 32, "3" * 32),
+            clock=lambda: 1_000_000,
+        ).seed(SYNTHETIC_SEED)
+        service = LibraryStructureService(LibraryRepository(connection), clock=lambda: 2_000_000)
+        competing = service.create_section(seeded.library.id, CreateSectionInput(name="Competitor"))
+        other_library = service.create_library(CreateLibraryInput(name="Other Library"))
+        service.create_section(other_library.id, CreateSectionInput(name="Allowed Name"))
+        with pytest.raises(LibrarySeedConflictError):
+            service.update_section(
+                seeded.library.id,
+                seeded.section.id,
+                UpdateSectionInput(
+                    name=competing.name,
+                    description=seeded.section.description,
+                    expected_updated_at=seeded.section.updated_at,
+                ),
+            )
+        renamed, changed = service.update_section(
+            seeded.library.id,
+            seeded.section.id,
+            UpdateSectionInput(
+                name="Allowed Name",
+                description=seeded.section.description,
+                expected_updated_at=seeded.section.updated_at,
+            ),
+        )
+        assert changed and renamed.name == "Allowed Name"
 
 
 def test_book_edit_name_unique_only_within_its_section(library_engine: Engine) -> None:

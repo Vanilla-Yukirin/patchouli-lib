@@ -49,6 +49,7 @@ class SectionItem:
     id: str
     name: str
     description: str
+    updated_at: int
 
 
 @dataclass(frozen=True)
@@ -774,7 +775,7 @@ class AdminReadModel:
             if library is None:
                 return None
             rows = connection.execute(
-                select(Section.id, Section.name, Section.description)
+                select(Section.id, Section.name, Section.description, Section.updated_at)
                 .where(Section.library_id == library_id)
                 .order_by(Section.name, Section.id)
             ).mappings()
@@ -1153,7 +1154,7 @@ def _get_library(connection: Connection, library_id: str) -> LibraryItem | None:
 def _get_section(connection: Connection, library_id: str, section_id: str) -> SectionItem | None:
     row = (
         connection.execute(
-            select(Section.id, Section.name, Section.description).where(
+            select(Section.id, Section.name, Section.description, Section.updated_at).where(
                 Section.library_id == library_id,
                 Section.id == section_id,
             )
@@ -1188,7 +1189,7 @@ def _library_item(row: RowMapping) -> LibraryItem:
 
 
 def _section_item(row: RowMapping) -> SectionItem:
-    return SectionItem(row["id"], row["name"], row["description"])
+    return SectionItem(row["id"], row["name"], row["description"], row["updated_at"])
 
 
 def _book_item(row: RowMapping) -> BookItem:
