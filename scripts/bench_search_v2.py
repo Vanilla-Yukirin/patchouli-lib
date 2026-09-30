@@ -8,8 +8,11 @@ measurement, not part of the ordinary test suite.
 from __future__ import annotations
 
 import argparse
+import cProfile
+import io
 import json
 import os
+import pstats
 import statistics
 import sys
 import time
@@ -127,6 +130,16 @@ def main() -> int:
     parser.add_argument("--bytes-per-page", type=int, default=10_240)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--keyword", action="append", default=None)
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Profile one extra search on the same disposable synthetic database.",
+    )
+    parser.add_argument(
+        "--include-no-hit",
+        action="store_true",
+        help="Also measure a separate synthetic no-match query as a contrast.",
+    )
     arguments = parser.parse_args()
     if not 1 <= arguments.pages <= 10_000 or not 1_024 <= arguments.bytes_per_page <= 65_536:
         parser.error("Synthetic dataset is outside the reviewed benchmark range.")
@@ -158,11 +171,43 @@ def main() -> int:
                 timings.append((time.perf_counter() - began) * 1_000)
                 if len(result.items) != min(20, arguments.pages):
                     raise RuntimeError("Search returned an incomplete Top K.")
+            no_hit_timings: list[float] = []
+            if arguments.include_no_hit:
+                no_hit_query = parse_query_v2_json(
+                    json.dumps(
+                        {"keywords": ["不存在验证词"], "limit": 20}, ensure_ascii=False
+                    ).encode()
+                )
+                for _ in range(arguments.repeats):
+                    began = time.perf_counter()
+                    no_hit = search_pages_v2(engine, context, no_hit_query, clock=lambda: 3_000_000)
+                    no_hit_timings.append((time.perf_counter() - began) * 1_000)
+                    if no_hit.items:
+                        raise RuntimeError("Synthetic no-hit query unexpectedly matched.")
             print(f"pages={arguments.pages} bytes_per_page={arguments.bytes_per_page}")
             print(f"seed_seconds={seeded - started:.3f} rebuild_seconds={rebuilt - seeded:.3f}")
             print(f"database_mib={database.stat().st_size / 1_048_576:.1f}")
             print(f"query_ms={','.join(f'{value:.1f}' for value in timings)}")
             print(f"median_ms={statistics.median(timings):.1f} max_ms={max(timings):.1f}")
+            if no_hit_timings:
+                print(f"no_hit_ms={','.join(f'{value:.1f}' for value in no_hit_timings)}")
+                print(
+                    f"no_hit_median_ms={statistics.median(no_hit_timings):.1f} "
+                    f"no_hit_max_ms={max(no_hit_timings):.1f}"
+                )
+            if arguments.profile:
+                profile = cProfile.Profile()
+                profiled_result = profile.runcall(
+                    search_pages_v2, engine, context, query, clock=lambda: 3_000_000
+                )
+                if len(profiled_result.items) != min(20, arguments.pages):
+                    raise RuntimeError("Profiled search returned an incomplete Top K.")
+                stream = io.StringIO()
+                pstats.Stats(profile, stream=stream).strip_dirs().sort_stats(
+                    "cumulative"
+                ).print_stats(25)
+                print("profile_cumulative_top_25:")
+                print(stream.getvalue())
         finally:
             engine.dispose()
     return 0
