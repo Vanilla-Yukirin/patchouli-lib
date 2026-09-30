@@ -70,6 +70,7 @@ class PageItem:
     page_type: str
     occurred_at: int
     revision_number: int
+    updated_at: int
 
 
 @dataclass(frozen=True)
@@ -549,6 +550,7 @@ class AdminReadModel:
                             MasterAuditEvent.action.in_(
                                 (
                                     "content.archive.restore",
+                                    "content.page.title.edit",
                                     "tag.create",
                                     "tag.page.attach",
                                     "tag.page.detach",
@@ -563,7 +565,7 @@ class AdminReadModel:
                 )
             for event in master_events:
                 parts = event["target_id"].split(":")
-                if event["action"] == "content.archive.restore":
+                if event["action"] in ("content.archive.restore", "content.page.title.edit"):
                     if event["target_type"] != "page" or len(parts) != 2:
                         continue
                     library_id, page_uid_hex = parts
@@ -889,6 +891,7 @@ class AdminReadModel:
                     Page.page_type,
                     Page.occurred_at,
                     Page.current_revision_number,
+                    Page.updated_at,
                 )
                 .where(
                     Page.library_id == library_id,
@@ -937,6 +940,7 @@ class AdminReadModel:
                         Page.page_type,
                         Page.occurred_at,
                         Page.current_revision_number,
+                        Page.updated_at,
                         Revision.content_md,
                         Revision.revision_id.label("selected_revision_id"),
                         Revision.revision_number.label("selected_revision_number"),
@@ -1266,6 +1270,7 @@ def _page_item(row: RowMapping) -> PageItem:
         row["page_type"],
         row["occurred_at"],
         row["current_revision_number"],
+        row["updated_at"],
     )
 
 

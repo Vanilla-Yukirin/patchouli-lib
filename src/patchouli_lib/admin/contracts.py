@@ -136,6 +136,18 @@ class MasterPageTagFormInput(AdminActionInput):
     operation: Literal["attach", "detach"]
 
 
+class MasterUpdatePageTitleInput(AdminActionInput):
+    title: Annotated[str, Field(min_length=1)]
+    expected_updated_at: TimestampMicros
+
+    @field_validator("title")
+    @classmethod
+    def reject_nul_title(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("Page title must not contain NUL characters.")
+        return value
+
+
 class PageTagFormInput(MasterPageTagFormInput):
     operator_token: SecretStr = Field(min_length=1, max_length=256, repr=False)
 

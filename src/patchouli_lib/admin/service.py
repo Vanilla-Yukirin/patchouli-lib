@@ -17,6 +17,7 @@ from patchouli_lib.admin.contracts import (
     MasterSetAgentLibraryGrantsInput,
     MasterTagFormInput,
     MasterUpdateAgentInput,
+    MasterUpdatePageTitleInput,
     PageTagFormInput,
     ProvisionAgentInput,
     RecoverOperatorInput,
@@ -109,6 +110,18 @@ class AgentMetadataVersionConflictError(ValueError):
 
 class AgentNameConflictError(ValueError):
     """Another identity in the Agent's home Library already uses this name."""
+
+
+class PageTitleNotFoundError(ValueError):
+    """The Page is not at the requested Library, Section and Book path."""
+
+
+class PageTitleVersionConflictError(ValueError):
+    """The Page changed since the title form was displayed."""
+
+
+class PageTitlePersistenceError(RuntimeError):
+    """The Page clock cannot advance."""
 
 
 @dataclass(frozen=True, slots=True, repr=False, eq=False)
@@ -1071,6 +1084,52 @@ class AdminActionService:
                 request_id=f"req_{uuid4().hex}",
                 changed_at=changed_at,
             )
+
+    def update_page_title_as_master(
+        self,
+        library_id: str,
+        section_id: str,
+        book_id: str,
+        page_id: str,
+        request: MasterUpdatePageTitleInput,
+        *,
+        master_session: MasterAdminSession,
+    ) -> None:
+        """Audit before the guarded title update in one short master transaction."""
+
+        fingerprint = master_session.audit_fingerprint()
+        with immediate_transaction(self._engine) as connection:
+            self._require_current_admin_session(connection, master_session, fingerprint)
+            content = ContentRepository(connection)
+            page = content.get_page(library_id, page_id)
+            if (
+                page is None
+                or page.section_id != section_id
+                or page.book_id != book_id
+                or page.deleted_at is not None
+            ):
+                raise PageTitleNotFoundError
+            if page.updated_at != request.expected_updated_at:
+                raise PageTitleVersionConflictError
+            if page.title == request.title:
+                return
+            changed_at = max(self._clock(), page.updated_at + 1)
+            try:
+                canonical_utc_wire(changed_at)
+            except ValueError:
+                raise PageTitlePersistenceError from None
+            MasterAuditRepository(connection).add_success(
+                identity_id=master_session.identity_id,
+                session_generation=master_session.session_generation,
+                session_fingerprint=fingerprint,
+                action="content.page.title.edit",
+                target_type="page",
+                target_id=f"{library_id}:{page.page_uid.hex()}",
+                occurred_at=changed_at,
+                event_id=uuid4().hex,
+            )
+            if content.update_page_title(page, title=request.title, updated_at=changed_at) is None:
+                raise PageTitleVersionConflictError
 
 
 def _expires_at(now: int, ttl_seconds: int) -> int:

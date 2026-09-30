@@ -296,6 +296,12 @@ _ZH_CN: dict[str, str] = {
     ),
     "Edit Book": "编辑书籍",
     "Save Book": "保存书籍",
+    "Edit Page title": "编辑页面标题",
+    "Page title": "页面标题",
+    "Save title": "保存标题",
+    "The Page changed since this form was opened. Reload and try again.": (
+        "打开表单后页面已发生变化，请刷新后重试。"
+    ),
     "The Book changed since this form was opened. Reload and try again.": (
         "打开表单后书籍已发生变化，请刷新后重试。"
     ),
@@ -373,6 +379,7 @@ _ZH_CN: dict[str, str] = {
     "Administrator": "管理员",
     "Created a page": "创建了页面",
     "Revised a page": "更新了页面",
+    "Changed a page title": "修改了页面标题",
     "Corrected a page's occurrence time": "更正了页面的发生时间",
     "Deleted a page": "删除了页面",
     "Restored a page": "恢复了页面",
@@ -847,6 +854,7 @@ def _content_activity_timeline(
                 "content.archive.correct_occurrence": "Corrected a page's occurrence time",
                 "content.archive.delete": "Deleted a page",
                 "content.archive.restore": "Restored a page",
+                "content.page.title.edit": "Changed a page title",
             }[item.action]
             description = f"{localize(locale, action)} {page}"
         entries.append(
@@ -2058,6 +2066,18 @@ def page_preview_page(
             else ""
         )
     )
+    if current and master_mode:
+        body += (
+            f'<section class="card"><h2>{localize(locale, "Edit Page title")}</h2>'
+            f'<form method="post" action="{base}" autocomplete="off">'
+            f"{_csrf(escape(csrf_token, quote=True))}"
+            f'<input type="hidden" name="expected_updated_at" value="{view.page.updated_at}">'
+            f'<label for="page-title">{localize(locale, "Page title")}</label>'
+            f'<input id="page-title" name="title" type="text" '
+            f'value="{escape(view.page.title, quote=True)}" required>'
+            f'<button type="submit">{localize(locale, "Save title")}</button>'
+            "</form></section>"
+        )
     tag_path = f"{library_path}/tags"
     tag_choices = "".join(
         f'<option value="{escape(item.id, quote=True)}">{escape(item.name)}'
