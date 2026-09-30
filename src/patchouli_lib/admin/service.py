@@ -16,6 +16,7 @@ from patchouli_lib.admin.contracts import (
     MasterRotateAgentCredentialInput,
     MasterSetAgentLibraryGrantsInput,
     MasterTagFormInput,
+    MasterUpdateAgentInput,
     PageTagFormInput,
     ProvisionAgentInput,
     RecoverOperatorInput,
@@ -100,6 +101,14 @@ _MICROSECONDS_PER_SECOND = 1_000_000
 
 class GrantVersionConflictError(ValueError):
     """The exact credential grants changed since the form was displayed."""
+
+
+class AgentMetadataVersionConflictError(ValueError):
+    """The Agent metadata changed since the form was displayed."""
+
+
+class AgentNameConflictError(ValueError):
+    """Another identity in the Agent's home Library already uses this name."""
 
 
 @dataclass(frozen=True, slots=True, repr=False, eq=False)
@@ -539,6 +548,52 @@ class AdminActionService:
             caller_id=caller.id,
             credential_id=issued.credential.id,
         )
+
+    def update_agent_as_master(
+        self,
+        library_id: str,
+        caller_id: str,
+        request: MasterUpdateAgentInput,
+        *,
+        master_session: MasterAdminSession,
+    ) -> bool:
+        """Edit one existing Agent's metadata without changing its identity or access."""
+        with immediate_transaction(self._engine) as connection:
+            self._require_current_admin_session(
+                connection, master_session, master_session.audit_fingerprint()
+            )
+            repository = AuthRepository(connection)
+            caller = repository.get_caller(library_id, caller_id)
+            if caller is None or caller.kind is not CallerKind.AGENT:
+                raise ResourceNotFoundError
+            if caller.updated_at != request.expected_updated_at:
+                raise AgentMetadataVersionConflictError
+            if caller.name == request.name and caller.description == request.description:
+                return False
+            existing = repository.find_caller_by_name(library_id, request.name)
+            if existing is not None and existing.id != caller_id:
+                raise AgentNameConflictError
+            now = max(self._clock(), caller.updated_at + 1)
+            if not repository.update_agent_metadata(
+                library_id,
+                caller_id,
+                name=request.name,
+                description=request.description,
+                expected_updated_at=caller.updated_at,
+                updated_at=now,
+            ):
+                raise AgentMetadataVersionConflictError
+            MasterAuditRepository(connection).add_success(
+                identity_id=master_session.identity_id,
+                session_generation=master_session.session_generation,
+                session_fingerprint=master_session.audit_fingerprint(),
+                action="auth.agent.metadata_update",
+                target_type="caller",
+                target_id=caller_id,
+                occurred_at=now,
+                event_id=uuid4().hex,
+            )
+        return True
 
     def rotate_agent_credential_as_master(
         self,

@@ -78,6 +78,29 @@ class AuthRepository:
         self._connection.execute(insert(Caller), values)
         return CallerRecord.model_validate(values)
 
+    def update_agent_metadata(
+        self,
+        library_id: str,
+        caller_id: str,
+        *,
+        name: str,
+        description: str,
+        expected_updated_at: int,
+        updated_at: int,
+    ) -> bool:
+        """CAS only an Agent's display metadata; leave policy and credentials untouched."""
+        result = self._connection.execute(
+            update(Caller)
+            .where(
+                Caller.library_id == library_id,
+                Caller.id == caller_id,
+                Caller.kind == "agent",
+                Caller.updated_at == expected_updated_at,
+            )
+            .values(name=name, description=description, updated_at=updated_at)
+        )
+        return result.rowcount == 1
+
     def disable_caller(
         self,
         library_id: str,

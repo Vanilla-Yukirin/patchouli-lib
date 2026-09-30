@@ -281,6 +281,12 @@ _ZH_CN: dict[str, str] = {
     "Agent description": "Agent 说明",
     "Agent instructions": "Agent 使用说明",
     "Agent name": "Agent 名称",
+    "Edit Agent": "编辑 Agent",
+    "Save Agent": "保存 Agent",
+    "The Agent changed since this form was opened. Reload and try again.": (
+        "打开表单后 Agent 已发生变化，请刷新后重试。"
+    ),
+    "An identity with that name already exists in this Library.": ("该知识库已有同名身份。"),
     "Book name": "书籍名称",
     "Book summary": "书籍摘要",
     "Edit Section": "编辑分区",
@@ -857,6 +863,7 @@ def caller_page(
     *,
     locale: AdminLocale = "en",
     allow_master_actions: bool = False,
+    message: str | None = None,
 ) -> str:
     status = "Identity disabled" if view.disabled_at is not None else "Identity active"
     now_micros = int(datetime.now(UTC).timestamp() * 1_000_000)
@@ -1067,6 +1074,24 @@ def caller_page(
         f"{grant_list}</section>"
         f'<p><a href="/admin">{localize(locale, "Back to activity")}</a></p>'
     )
+    if allow_master_actions and view.kind == "agent":
+        path = f"/admin/libraries/{view.library_id}/callers/{view.id}/metadata"
+        body += (
+            f'<section class="card"><h2>{localize(locale, "Edit Agent")}</h2>'
+            f'<form method="post" action="{escape(path, quote=True)}" autocomplete="off">'
+            f"{_csrf(escape(csrf_token, quote=True))}"
+            f'<input type="hidden" name="expected_updated_at" value="{view.updated_at}">'
+            f'<label for="agent-name">{localize(locale, "Agent name")}</label>'
+            f'<input id="agent-name" name="name" type="text" maxlength="200" '
+            f'value="{escape(view.name, quote=True)}" required>'
+            f'<label for="agent-description">{localize(locale, "Agent description")}</label>'
+            '<textarea id="agent-description" name="description" maxlength="4000" rows="3">'
+            f"{escape(view.description)}</textarea>"
+            f'<button type="submit">{localize(locale, "Save Agent")}</button>'
+            "</form></section>"
+        )
+    if message is not None:
+        body = _notice(localize(locale, message), error=True) + body
     return _browser_document(
         csrf_token,
         locale,

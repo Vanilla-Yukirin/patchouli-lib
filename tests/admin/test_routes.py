@@ -1539,6 +1539,193 @@ def test_master_session_provisions_agent_with_explicit_cross_library_grants(
     assert revealed.text == token
 
 
+def test_master_agent_metadata_editor_is_scoped_safe_and_current(admin_web: AdminWeb) -> None:
+    legacy_csrf = _login(admin_web)
+    assert (
+        _post(
+            admin_web.client,
+            f"/admin/libraries/{'f' * 32}/callers/{'e' * 32}/metadata",
+            data={"csrf_token": legacy_csrf},
+        ).status_code
+        == 403
+    )
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    home = _post(
+        admin_web.client, "/admin/libraries", data={"csrf_token": csrf, "name": "Edit Home"}
+    )
+    other = _post(
+        admin_web.client, "/admin/libraries", data={"csrf_token": csrf, "name": "Edit Other"}
+    )
+    home_id = home.headers["location"].rsplit("/", 1)[-1]
+    other_id = other.headers["location"].rsplit("/", 1)[-1]
+    issued = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": csrf,
+            "home_library_id": home_id,
+            "agent_name": "Editable Agent",
+            "agent_description": "Initial description",
+            "credential_ttl_seconds": "3600",
+            "grants": [f"{other_id}:read"],
+        },
+    )
+    assert issued.status_code == 200
+    token = _credential_from(issued.text)
+    _, caller_id, credential_id = _metadata_from(issued.text)
+    detail_path = f"/admin/libraries/{home_id}/callers/{caller_id}"
+    edit_path = f"{detail_path}/metadata"
+    detail = admin_web.client.get(detail_path)
+    assert detail.status_code == 200
+    assert f'action="{edit_path}"' in detail.text
+    assert token not in detail.text
+    match = re.search(r'name="expected_updated_at" value="(\d+)"', detail.text)
+    assert match is not None
+    old_version = match.group(1)
+    form = {
+        "csrf_token": csrf,
+        "expected_updated_at": old_version,
+        "name": '<img src=x onerror="alert(1)">',
+        "description": "<script>alert(1)</script>",
+    }
+    assert (
+        _post(
+            admin_web.client, edit_path, data=form, origin="https://other.example.invalid"
+        ).status_code
+        == 403
+    )
+    assert (
+        _post(admin_web.client, edit_path, data={**form, "csrf_token": "wrong"}).status_code == 403
+    )
+    assert _post(admin_web.client, edit_path, data={**form, "extra": "x"}).status_code == 422
+    wrong_home_path = f"/admin/libraries/{other_id}/callers/{caller_id}/metadata"
+    assert _post(admin_web.client, wrong_home_path, data=form).status_code == 404
+    edited = _post(admin_web.client, edit_path, data=form)
+    assert edited.status_code == 303
+    shown = admin_web.client.get(detail_path)
+    assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in shown.text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in shown.text
+    assert "<script>alert(1)</script>" not in shown.text
+    assert token not in shown.text
+    whoami = admin_web.client.get(
+        "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert whoami.status_code == 200
+    assert whoami.json()["name"] == form["name"]
+    assert whoami.json()["description"] == form["description"]
+    assert whoami.json()["library_grants"] == [{"library_id": other_id, "actions": ["read"]}]
+    stale = _post(admin_web.client, edit_path, data=form)
+    assert stale.status_code == 409
+    assert 'src="/admin/reveal.js"' in stale.text
+    assert "script-src 'self'" in stale.headers["content-security-policy"]
+    current_version = re.search(r'name="expected_updated_at" value="(\d+)"', shown.text)
+    assert current_version is not None
+    duplicate = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": csrf,
+            "home_library_id": home_id,
+            "agent_name": "Other Agent",
+            "credential_ttl_seconds": "3600",
+        },
+    )
+    assert duplicate.status_code == 200
+    duplicate_form = {
+        **form,
+        "expected_updated_at": current_version.group(1),
+        "name": "Other Agent",
+    }
+    assert _post(admin_web.client, edit_path, data=duplicate_form).status_code == 409
+    assert admin_web.client.get(detail_path).status_code == 200
+    with admin_web.engine.connect() as connection:
+        assert (
+            connection.scalar(
+                select(MasterAuditEvent.id).where(
+                    MasterAuditEvent.action == "auth.agent.metadata_update"
+                )
+            )
+            is not None
+        )
+        assert (
+            connection.scalar(
+                select(AgentTokenValue.token_value).where(
+                    AgentTokenValue.credential_id == credential_id
+                )
+            )
+            == token
+        )
+        assert (
+            connection.scalar(select(Credential.id).where(Credential.id == credential_id))
+            == credential_id
+        )
+    admin_web.client.cookies.set(_SESSION_COOKIE, "", path="/admin")
+    assert _post(admin_web.client, edit_path, data=form).status_code == 401
+
+
+def test_master_agent_metadata_edit_rechecks_session_generation(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    library = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Generation Home"},
+    )
+    home_id = library.headers["location"].rsplit("/", 1)[-1]
+    issued = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": csrf,
+            "home_library_id": home_id,
+            "agent_name": "Generation Agent",
+            "credential_ttl_seconds": "3600",
+        },
+    )
+    _, caller_id, _ = _metadata_from(issued.text)
+    edit_path = f"/admin/libraries/{home_id}/callers/{caller_id}/metadata"
+    detail = admin_web.client.get(f"/admin/libraries/{home_id}/callers/{caller_id}")
+    version = re.search(r'name="expected_updated_at" value="(\d+)"', detail.text)
+    assert version is not None
+
+    async def rotate_master_before_action(action: Any, *args: Any, **kwargs: Any) -> Any:
+        with immediate_transaction(admin_web.engine) as connection:
+            assert (
+                MasterTokenRepository(connection).rotate(
+                    _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
+                )
+                is not None
+            )
+        return await starlette_run_in_threadpool(action, *args, **kwargs)
+
+    monkeypatch.setattr(admin_router, "run_in_threadpool", rotate_master_before_action)
+    rejected = _post(
+        admin_web.client,
+        edit_path,
+        data={
+            "csrf_token": csrf,
+            "expected_updated_at": version.group(1),
+            "name": "Rejected rename",
+            "description": "",
+        },
+    )
+    assert rejected.status_code == 401
+    with admin_web.engine.connect() as connection:
+        caller = AuthRepository(connection).get_caller(home_id, caller_id)
+        assert caller is not None and caller.name == "Generation Agent"
+        assert (
+            connection.execute(
+                select(MasterAuditEvent.id).where(
+                    MasterAuditEvent.action == "auth.agent.metadata_update"
+                )
+            ).all()
+            == []
+        )
+
+
 def test_master_agent_provision_accepts_many_explicit_library_grants(
     admin_web: AdminWeb,
 ) -> None:

@@ -10,7 +10,7 @@ from patchouli_lib.auth.schemas import (
     SectionAction,
 )
 from patchouli_lib.content.schemas import StrongPageETag
-from patchouli_lib.library.schemas import BoundedText, OpaqueId, ResourceName
+from patchouli_lib.library.schemas import BoundedText, OpaqueId, ResourceName, TimestampMicros
 
 CredentialTtlSeconds = Annotated[
     int,
@@ -84,6 +84,12 @@ class MasterProvisionAgentInput(AdminActionInput):
         if len(pairs) != len(self.grants):
             raise ValueError("Library grants must be distinct.")
         return self
+
+
+class MasterUpdateAgentInput(AdminActionInput):
+    name: ResourceName
+    description: BoundedText
+    expected_updated_at: TimestampMicros
 
 
 class MasterRotateAgentCredentialInput(AdminActionInput):
@@ -195,6 +201,7 @@ __all__ = [
     "RestoreArchiveFormInput",
     "MasterLibraryGrantInput",
     "MasterProvisionAgentInput",
+    "MasterUpdateAgentInput",
     "MasterRotateAgentCredentialInput",
     "MasterSetAgentLibraryGrantsInput",
 ]

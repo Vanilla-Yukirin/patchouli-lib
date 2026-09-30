@@ -27,6 +27,7 @@ from patchouli_lib.admin.contracts import (
     MasterRotateAgentCredentialInput,
     MasterSetAgentLibraryGrantsInput,
     MasterTagFormInput,
+    MasterUpdateAgentInput,
     PageTagFormInput,
     ProvisionAgentInput,
     RecoverOperatorInput,
@@ -66,6 +67,8 @@ from patchouli_lib.admin.passwords import password_matches
 from patchouli_lib.admin.read_model import AdminReadModel
 from patchouli_lib.admin.service import (
     AdminActionService,
+    AgentMetadataVersionConflictError,
+    AgentNameConflictError,
     DeliveredCredential,
     GrantVersionConflictError,
 )
@@ -986,6 +989,79 @@ def create_admin_router(
             )
 
         return protected_page(request, render, allow_self_script=True)
+
+    @router.post("/libraries/{library_id}/callers/{caller_id}/metadata")
+    async def update_agent_metadata(request: Request, library_id: str, caller_id: str) -> Response:
+        locale = locale_for(request)
+        if not _same_origin_submission(request):
+            return forbidden(request)
+        session = current_session(request)
+        if session is None:
+            return html(
+                login_page(locale=locale, message="Sign in again."), locale=locale, status_code=401
+            )
+        if not isinstance(session, MasterAdminSession):
+            return forbidden(request, "A master session is required.")
+        try:
+            values = await _read_form(
+                request,
+                allowed_fields=frozenset(MasterUpdateAgentInput.model_fields) | {"csrf_token"},
+                max_bytes=_MAX_LIBRARY_EDIT_FORM_BYTES,
+            )
+            _require_csrf(values, session)
+            await run_in_threadpool(
+                service.update_agent_as_master,
+                library_id,
+                caller_id,
+                MasterUpdateAgentInput.model_validate(values),
+                master_session=session,
+            )
+        except _FormError as exc:
+            status, message = exc.status_code, exc.safe_message
+        except AgentMetadataVersionConflictError:
+            status, message = (
+                409,
+                "The Agent changed since this form was opened. Reload and try again.",
+            )
+        except AgentNameConflictError:
+            status, message = 409, "An identity with that name already exists in this Library."
+        except (ValidationError, ValueError):
+            status, message = 422, "Check the submitted fields and try again."
+        except AuthenticationError:
+            status, message = 401, "Sign in again."
+        except ResourceNotFoundError:
+            status, message = 404, "The requested local resource was not found."
+        except IntegrityError:
+            status, message = 409, "The action conflicts with current local state."
+        except Exception:
+            status, message = 500, "The action could not be completed."
+        else:
+            return redirect(f"/admin/libraries/{library_id}/callers/{caller_id}")
+        if status == 401:
+            response = html(
+                login_page(locale=locale, message=message), locale=locale, status_code=401
+            )
+            _clear_cookie(response, secure=secure_cookie(request))
+            return response
+        view = read_model.get_caller(library_id, caller_id)
+        if view is None or view.kind != "agent":
+            return html(
+                browser_not_found_page(session.csrf_token, locale=locale),
+                locale=locale,
+                status_code=404,
+            )
+        return html(
+            caller_page(
+                session.csrf_token,
+                view,
+                locale=locale,
+                allow_master_actions=True,
+                message=message,
+            ),
+            locale=locale,
+            status_code=status,
+            allow_self_script=True,
+        )
 
     def grant_editor(
         request: Request,

@@ -215,6 +215,7 @@ class CallerView:
     description: str
     kind: str
     disabled_at: int | None
+    updated_at: int
     credentials: tuple[CredentialItem, ...]
     section_grants: tuple[SectionGrantItem, ...]
 
@@ -651,6 +652,7 @@ class AdminReadModel:
                         Caller.description,
                         Caller.kind,
                         Caller.disabled_at,
+                        Caller.updated_at,
                     ).where(Caller.library_id == library_id, Caller.id == caller_id)
                 )
                 .mappings()
@@ -753,6 +755,7 @@ class AdminReadModel:
                 row["description"],
                 row["kind"],
                 row["disabled_at"],
+                row["updated_at"],
                 tuple(
                     CredentialItem(
                         **credential,

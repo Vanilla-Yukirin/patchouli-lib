@@ -20,10 +20,16 @@ from patchouli_lib.admin.contracts import (
     MasterProvisionAgentInput,
     MasterRotateAgentCredentialInput,
     MasterSetAgentLibraryGrantsInput,
+    MasterUpdateAgentInput,
 )
 from patchouli_lib.admin.master_audit import MasterAuditRepository
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
-from patchouli_lib.admin.service import AdminActionService, GrantVersionConflictError
+from patchouli_lib.admin.service import (
+    AdminActionService,
+    AgentMetadataVersionConflictError,
+    AgentNameConflictError,
+    GrantVersionConflictError,
+)
 from patchouli_lib.admin.session import MasterAdminSession
 from patchouli_lib.auth.library_policy import (
     LegacySectionPolicy,
@@ -40,7 +46,7 @@ from patchouli_lib.auth.models import (
     MasterAuditEvent,
 )
 from patchouli_lib.auth.repository import AuthRepository
-from patchouli_lib.auth.schemas import CallerKind
+from patchouli_lib.auth.schemas import CallerKind, NewCaller
 from patchouli_lib.auth.service import (
     AuthenticationError,
     AuthenticationService,
@@ -113,6 +119,193 @@ def _grant_edit(
         read=read,
         write=write,
     )
+
+
+def _agent_edit(name: str, description: str, version: int = 2_000_000) -> MasterUpdateAgentInput:
+    return MasterUpdateAgentInput(name=name, description=description, expected_updated_at=version)
+
+
+def test_master_agent_metadata_edit_preserves_identity_credentials_and_grants(
+    master_provision_context: tuple[AdminActionService, Engine, MasterAdminSession, str, str],
+) -> None:
+    service, engine, session, home_id, target_id = master_provision_context
+    issued = service.provision_agent_as_master(
+        _request(home_id, (target_id, LibraryAction.WRITE)), master_session=session
+    )
+    with engine.connect() as connection:
+        before_credential = AuthRepository(connection).get_credential(
+            home_id, issued.caller_id, issued.credential_id
+        )
+        assert before_credential is not None
+        token_value = connection.scalar(
+            select(AgentTokenValue.token_value).where(
+                AgentTokenValue.credential_id == issued.credential_id
+            )
+        )
+    assert service.update_agent_as_master(
+        home_id,
+        issued.caller_id,
+        _agent_edit("Renamed Agent", "Updated description"),
+        master_session=session,
+    )
+    with engine.connect() as connection:
+        repository = AuthRepository(connection)
+        caller = repository.get_caller(home_id, issued.caller_id)
+        assert caller is not None
+        assert (caller.id, caller.library_id, caller.name, caller.description) == (
+            issued.caller_id,
+            home_id,
+            "Renamed Agent",
+            "Updated description",
+        )
+        assert caller.policy_version == 1
+        assert caller.updated_at == 2_000_001
+        assert (
+            repository.get_credential(home_id, issued.caller_id, issued.credential_id)
+            == before_credential
+        )
+        assert (
+            connection.scalar(
+                select(AgentTokenValue.token_value).where(
+                    AgentTokenValue.credential_id == issued.credential_id
+                )
+            )
+            == token_value
+            == issued.value
+        )
+        assert repository.get_library_policy(
+            credential_id=issued.credential_id,
+            caller_id=issued.caller_id,
+            home_library_id=home_id,
+            target_library_id=target_id,
+            active_at=2_000_001,
+        ) == LibraryGrantPolicy(read=False, write=True)
+        assert (
+            AuthenticationService(repository, clock=lambda: 2_000_001)
+            .authenticate(issued.value)
+            .caller.name
+            == "Renamed Agent"
+        )
+        edits = (
+            connection.execute(
+                select(
+                    MasterAuditEvent.identity_id,
+                    MasterAuditEvent.session_generation,
+                    MasterAuditEvent.target_type,
+                    MasterAuditEvent.target_id,
+                    MasterAuditEvent.action,
+                ).where(MasterAuditEvent.action == "auth.agent.metadata_update")
+            )
+            .mappings()
+            .all()
+        )
+        assert len(edits) == 1
+        assert edits[0]["identity_id"] == session.identity_id
+        assert edits[0]["session_generation"] == session.session_generation
+        assert edits[0]["target_type"] == "caller"
+        assert edits[0]["target_id"] == issued.caller_id
+        assert "Renamed Agent" not in str(edits[0])
+        assert issued.value not in str(edits[0])
+    assert not service.update_agent_as_master(
+        home_id,
+        issued.caller_id,
+        _agent_edit("Renamed Agent", "Updated description", 2_000_001),
+        master_session=session,
+    )
+    with pytest.raises(AgentMetadataVersionConflictError):
+        service.update_agent_as_master(
+            home_id,
+            issued.caller_id,
+            _agent_edit("Stale name", "Stale description"),
+            master_session=session,
+        )
+    with engine.connect() as connection:
+        assert (
+            connection.scalar(
+                select(func.count())
+                .select_from(MasterAuditEvent)
+                .where(MasterAuditEvent.action == "auth.agent.metadata_update")
+            )
+            == 1
+        )
+    assert service.update_agent_as_master(
+        home_id,
+        issued.caller_id,
+        _agent_edit("Synthetic Device", "Synthetic device description", 2_000_001),
+        master_session=session,
+    )
+    with pytest.raises(AgentMetadataVersionConflictError):
+        service.update_agent_as_master(
+            home_id,
+            issued.caller_id,
+            _agent_edit("ABA stale", "Stale description"),
+            master_session=session,
+        )
+
+
+def test_master_agent_metadata_edit_rejects_duplicate_wrong_home_and_rolls_back_audit(
+    master_provision_context: tuple[AdminActionService, Engine, MasterAdminSession, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, engine, session, home_id, target_id = master_provision_context
+    first = service.provision_agent_as_master(_request(home_id), master_session=session)
+    second = service.provision_agent_as_master(
+        MasterProvisionAgentInput(
+            home_library_id=home_id,
+            agent_name="Another Agent",
+            credential_ttl_seconds=3600,
+        ),
+        master_session=session,
+    )
+    with immediate_transaction(engine) as connection:
+        operator = AuthRepository(connection).add_caller(
+            NewCaller(
+                id="e" * 32,
+                library_id=home_id,
+                kind=CallerKind.OPERATOR,
+                name="Synthetic Operator",
+                created_at=2_000_000,
+                updated_at=2_000_000,
+            )
+        )
+    with pytest.raises(ResourceNotFoundError):
+        service.update_agent_as_master(
+            home_id,
+            operator.id,
+            _agent_edit("Operator rename", ""),
+            master_session=session,
+        )
+    with pytest.raises(ResourceNotFoundError):
+        service.update_agent_as_master(
+            target_id, first.caller_id, _agent_edit("Wrong home", ""), master_session=session
+        )
+    with pytest.raises(AgentNameConflictError):
+        service.update_agent_as_master(
+            home_id, first.caller_id, _agent_edit("Another Agent", ""), master_session=session
+        )
+
+    def reject_audit(self: MasterAuditRepository, **kwargs: Any) -> None:
+        raise RuntimeError("synthetic metadata audit failure")
+
+    monkeypatch.setattr(MasterAuditRepository, "add_success", reject_audit)
+    with pytest.raises(RuntimeError, match="synthetic metadata audit failure"):
+        service.update_agent_as_master(
+            home_id, first.caller_id, _agent_edit("Not committed", ""), master_session=session
+        )
+    with engine.connect() as connection:
+        caller = AuthRepository(connection).get_caller(home_id, first.caller_id)
+        assert caller is not None
+        assert caller.name == "Synthetic Device"
+        assert caller.updated_at == 2_000_000
+        assert AuthRepository(connection).get_caller(home_id, second.caller_id) is not None
+        assert (
+            connection.scalar(
+                select(func.count())
+                .select_from(MasterAuditEvent)
+                .where(MasterAuditEvent.action == "auth.agent.metadata_update")
+            )
+            == 0
+        )
 
 
 def test_master_provision_issues_revealable_token_with_only_explicit_grants(
@@ -255,6 +448,12 @@ def test_master_provision_works_with_current_migrated_schema(
             MasterRotateAgentCredentialInput(credential_ttl_seconds=7200),
             master_session=session,
         )
+        assert AdminActionService(engine, clock=lambda: 2_000_002).update_agent_as_master(
+            home.id,
+            issued.caller_id,
+            _agent_edit("Migrated Renamed Agent", "Migrated description"),
+            master_session=session,
+        )
         with engine.connect() as connection:
             repository = AuthRepository(connection)
             assert repository.has_library_grant_policy(
@@ -263,8 +462,8 @@ def test_master_provision_works_with_current_migrated_schema(
             assert (
                 AuthenticationService(repository, clock=lambda: 2_000_002)
                 .authenticate(replacement.value)
-                .caller.id
-                == issued.caller_id
+                .caller.name
+                == "Migrated Renamed Agent"
             )
             with pytest.raises(AuthenticationError):
                 AuthenticationService(repository, clock=lambda: 2_000_002).authenticate(
