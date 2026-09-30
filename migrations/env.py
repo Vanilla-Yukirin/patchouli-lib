@@ -34,6 +34,16 @@ if request_log_models.RequestLogRecord.metadata is not Base.metadata:
 target_metadata = Base.metadata
 
 
+def _include_object(
+    _object: object, name: str | None, type_: str, reflected: bool, _compare_to: object
+) -> bool:
+    # Search-v2 is a raw-SQL/FTS5 projection owned by its exact migration.
+    # Alembic autogenerate cannot represent the virtual table or its shadows.
+    return not (
+        reflected and type_ == "table" and isinstance(name, str) and name.startswith("search_")
+    )
+
+
 def run_migrations_offline() -> None:
     context.configure(
         url=config.get_main_option("sqlalchemy.url"),
@@ -41,6 +51,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         render_as_batch=True,
+        include_object=_include_object,
     )
 
     with context.begin_transaction():
@@ -56,6 +67,7 @@ def run_migrations_online() -> None:
                 connection=connection,
                 target_metadata=target_metadata,
                 render_as_batch=True,
+                include_object=_include_object,
             )
 
             with context.begin_transaction():

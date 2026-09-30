@@ -8,7 +8,7 @@ from sqlalchemy.engine import make_url
 
 SQLITE_BUSY_TIMEOUT_MS = 5_000
 # Keep this in sync with Alembic's single head. tests/test_database.py verifies it.
-CURRENT_SCHEMA_REVISION = "20260930_0023"
+CURRENT_SCHEMA_REVISION = "20260930_0024"
 
 
 class DatabaseNotReadyError(RuntimeError):
@@ -54,7 +54,18 @@ def immediate_transaction(engine: Engine) -> Iterator[Connection]:
     with engine.connect() as connection:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         try:
+            # Search triggers only mark affected Pages. Flush exactly the Pages
+            # dirtied by this transaction before committing authority, audit,
+            # idempotency and the derived index together. The lazy import keeps
+            # database creation usable before the search schema is migrated.
+            from patchouli_lib.search.index_v2 import (
+                dirty_sequence_at_transaction_start,
+                flush_dirty_since,
+            )
+
+            search_sequence = dirty_sequence_at_transaction_start(connection)
             yield connection
+            flush_dirty_since(connection, search_sequence)
             connection.commit()
         except BaseException:
             connection.rollback()
