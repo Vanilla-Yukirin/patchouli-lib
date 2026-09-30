@@ -17,6 +17,7 @@ from patchouli_lib.admin.master_audit import MasterAuditRepository
 from patchouli_lib.backup import BackupDatabaseError, restore_backup, validate_database
 from patchouli_lib.backup.manifest import (
     AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
+    PAGE_TITLE_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
 )
 from patchouli_lib.content.file_manifest import build_file_manifest
@@ -274,4 +275,7 @@ def test_0022_downgrade_refuses_to_discard_title_history(
     path = _path(complete_engine)
     with pytest.raises(RuntimeError, match="Cannot discard recorded Page title changes"):
         command.downgrade(_config(path, monkeypatch), AUDIT_ACTOR_INDEX_SCHEMA_REVISION)
-    assert validate_database(path).schema_revision == SUPPORTED_SCHEMA_REVISION
+    # 0023 has already been removed; the protected 0022 title state remains.
+    assert validate_database(path, schema_revision=PAGE_TITLE_SCHEMA_REVISION).schema_revision == (
+        PAGE_TITLE_SCHEMA_REVISION
+    )

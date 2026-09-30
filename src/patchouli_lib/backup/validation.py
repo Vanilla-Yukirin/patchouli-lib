@@ -30,6 +30,7 @@ from patchouli_lib.backup.manifest import (
     MASTER_IDENTITY_SCHEMA_REVISION,
     MASTER_LIFECYCLE_SCHEMA_REVISION,
     OCCURRENCE_SCHEMA_REVISION,
+    PAGE_TITLE_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
     TAG_SCHEMA_REVISION,
@@ -67,6 +68,7 @@ from patchouli_lib.identifiers import (
     parse_occurrence_time,
     validate_page_id,
 )
+from patchouli_lib.request_log.repository import RequestLogWrite
 from patchouli_lib.tags.repository import normalize_tag_name
 
 # Hashes cover every non-internal SQLite schema object at each accepted migration
@@ -496,6 +498,18 @@ _EXPECTED_SQL_HASHES_0022: Final = _EXPECTED_SQL_HASHES_0021 | {
         "cecfbe938566ce8d1a802c0229786483aad5f7ad120319869783ef033ce5759f"
     ),
 }
+_EXPECTED_SQL_HASHES_0023: Final = _EXPECTED_SQL_HASHES_0022 | {
+    # Derived from a fresh Alembic 0023 database with _canonical_schema_sql.
+    ("table", "api_request_log"): (
+        "922848bfed6e46c2030da4873f82ed4e9a3f8045e93eee9e96aee7ee25014e4c"
+    ),
+    ("index", "ix_api_request_log_retention"): (
+        "627bb5c0e0c1e3809e28726954e4de105a04a007f0374dda6d2a7202960701fd"
+    ),
+    ("index", "ix_api_request_log_actor_recent"): (
+        "f9d817faaf404a7183b30b6ff702b0f85400b36e6a3829e4606487933099645c"
+    ),
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
     PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
@@ -512,7 +526,8 @@ _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     MASTER_LIFECYCLE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0019,
     LIBRARY_DESCRIPTION_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0020,
     AUDIT_ACTOR_INDEX_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0021,
-    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0022,
+    PAGE_TITLE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0022,
+    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0023,
 }
 _FILE_SET_REVISIONS: Final = frozenset(
     {
@@ -525,6 +540,7 @@ _FILE_SET_REVISIONS: Final = frozenset(
         MASTER_LIFECYCLE_SCHEMA_REVISION,
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
+        PAGE_TITLE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }
 )
@@ -533,6 +549,7 @@ _MASTER_LIFECYCLE_REVISIONS: Final = frozenset(
         MASTER_LIFECYCLE_SCHEMA_REVISION,
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
+        PAGE_TITLE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }
 )
@@ -992,7 +1009,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
         )
 
     first_titles: dict[tuple[str, bytes], str] = {}
-    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+    if schema_revision in {PAGE_TITLE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
         for row in connection.execute(
             "SELECT library_id, page_uid, sequence, old_title, new_title, "
             "old_updated_at, changed_at, at_revision_number, master_audit_event_id "
@@ -1566,7 +1583,10 @@ def _require_master_audit(connection: sqlite3.Connection, schema_revision: str) 
                 or occurred_at != changed_at
             ):
                 raise BackupDatabaseError
-        if schema_revision == SUPPORTED_SCHEMA_REVISION and action == "content.page.title.edit":
+        if (
+            schema_revision in {PAGE_TITLE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}
+            and action == "content.page.title.edit"
+        ):
             linked_events = connection.execute(
                 "SELECT library_id, page_uid, changed_at FROM page_title_events "
                 "WHERE master_audit_event_id = ? LIMIT 2",
@@ -1670,6 +1690,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         MASTER_LIFECYCLE_SCHEMA_REVISION,
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
+        PAGE_TITLE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         invalid_library_policies = _one_integer(
@@ -1692,6 +1713,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         MASTER_LIFECYCLE_SCHEMA_REVISION,
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
+        PAGE_TITLE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_agent_token_values(connection)
@@ -1703,6 +1725,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         MASTER_LIFECYCLE_SCHEMA_REVISION,
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
+        PAGE_TITLE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_master_identity(connection)
@@ -1713,6 +1736,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         MASTER_LIFECYCLE_SCHEMA_REVISION,
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
+        PAGE_TITLE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_actor_home_graph(connection, schema_revision)
@@ -1722,6 +1746,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         MASTER_LIFECYCLE_SCHEMA_REVISION,
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
+        PAGE_TITLE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_master_audit(connection, schema_revision)
@@ -1970,7 +1995,7 @@ def _file_set_valid_current_etags(
         if action not in {"delete", "restore"} or type(changed_at) is not int:
             raise BackupDatabaseError
         events.append((changed_at, "lifecycle", action))
-    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+    if schema_revision in {PAGE_TITLE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
         for (changed_at,) in connection.execute(
             "SELECT changed_at FROM page_title_events "
             "WHERE library_id = ? AND page_uid = ? AND at_revision_number = ?",
@@ -2177,7 +2202,7 @@ def _page_title_at(
     current_title: str,
     at: int,
 ) -> str:
-    if schema_revision != SUPPORTED_SCHEMA_REVISION:
+    if schema_revision not in {PAGE_TITLE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
         return current_title
     row = connection.execute(
         "SELECT old_title FROM page_title_events "
@@ -2498,6 +2523,46 @@ def _require_tag_graph(connection: sqlite3.Connection) -> None:
             raise BackupDatabaseError
 
 
+def _require_request_log_graph(connection: sqlite3.Connection) -> None:
+    """Validate the complete disposable metadata table, including SQLite value types."""
+
+    for row in connection.execute(
+        "SELECT id, request_id, method, route_template, status_code, completion, "
+        "occurred_at, duration_us, caller_id, home_library_id, credential_id "
+        "FROM api_request_log ORDER BY id"
+    ):
+        (
+            row_id,
+            request_id,
+            method,
+            route_template,
+            status_code,
+            completion,
+            occurred_at,
+            duration_us,
+            caller_id,
+            home_library_id,
+            credential_id,
+        ) = row
+        if type(row_id) is not int or row_id < 1:
+            raise BackupDatabaseError
+        try:
+            RequestLogWrite(
+                request_id=request_id,
+                method=method,
+                route_template=route_template,
+                status_code=status_code,
+                completion=completion,
+                occurred_at=occurred_at,
+                duration_us=duration_us,
+                caller_id=caller_id,
+                home_library_id=home_library_id,
+                credential_id=credential_id,
+            )
+        except (TypeError, ValueError):
+            raise BackupDatabaseError from None
+
+
 def _validate_connection(
     connection: sqlite3.Connection, schema_revision: str
 ) -> DatabaseValidationReport:
@@ -2517,6 +2582,7 @@ def _validate_connection(
     if schema_revision in {
         LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
+        PAGE_TITLE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_library_descriptions(connection)
@@ -2530,6 +2596,8 @@ def _validate_connection(
         _require_tag_graph(connection)
     _require_auth_graph(connection, schema_revision)
     _require_idempotency_graph(connection, schema_revision)
+    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+        _require_request_log_graph(connection)
     return DatabaseValidationReport(
         schema_revision=schema_revision,
         sqlite_version=sqlite_version_row[0],
