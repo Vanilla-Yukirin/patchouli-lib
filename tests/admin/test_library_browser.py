@@ -7,6 +7,8 @@ from pathlib import Path
 from re import search
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, event, insert, update
 
@@ -24,11 +26,17 @@ from patchouli_lib.content.models import (
     RevisionFileSet,
 )
 from patchouli_lib.content.repository import ContentRepository
-from patchouli_lib.content.schemas import MarkdownContent, NewPage, NewPageIdentifier, NewRevision
+from patchouli_lib.content.schemas import (
+    MarkdownContent,
+    NewPage,
+    NewPageIdentifier,
+    NewRevision,
+    PageOccurrenceCorrectionCommand,
+)
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.identifiers import PAGE_ID_SCHEME, generate_page_id, page_id_registry_digest
 from patchouli_lib.identifiers.page_ids import parse_occurrence_time
-from patchouli_lib.library.models import Section
+from patchouli_lib.library.models import Book, Section
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import LibraryStructureSeed, NewLibrary
 from patchouli_lib.library.service import LibrarySeedService
@@ -51,6 +59,27 @@ def browser(tmp_path: Path) -> Iterator[tuple[TestClient, Engine]]:
     )
     app = create_app(settings)
     Caller.metadata.create_all(app.state.engine)
+    with TestClient(app, base_url=_ORIGIN, follow_redirects=False) as client:
+        yield client, app.state.engine
+
+
+@pytest.fixture
+def guarded_browser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[tuple[TestClient, Engine]]:
+    database_url = f"sqlite:///{(tmp_path / 'guarded-browse.db').as_posix()}"
+    monkeypatch.setenv("PATCHOULI_DATABASE_URL", database_url)
+    monkeypatch.setenv("PATCHOULI_ENVIRONMENT", "test")
+    command.upgrade(Config(str(Path(__file__).resolve().parents[2] / "alembic.ini")), "head")
+    settings = Settings.model_validate(
+        {
+            "environment": "test",
+            "database_url": database_url,
+            "admin_password_hash": _PASSWORD_HASH,
+            "admin_session_signing_secret": "s" * 32,
+        }
+    )
+    app = create_app(settings)
     with TestClient(app, base_url=_ORIGIN, follow_redirects=False) as client:
         yield client, app.state.engine
 
@@ -98,11 +127,13 @@ def _insert_page(
     *,
     title: str = "Synthetic archive",
     markdown: bytes = b"# Synthetic archive\n",
+    marker: int | None = None,
+    sealed: bool = False,
 ) -> str:
     occurrence = parse_occurrence_time("2026-08-13T10:00:00.123456Z")
     identifier = generate_page_id(occurrence, title)
-    page_uid = b"1" * 16
-    revision_id = "rev_" + "2" * 32
+    page_uid = b"1" * 16 if marker is None else marker.to_bytes(16, "big")
+    revision_id = "rev_" + "2" * 32 if marker is None else f"rev_{marker:032x}"
     with immediate_transaction(engine) as connection:
         repository = ContentRepository(connection)
         repository.add_page(
@@ -135,18 +166,19 @@ def _insert_page(
                 **MarkdownContent.from_bytes(markdown).model_dump(),
             )
         )
-        connection.execute(
-            insert(RevisionFile).values(
-                library_id=library_id,
-                page_uid=page_uid,
-                revision_id=revision_id,
-                revision_number=1,
-                filename="content.md",
-                content_bytes=markdown,
-                size_bytes=len(markdown),
-                content_sha256=sha256(markdown).digest(),
+        if not sealed:
+            connection.execute(
+                insert(RevisionFile).values(
+                    library_id=library_id,
+                    page_uid=page_uid,
+                    revision_id=revision_id,
+                    revision_number=1,
+                    filename="content.md",
+                    content_bytes=markdown,
+                    size_bytes=len(markdown),
+                    content_sha256=sha256(markdown).digest(),
+                )
             )
-        )
         repository.add_identifier(
             NewPageIdentifier(
                 library_id=library_id,
@@ -159,6 +191,42 @@ def _insert_page(
             )
         )
     return identifier.value
+
+
+def _correct_book_page_time(
+    engine: Engine, library_id: str, page_id: str, new_time: int, actor_id: str
+) -> None:
+    with immediate_transaction(engine) as connection:
+        repository = ContentRepository(connection)
+        page = repository.get_page(library_id, page_id)
+        assert page is not None
+        repository.correct_occurrence(
+            page,
+            PageOccurrenceCorrectionCommand(
+                library_id=library_id,
+                page_uid=page.page_uid,
+                old_occurred_at=page.occurred_at,
+                new_occurred_at=new_time,
+                actor_caller_id=actor_id,
+                actor_home_library_id=library_id,
+                corrected_at=3_000_000,
+            ),
+        )
+
+
+def _delete_book_page(engine: Engine, library_id: str, page_id: str, actor_id: str) -> None:
+    with immediate_transaction(engine) as connection:
+        repository = ContentRepository(connection)
+        page = repository.get_page(library_id, page_id)
+        assert page is not None
+        repository.transition_page_lifecycle(
+            page,
+            action="delete",
+            actor_caller_id=actor_id,
+            actor_home_library_id=library_id,
+            request_id=f"req_{page.page_uid.hex()}",
+            changed_at=4_000_000,
+        )
 
 
 def _append_file_set_revision(
@@ -271,6 +339,21 @@ def _seed_activity_actor(engine: Engine, library_id: str, marker: str) -> tuple[
             },
         )
     return caller_id, credential_id
+
+
+def _seed_book_page_actor(engine: Engine, library_id: str, section_id: str) -> str:
+    actor_id, _ = _seed_activity_actor(engine, library_id, "a")
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            insert(SectionGrant).values(
+                library_id=library_id,
+                caller_id=actor_id,
+                section_id=section_id,
+                action="archive:write",
+                created_at=1,
+            )
+        )
+    return actor_id
 
 
 def test_identity_browser_is_protected_and_shows_metadata_only(
@@ -682,6 +765,159 @@ def test_browser_reads_scoped_hierarchy_and_escapes_markdown(
         assert "Synthetic preview" not in response.text
         assert response.headers["cache-control"] == "no-store, max-age=0"
     assert client.get(f"/admin/libraries/{second_library}").status_code == 200
+
+
+def test_book_page_list_uses_bounded_keyset_without_crossing_scope(
+    guarded_browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = guarded_browser
+    library, section, book = _seed_structure(engine)
+    other_library, other_section, other_book = _seed_structure(engine, prefix="4", label="Other")
+    sibling_book = "e" * 32
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            insert(Book).values(
+                id=sibling_book,
+                library_id=library,
+                section_id=section,
+                name="Sibling Book",
+                summary="",
+                created_at=1_000_000,
+                updated_at=1_000_000,
+            )
+        )
+    page_ids = [
+        _insert_page(
+            engine, library, section, book, title=f"Paged {index:02d}", marker=index, sealed=True
+        )
+        for index in range(1, 26)
+    ]
+    sibling_id = _insert_page(
+        engine, library, section, sibling_book, title="Sibling", marker=26, sealed=True
+    )
+    foreign_id = _insert_page(
+        engine, other_library, other_section, other_book, title="Foreign", sealed=True
+    )
+    deleted_id = _insert_page(
+        engine, library, section, book, title="Deleted", marker=27, sealed=True
+    )
+    occurrence = parse_occurrence_time("2026-08-13T10:00:00.123456Z").utc_microseconds
+    actor_id = _seed_book_page_actor(engine, library, section)
+    _delete_book_page(engine, library, deleted_id, actor_id)
+    for page_id in page_ids[22:]:
+        _correct_book_page_time(engine, library, page_id, occurrence - 1_000_000, actor_id)
+    _, _, book_path, _ = _paths(library, section, book, page_ids[0])
+    _login(client)
+    for out_of_scope_id in (sibling_id, foreign_id, deleted_id):
+        assert (
+            client.get(book_path, params={"before": f"{occurrence}:{out_of_scope_id}"}).status_code
+            == 404
+        )
+
+    page_selects: list[str] = []
+
+    def capture_page_select(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if "SELECT pages.page_id" in statement:
+            page_selects.append(statement)
+
+    event.listen(engine, "before_cursor_execute", capture_page_select)
+    try:
+        first = client.get(f"{book_path}?lang=en")
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_page_select)
+    assert first.status_code == 200
+    assert len(page_selects) == 1
+    assert " LIMIT " in page_selects[0].upper()
+    expected = sorted(page_ids)
+    for page_id in expected[:20]:
+        assert f'href="{book_path}/pages/{page_id}"' in first.text
+    for page_id in (*expected[20:], sibling_id, foreign_id, deleted_id):
+        assert f'href="{book_path}/pages/{page_id}"' not in first.text
+    next_link = search(rf'href="({book_path}\?before=[^"]+)">Next page</a>', first.text)
+    assert next_link is not None
+    assert "%3A" in next_link.group(1)
+
+    second = client.get(next_link.group(1))
+    assert second.status_code == 200
+    assert "Next page" not in second.text
+    for page_id in expected[20:]:
+        assert f'href="{book_path}/pages/{page_id}"' in second.text
+    for page_id in (*expected[:20], sibling_id, foreign_id, deleted_id):
+        assert f'href="{book_path}/pages/{page_id}"' not in second.text
+    language_link = search(r'href="([^"]+)" hreflang="zh-CN"', second.text)
+    assert language_link is not None
+    assert f"{book_path}?before=" in language_link.group(1)
+    assert "&amp;lang=zh-CN" in language_link.group(1)
+    chinese = client.get(unescape(language_link.group(1)))
+    assert chinese.status_code == 200
+    assert "页面" in chinese.text
+    assert f'href="{book_path}/pages/{expected[-1]}"' in chinese.text
+    assert f'href="{book_path}/pages/{expected[0]}"' not in chinese.text
+
+    # The existing unpaged read-model API remains available to its other callers.
+    unpaged = AdminReadModel(engine).get_book(library, section, book)
+    assert unpaged is not None
+    assert [item.id for item in unpaged.pages] == expected
+
+
+def test_book_page_cursor_rejects_bad_or_stale_anchors(
+    guarded_browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = guarded_browser
+    library, section, book = _seed_structure(engine)
+    other_library, other_section, other_book = _seed_structure(engine, prefix="4", label="Other")
+    page_ids = [
+        _insert_page(
+            engine, library, section, book, title=f"Cursor {index:02d}", marker=index, sealed=True
+        )
+        for index in range(1, 22)
+    ]
+    foreign_id = _insert_page(engine, other_library, other_section, other_book, sealed=True)
+    actor_id = _seed_book_page_actor(engine, library, section)
+    _, _, book_path, _ = _paths(library, section, book, page_ids[0])
+    assert client.get(book_path, params={"before": "bad"}).status_code == 303
+    _login(client)
+    first = client.get(book_path)
+    next_link = search(rf'href="({book_path}\?before=[^"]+)">Next page</a>', first.text)
+    assert next_link is not None
+    assert client.get(next_link.group(1)).status_code == 200
+    for cursor in (
+        "",
+        "bad",
+        "01:" + page_ids[0],
+        "-0:" + page_ids[0],
+        "1:" + "A" * 80,
+        "1:" + page_ids[0] + ":extra",
+        "99999999999999999999:" + page_ids[0],
+        f"{parse_occurrence_time('2026-08-13T10:00:00.123456Z').utc_microseconds}:" + foreign_id,
+    ):
+        assert client.get(book_path, params={"before": cursor}).status_code == 404
+    assert client.get(f"{next_link.group(1)}&before=bad").status_code == 404
+    assert client.get(book_path, params={"before": f"0:{foreign_id}"}).status_code == 404
+
+    # A cursor tied to a deleted or re-timed anchor cannot silently skip entries.
+    anchor_id = sorted(page_ids)[19]
+    _correct_book_page_time(engine, library, anchor_id, -1_000_000, actor_id)
+    assert client.get(next_link.group(1)).status_code == 404
+    for page_id in page_ids:
+        if page_id != anchor_id:
+            _correct_book_page_time(engine, library, page_id, -1_000_000, actor_id)
+    negative_first = client.get(book_path)
+    negative_link = search(
+        rf'href="({book_path}\?before=[^"]+)">Next page</a>', negative_first.text
+    )
+    assert negative_link is not None
+    assert "-1000000%3A" in negative_link.group(1)
+    assert client.get(negative_link.group(1)).status_code == 200
+    _delete_book_page(engine, library, anchor_id, actor_id)
+    assert client.get(negative_link.group(1)).status_code == 404
 
 
 def test_browser_hides_deleted_pages_and_translates_labels(

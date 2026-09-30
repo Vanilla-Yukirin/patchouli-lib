@@ -1970,6 +1970,7 @@ def book_page(
     locale: AdminLocale = "en",
     master_mode: bool = False,
     message: str | None = None,
+    before_cursor: str | None = None,
 ) -> str:
     library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
     section_path = f"{library_path}/sections/{escape(view.section.id, quote=True)}"
@@ -1986,6 +1987,11 @@ def book_page(
         if view.pages
         else f'<p class="card">{localize(locale, "No pages yet.")}</p>'
     )
+    if view.next_cursor is not None:
+        next_path = f"{base}?before={quote(view.next_cursor, safe='')}"
+        body += (
+            f'<p><a href="{escape(next_path, quote=True)}">{localize(locale, "Next page")}</a></p>'
+        )
     if master_mode:
         body += (
             f'<section class="card"><h2>{localize(locale, "Edit Book")}</h2>'
@@ -2007,7 +2013,7 @@ def book_page(
         csrf_token,
         locale,
         view.book.name,
-        base,
+        base if before_cursor is None else f"{base}?before={quote(before_cursor, safe='')}",
         body,
         crumbs=(
             (localize(locale, "Libraries"), "/admin/libraries"),

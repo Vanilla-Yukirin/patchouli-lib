@@ -24,14 +24,22 @@ from patchouli_lib.auth.models import (
     MasterAuditEvent,
     SectionGrant,
 )
-from patchouli_lib.content.models import Page, Revision, RevisionFile
+from patchouli_lib.content.models import (
+    MAX_OCCURRENCE_MICROSECONDS,
+    MIN_OCCURRENCE_MICROSECONDS,
+    Page,
+    Revision,
+    RevisionFile,
+)
 from patchouli_lib.content.service import page_current_etag
+from patchouli_lib.identifiers.page_ids import InvalidPageIdError, validate_page_id
 from patchouli_lib.library.models import Book, Library, Section
 from patchouli_lib.tags.models import PageTag, Tag
 
 _MAX_FILE_SET_PREVIEW_BYTES = 64 * 1024
 _PAGE_HISTORY_SIZE = 20
 _ACTIVITY_PAGE_SIZE = 20
+_BOOK_PAGE_SIZE = 20
 
 
 def _lower_hex_id(value: str) -> bool:
@@ -73,6 +81,28 @@ def _activity_before(
 
 def _activity_cursor(entry: tuple[int, str, str, ContentActivityItem]) -> str:
     return f"{entry[0]}:{entry[1]}:{entry[2]}"
+
+
+def _parse_book_cursor(value: str | None) -> tuple[int, str] | None:
+    if value is None:
+        return None
+    if len(value) > 101:
+        raise ValueError("Invalid Book page cursor.")
+    timestamp, separator, page_id = value.partition(":")
+    digits = timestamp.removeprefix("-")
+    if separator != ":" or not digits.isascii() or not digits.isdecimal():
+        raise ValueError("Invalid Book page cursor.")
+    occurred_at = int(timestamp)
+    if (
+        str(occurred_at) != timestamp
+        or not MIN_OCCURRENCE_MICROSECONDS <= occurred_at <= MAX_OCCURRENCE_MICROSECONDS
+    ):
+        raise ValueError("Invalid Book page cursor.")
+    try:
+        validate_page_id(page_id)
+    except InvalidPageIdError as exc:
+        raise ValueError("Invalid Book page cursor.") from exc
+    return occurred_at, page_id
 
 
 @dataclass(frozen=True)
@@ -197,6 +227,7 @@ class BookView:
     section: SectionItem
     book: BookItem
     pages: tuple[PageItem, ...]
+    next_cursor: str | None = None
 
 
 @dataclass(frozen=True)
@@ -984,6 +1015,64 @@ class AdminReadModel:
             ).mappings()
             pages = tuple(_page_item(row) for row in rows)
             return BookView(library, section, book, pages)
+
+    def get_book_page(
+        self, library_id: str, section_id: str, book_id: str, before: str | None = None
+    ) -> BookView | None:
+        cursor = _parse_book_cursor(before)
+        with self._engine.connect() as connection:
+            library = _get_library(connection, library_id)
+            section = _get_section(connection, library_id, section_id)
+            book = _get_book(connection, library_id, section_id, book_id)
+            if library is None or section is None or book is None:
+                return None
+            scope = (
+                Page.library_id == library_id,
+                Page.section_id == section_id,
+                Page.book_id == book_id,
+                Page.deleted_at.is_(None),
+            )
+            if cursor is not None:
+                anchor = connection.execute(
+                    select(Page.page_uid)
+                    .where(*scope, Page.occurred_at == cursor[0], Page.page_id == cursor[1])
+                    .limit(1)
+                ).first()
+                if anchor is None:
+                    return None
+            statement = select(
+                Page.page_id,
+                Page.title,
+                Page.page_type,
+                Page.occurred_at,
+                Page.current_revision_number,
+                Page.updated_at,
+            ).where(*scope)
+            if cursor is not None:
+                statement = statement.where(
+                    or_(
+                        Page.occurred_at < cursor[0],
+                        and_(Page.occurred_at == cursor[0], Page.page_id > cursor[1]),
+                    )
+                )
+            rows = (
+                connection.execute(
+                    statement.order_by(Page.occurred_at.desc(), Page.page_id).limit(
+                        _BOOK_PAGE_SIZE + 1
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            visible = rows[:_BOOK_PAGE_SIZE]
+            next_cursor = (
+                f"{visible[-1]['occurred_at']}:{visible[-1]['page_id']}"
+                if len(rows) > _BOOK_PAGE_SIZE
+                else None
+            )
+            return BookView(
+                library, section, book, tuple(_page_item(row) for row in visible), next_cursor
+            )
 
     def get_page(
         self,

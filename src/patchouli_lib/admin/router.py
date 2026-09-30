@@ -1631,7 +1631,14 @@ def create_admin_router(
     @router.get("/libraries/{library_id}/sections/{section_id}/books/{book_id}")
     def book_detail(request: Request, library_id: str, section_id: str, book_id: str) -> Response:
         def render(csrf: str, locale: AdminLocale) -> str | None:
-            view = read_model.get_book(library_id, section_id, book_id)
+            try:
+                cursors = request.query_params.getlist("before")
+                if len(cursors) > 1:
+                    return None
+                before = cursors[0] if cursors else None
+                view = read_model.get_book_page(library_id, section_id, book_id, before)
+            except ValueError:
+                return None
             return (
                 None
                 if view is None
@@ -1640,6 +1647,7 @@ def create_admin_router(
                     view,
                     locale=locale,
                     master_mode=isinstance(current_session(request), MasterAdminSession),
+                    before_cursor=before,
                 )
             )
 
@@ -1694,7 +1702,7 @@ def create_admin_router(
             status, message = 500, "The action could not be completed."
         else:
             return redirect(f"/admin/libraries/{library_id}/sections/{section_id}/books/{book_id}")
-        view = read_model.get_book(library_id, section_id, book_id)
+        view = read_model.get_book_page(library_id, section_id, book_id)
         if status == 401:
             response = html(
                 login_page(locale=locale, message=message), locale=locale, status_code=status
