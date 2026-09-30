@@ -22,6 +22,7 @@ from patchouli_lib.backup.manifest import (
     FILE_SET_SCHEMA_REVISION,
     INTERMEDIATE_SCHEMA_REVISION,
     LEGACY_SCHEMA_REVISION,
+    LIBRARY_DESCRIPTION_SCHEMA_REVISION,
     LIBRARY_POLICY_SCHEMA_REVISION,
     LIFECYCLE_SCHEMA_REVISION,
     MASTER_AUDIT_SCHEMA_REVISION,
@@ -467,6 +468,12 @@ _EXPECTED_SQL_HASHES_0020: Final = _EXPECTED_SQL_HASHES_0019 | {
     # Derived from a fresh Alembic 0020 database with _canonical_schema_sql.
     ("table", "libraries"): ("66347c3beb95842c572615086d35e0b22bc4bdd410d4a01d967bc7e426dc615d"),
 }
+_EXPECTED_SQL_HASHES_0021: Final = _EXPECTED_SQL_HASHES_0020 | {
+    # Derived from a fresh Alembic 0021 database with _canonical_schema_sql.
+    ("index", "ix_auth_audit_events_actor_recent"): (
+        "2be933d76691f5d3cb03d618725a052dc0a87f34c5110cd6674a2c69bb0ee73d"
+    ),
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
     PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
@@ -481,7 +488,8 @@ _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     ACTOR_HOME_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0017,
     MASTER_AUDIT_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0018,
     MASTER_LIFECYCLE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0019,
-    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0020,
+    LIBRARY_DESCRIPTION_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0020,
+    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0021,
 }
 _FILE_SET_REVISIONS: Final = frozenset(
     {
@@ -492,11 +500,16 @@ _FILE_SET_REVISIONS: Final = frozenset(
         ACTOR_HOME_SCHEMA_REVISION,
         MASTER_AUDIT_SCHEMA_REVISION,
         MASTER_LIFECYCLE_SCHEMA_REVISION,
+        LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }
 )
 _MASTER_LIFECYCLE_REVISIONS: Final = frozenset(
-    {MASTER_LIFECYCLE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}
+    {
+        MASTER_LIFECYCLE_SCHEMA_REVISION,
+        LIBRARY_DESCRIPTION_SCHEMA_REVISION,
+        SUPPORTED_SCHEMA_REVISION,
+    }
 )
 _LIFECYCLE_REVISIONS: Final = _FILE_SET_REVISIONS | {LIFECYCLE_SCHEMA_REVISION}
 _OCCURRENCE_REVISIONS: Final = _LIFECYCLE_REVISIONS | {OCCURRENCE_SCHEMA_REVISION}
@@ -1545,6 +1558,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         ACTOR_HOME_SCHEMA_REVISION,
         MASTER_AUDIT_SCHEMA_REVISION,
         MASTER_LIFECYCLE_SCHEMA_REVISION,
+        LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         invalid_library_policies = _one_integer(
@@ -1565,6 +1579,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         ACTOR_HOME_SCHEMA_REVISION,
         MASTER_AUDIT_SCHEMA_REVISION,
         MASTER_LIFECYCLE_SCHEMA_REVISION,
+        LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_agent_token_values(connection)
@@ -1574,6 +1589,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         ACTOR_HOME_SCHEMA_REVISION,
         MASTER_AUDIT_SCHEMA_REVISION,
         MASTER_LIFECYCLE_SCHEMA_REVISION,
+        LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_master_identity(connection)
@@ -1582,6 +1598,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         ACTOR_HOME_SCHEMA_REVISION,
         MASTER_AUDIT_SCHEMA_REVISION,
         MASTER_LIFECYCLE_SCHEMA_REVISION,
+        LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_actor_home_graph(connection, schema_revision)
@@ -1589,6 +1606,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
     if schema_revision in {
         MASTER_AUDIT_SCHEMA_REVISION,
         MASTER_LIFECYCLE_SCHEMA_REVISION,
+        LIBRARY_DESCRIPTION_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_master_audit(connection, schema_revision)
@@ -2340,7 +2358,7 @@ def _validate_connection(
     ):
         raise BackupDatabaseError
     _require_page_graph(connection, schema_revision)
-    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+    if schema_revision in {LIBRARY_DESCRIPTION_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
         _require_library_descriptions(connection)
     if schema_revision in _LIFECYCLE_REVISIONS:
         _require_lifecycle_graph(connection, schema_revision)

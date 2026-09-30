@@ -362,6 +362,15 @@ class AuditEvent(Base):
             name="ck_auth_audit_events_metadata",
         ),
         Index("ix_auth_audit_events_library_request_id", "library_id", "request_id"),
+        Index(
+            "ix_auth_audit_events_actor_recent",
+            "actor_home_library_id",
+            "actor_caller_id",
+            "outcome",
+            # SQLite can scan both trailing keys backward for DESC ordering.
+            "occurred_at",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)

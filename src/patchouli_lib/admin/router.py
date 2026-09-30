@@ -985,6 +985,7 @@ def create_admin_router(
                     view,
                     locale=locale,
                     allow_master_actions=isinstance(current_session(request), MasterAdminSession),
+                    activities=read_model.recent_content_activity(actor=(view.library_id, view.id)),
                 )
             )
 
@@ -1056,6 +1057,7 @@ def create_admin_router(
                 view,
                 locale=locale,
                 allow_master_actions=True,
+                activities=read_model.recent_content_activity(actor=(view.library_id, view.id)),
                 message=message,
             ),
             locale=locale,

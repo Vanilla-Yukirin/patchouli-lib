@@ -1385,6 +1385,140 @@ def test_home_shows_cross_library_file_set_activity_with_correct_links(
     assert client.get(f"{page_path}/revisions/2").status_code == 200
 
 
+def test_identity_detail_shows_only_its_content_activity_before_global_limit(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    home_library, _, _ = _seed_structure(engine)
+    target_library, section, book = _seed_structure(engine, prefix="4", label="Target")
+    actor_id, credential_id = _seed_activity_actor(engine, home_library, "a")
+    other_id, other_credential_id = _seed_activity_actor(engine, home_library, "c")
+    page_id = _insert_page(
+        engine,
+        target_library,
+        section,
+        book,
+        title="Target <script>alert(1)</script>",
+        markdown=b"# Synthetic private body marker\n",
+    )
+    other_tag_id = "9" * 32
+    master_tag_id = "8" * 32
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            insert(Tag),
+            [
+                {
+                    "library_id": target_library,
+                    "id": other_tag_id,
+                    "display_name": "Other private tag",
+                    "match_key": "other private tag",
+                    "created_at": 1,
+                },
+                {
+                    "library_id": target_library,
+                    "id": master_tag_id,
+                    "display_name": "Master private tag",
+                    "match_key": "master private tag",
+                    "created_at": 1,
+                },
+            ],
+        )
+        connection.execute(
+            insert(AuditEvent),
+            [
+                {
+                    "id": "e" * 32,
+                    "library_id": target_library,
+                    "actor_home_library_id": home_library,
+                    "actor_caller_id": actor_id,
+                    "actor_credential_id": credential_id,
+                    "action": "content.archive.create",
+                    "resource_type": "page",
+                    "resource_id": page_id,
+                    "outcome": "succeeded",
+                    "request_id": "synthetic-private-request-marker",
+                    "occurred_at": 2_000_000,
+                },
+                {
+                    "id": "d" * 32,
+                    "library_id": target_library,
+                    "actor_home_library_id": home_library,
+                    "actor_caller_id": actor_id,
+                    "actor_credential_id": credential_id,
+                    "action": "content.archive.create",
+                    "resource_type": "page",
+                    "resource_id": page_id,
+                    "outcome": "failed",
+                    "request_id": "synthetic-failed-request-marker",
+                    "occurred_at": 5_000_000,
+                },
+                *(
+                    {
+                        "id": f"{index:032x}",
+                        "library_id": target_library,
+                        "actor_home_library_id": home_library,
+                        "actor_caller_id": other_id,
+                        "actor_credential_id": other_credential_id,
+                        "action": "tag.create",
+                        "resource_type": "tag",
+                        "resource_id": other_tag_id,
+                        "outcome": "succeeded",
+                        "request_id": "synthetic-other-request",
+                        "occurred_at": 3_000_000 + index,
+                    }
+                    for index in range(1, 61)
+                ),
+            ],
+        )
+        connection.execute(
+            insert(MasterAuditEvent),
+            {
+                "id": "f" * 32,
+                "identity_id": "b" * 32,
+                "session_generation": 1,
+                "session_fingerprint": b"s" * 32,
+                "action": "tag.create",
+                "target_type": "tag",
+                "target_id": f"{target_library}:{master_tag_id}",
+                "occurred_at": 4_000_000,
+            },
+        )
+
+    model = AdminReadModel(engine)
+    assert len(model.recent_content_activity()) == 50
+    assert all(item.actor_id != actor_id for item in model.recent_content_activity())
+    selected = model.recent_content_activity(actor=(home_library, actor_id))
+    assert len(selected) == 1
+    assert selected[0].action == "content.archive.create"
+    assert selected[0].library_id == target_library
+    assert selected[0].actor_home_library_id == home_library
+    assert model.recent_content_activity(actor=(target_library, actor_id)) == ()
+
+    detail_path = f"/admin/libraries/{home_library}/callers/{actor_id}"
+    assert client.get(detail_path).status_code == 303
+    _login(client)
+    assert client.get(f"/admin/libraries/{target_library}/callers/{actor_id}").status_code == 404
+    detail = client.get(f"{detail_path}?lang=zh-CN")
+    assert detail.status_code == 200
+    assert "此身份的内容近况" in detail.text
+    assert detail.text.count("创建了页面") == 1
+    assert f'href="{detail_path}"' in detail.text
+    page_path = (
+        f"/admin/libraries/{target_library}/sections/{section}"
+        f"/books/{book}/pages/{page_id}/revisions/1"
+    )
+    assert f'href="{page_path}"' in detail.text
+    assert "Target &lt;script&gt;alert(1)&lt;/script&gt;" in detail.text
+    assert "Target <script>alert(1)</script>" not in detail.text
+    assert "Other private tag" not in detail.text
+    assert "Master private tag" not in detail.text
+    assert "Actor c" not in detail.text
+    assert "Synthetic private body marker" not in detail.text
+    assert "synthetic-private-request-marker" not in detail.text
+    assert "synthetic-failed-request-marker" not in detail.text
+    assert detail.headers["cache-control"] == "no-store, max-age=0"
+
+
 def test_activity_merges_master_and_legacy_events_before_limit(
     browser: tuple[TestClient, Engine],
 ) -> None:

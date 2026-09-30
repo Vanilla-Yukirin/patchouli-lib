@@ -21,6 +21,7 @@ from patchouli_lib.backup import (
     verify_backup_bundle,
 )
 from patchouli_lib.backup.manifest import (
+    LIBRARY_DESCRIPTION_SCHEMA_REVISION,
     MASTER_LIFECYCLE_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
     BackupManifestV1,
@@ -140,7 +141,14 @@ def test_new_description_survives_backup_and_prevents_lossy_downgrade(
 
     with pytest.raises(RuntimeError, match="would be lost"):
         command.downgrade(config, MASTER_LIFECYCLE_SCHEMA_REVISION)
-    assert validate_database(source).schema_revision == SUPPORTED_SCHEMA_REVISION
+    # SQLite DDL is non-transactional: the safe 0021 index drop succeeds, but
+    # the following 0020 Library-description drop is rejected as lossy.
+    assert (
+        validate_database(
+            source, schema_revision=LIBRARY_DESCRIPTION_SCHEMA_REVISION
+        ).schema_revision
+        == LIBRARY_DESCRIPTION_SCHEMA_REVISION
+    )
 
 
 def test_empty_description_can_downgrade_without_other_schema_drift(

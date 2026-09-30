@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from hashlib import sha256
@@ -364,53 +365,67 @@ class AdminReadModel:
             )
             return tuple(CallerItem(**row) for row in rows)
 
-    def recent_content_activity(self, *, limit: int = 50) -> tuple[ContentActivityItem, ...]:
-        """Show successful content changes only; this is not an API request log."""
+    def recent_content_activity(
+        self, *, limit: int = 50, actor: tuple[str, str] | None = None
+    ) -> tuple[ContentActivityItem, ...]:
+        """Show successful content changes only; this is not an API request log.
+
+        An actor is identified by its home Library and Caller ID, not by the
+        target Library where a cross-Library write happened.
+        """
 
         if not 1 <= limit <= 50:
             raise ValueError("Activity limit must be between 1 and 50.")
         with self._engine.connect() as connection:
             # Keep the two audit streams and their linked content in one snapshot.
             connection.exec_driver_sql("BEGIN")
+            agent_events = (
+                select(
+                    AuditEvent.id,
+                    AuditEvent.library_id,
+                    AuditEvent.actor_home_library_id,
+                    AuditEvent.actor_caller_id,
+                    Caller.name.label("actor_name"),
+                    AuditEvent.action,
+                    AuditEvent.resource_type,
+                    AuditEvent.resource_id,
+                    AuditEvent.occurred_at,
+                )
+                .join(
+                    Caller,
+                    and_(
+                        Caller.library_id == AuditEvent.actor_home_library_id,
+                        Caller.id == AuditEvent.actor_caller_id,
+                    ),
+                )
+                .where(
+                    AuditEvent.outcome == "succeeded",
+                    AuditEvent.action.in_(
+                        (
+                            "content.archive.create",
+                            "content.archive.revise",
+                            "content.page.file_set.create",
+                            "content.page.file_set.revise",
+                            "content.archive.correct_occurrence",
+                            "content.archive.delete",
+                            "content.archive.restore",
+                            "tag.create",
+                            "tag.page.attach",
+                            "tag.page.detach",
+                        )
+                    ),
+                )
+            )
+            if actor is not None:
+                agent_events = agent_events.where(
+                    AuditEvent.actor_home_library_id == actor[0],
+                    AuditEvent.actor_caller_id == actor[1],
+                )
             events = (
                 connection.execute(
-                    select(
-                        AuditEvent.id,
-                        AuditEvent.library_id,
-                        AuditEvent.actor_home_library_id,
-                        AuditEvent.actor_caller_id,
-                        Caller.name.label("actor_name"),
-                        AuditEvent.action,
-                        AuditEvent.resource_type,
-                        AuditEvent.resource_id,
-                        AuditEvent.occurred_at,
-                    )
-                    .join(
-                        Caller,
-                        and_(
-                            Caller.library_id == AuditEvent.actor_home_library_id,
-                            Caller.id == AuditEvent.actor_caller_id,
-                        ),
-                    )
-                    .where(
-                        AuditEvent.outcome == "succeeded",
-                        AuditEvent.action.in_(
-                            (
-                                "content.archive.create",
-                                "content.archive.revise",
-                                "content.page.file_set.create",
-                                "content.page.file_set.revise",
-                                "content.archive.correct_occurrence",
-                                "content.archive.delete",
-                                "content.archive.restore",
-                                "tag.create",
-                                "tag.page.attach",
-                                "tag.page.detach",
-                            )
-                        ),
-                    )
-                    .order_by(AuditEvent.occurred_at.desc(), AuditEvent.id.desc())
-                    .limit(limit)
+                    agent_events.order_by(
+                        AuditEvent.occurred_at.desc(), AuditEvent.id.desc()
+                    ).limit(limit)
                 )
                 .mappings()
                 .all()
@@ -519,31 +534,33 @@ class AdminReadModel:
                         ),
                     )
                 )
-            master_events = (
-                connection.execute(
-                    select(
-                        MasterAuditEvent.id,
-                        MasterAuditEvent.action,
-                        MasterAuditEvent.target_type,
-                        MasterAuditEvent.target_id,
-                        MasterAuditEvent.occurred_at,
-                    )
-                    .where(
-                        MasterAuditEvent.action.in_(
-                            (
-                                "content.archive.restore",
-                                "tag.create",
-                                "tag.page.attach",
-                                "tag.page.detach",
+            master_events: Sequence[RowMapping] = ()
+            if actor is None:
+                master_events = (
+                    connection.execute(
+                        select(
+                            MasterAuditEvent.id,
+                            MasterAuditEvent.action,
+                            MasterAuditEvent.target_type,
+                            MasterAuditEvent.target_id,
+                            MasterAuditEvent.occurred_at,
+                        )
+                        .where(
+                            MasterAuditEvent.action.in_(
+                                (
+                                    "content.archive.restore",
+                                    "tag.create",
+                                    "tag.page.attach",
+                                    "tag.page.detach",
+                                )
                             )
                         )
+                        .order_by(MasterAuditEvent.occurred_at.desc(), MasterAuditEvent.id.desc())
+                        .limit(limit)
                     )
-                    .order_by(MasterAuditEvent.occurred_at.desc(), MasterAuditEvent.id.desc())
-                    .limit(limit)
+                    .mappings()
+                    .all()
                 )
-                .mappings()
-                .all()
-            )
             for event in master_events:
                 parts = event["target_id"].split(":")
                 if event["action"] == "content.archive.restore":

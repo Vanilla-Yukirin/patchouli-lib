@@ -369,6 +369,7 @@ _ZH_CN: dict[str, str] = {
     "The requested Tag or page was not found.": "未找到指定标签或页面。",
     "Created": "创建时间",
     "Content activity": "内容近况",
+    "Content activity by this identity": "此身份的内容近况",
     "Administrator": "管理员",
     "Created a page": "创建了页面",
     "Revised a page": "更新了页面",
@@ -788,7 +789,10 @@ def dashboard_page(
 
 
 def _content_activity_timeline(
-    activities: tuple[ContentActivityItem, ...], locale: AdminLocale
+    activities: tuple[ContentActivityItem, ...],
+    locale: AdminLocale,
+    *,
+    title: str = "Content activity",
 ) -> str:
     entries: list[str] = []
     for item in activities:
@@ -854,7 +858,7 @@ def _content_activity_timeline(
         if entries
         else f"<p>{localize(locale, 'No content activity yet.')}</p>"
     )
-    return f'<section class="card"><h2>{localize(locale, "Content activity")}</h2>{body}</section>'
+    return f'<section class="card"><h2>{localize(locale, title)}</h2>{body}</section>'
 
 
 def caller_page(
@@ -863,6 +867,7 @@ def caller_page(
     *,
     locale: AdminLocale = "en",
     allow_master_actions: bool = False,
+    activities: tuple[ContentActivityItem, ...] = (),
     message: str | None = None,
 ) -> str:
     status = "Identity disabled" if view.disabled_at is not None else "Identity active"
@@ -1059,6 +1064,9 @@ def caller_page(
         if grants
         else f"<p>{localize(locale, 'No Section grants for this identity.')}</p>"
     )
+    identity_activity = _content_activity_timeline(
+        activities, locale, title="Content activity by this identity"
+    )
     body = (
         '<dl class="card">'
         f"<dt>{localize(locale, 'Identity kind')}</dt><dd>{escape(view.kind)}</dd>"
@@ -1072,6 +1080,7 @@ def caller_page(
         f'<section class="card"><h2>{localize(locale, "Current Section grants")}</h2>'
         f'<p class="section-help">{localize(locale, _GRANT_SCOPE_HELP)}</p>'
         f"{grant_list}</section>"
+        f"{identity_activity}"
         f'<p><a href="/admin">{localize(locale, "Back to activity")}</a></p>'
     )
     if allow_master_actions and view.kind == "agent":
