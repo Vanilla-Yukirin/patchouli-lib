@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from html import escape
 from typing import Literal
+from urllib.parse import quote
 
 from patchouli_lib.admin.interface_guide import api_guide, mcp_guide, skill_guide
 from patchouli_lib.admin.read_model import (
@@ -376,6 +377,7 @@ _ZH_CN: dict[str, str] = {
     "Created": "创建时间",
     "Content activity": "内容近况",
     "Content activity by this identity": "此身份的内容近况",
+    "Older activity": "更早的内容活动",
     "Administrator": "管理员",
     "Created a page": "创建了页面",
     "Revised a page": "更新了页面",
@@ -780,15 +782,25 @@ def dashboard_page(
     *,
     locale: AdminLocale = "en",
     activities: tuple[ContentActivityItem, ...] = (),
+    activity_next_cursor: str | None = None,
+    activity_before_cursor: str | None = None,
 ) -> str:
     csrf = escape(csrf_token, quote=True)
+    switch_path = (
+        "/admin"
+        if activity_before_cursor is None
+        else f"/admin?before={quote(activity_before_cursor, safe='')}"
+    )
+    timeline = _content_activity_timeline(
+        activities, locale, next_cursor=activity_next_cursor, base_path="/admin"
+    )
     content = f"""
-{_header(csrf, locale)}
+{_header(csrf, locale, switch_path=switch_path)}
 <div class="admin-shell">
 {_sidebar(locale, current="home")}
 <main>
   <h1>{localize(locale, "Home")}</h1>
-  {_content_activity_timeline(activities, locale)}
+  {timeline}
 </main>
 </div>
 """
@@ -800,6 +812,8 @@ def _content_activity_timeline(
     locale: AdminLocale,
     *,
     title: str = "Content activity",
+    next_cursor: str | None = None,
+    base_path: str = "/admin",
 ) -> str:
     entries: list[str] = []
     for item in activities:
@@ -866,7 +880,14 @@ def _content_activity_timeline(
         if entries
         else f"<p>{localize(locale, 'No content activity yet.')}</p>"
     )
-    return f'<section class="card"><h2>{localize(locale, title)}</h2>{body}</section>'
+    older = (
+        f'<nav aria-label="{localize(locale, title)}">'
+        f'<a href="{escape(base_path, quote=True)}?before={escape(next_cursor, quote=True)}">'
+        f"{localize(locale, 'Older activity')}</a></nav>"
+        if next_cursor is not None
+        else ""
+    )
+    return f'<section class="card"><h2>{localize(locale, title)}</h2>{body}{older}</section>'
 
 
 def caller_page(
@@ -876,6 +897,8 @@ def caller_page(
     locale: AdminLocale = "en",
     allow_master_actions: bool = False,
     activities: tuple[ContentActivityItem, ...] = (),
+    activity_next_cursor: str | None = None,
+    activity_before_cursor: str | None = None,
     message: str | None = None,
 ) -> str:
     status = "Identity disabled" if view.disabled_at is not None else "Identity active"
@@ -1072,8 +1095,21 @@ def caller_page(
         if grants
         else f"<p>{localize(locale, 'No Section grants for this identity.')}</p>"
     )
+    activity_path = (
+        f"/admin/libraries/{escape(view.library_id, quote=True)}/callers/"
+        f"{escape(view.id, quote=True)}"
+    )
+    switch_path = (
+        activity_path
+        if activity_before_cursor is None
+        else f"{activity_path}?before={quote(activity_before_cursor, safe='')}"
+    )
     identity_activity = _content_activity_timeline(
-        activities, locale, title="Content activity by this identity"
+        activities,
+        locale,
+        title="Content activity by this identity",
+        next_cursor=activity_next_cursor,
+        base_path=activity_path,
     )
     body = (
         '<dl class="card">'
@@ -1113,8 +1149,7 @@ def caller_page(
         csrf_token,
         locale,
         view.name,
-        f"/admin/libraries/{escape(view.library_id, quote=True)}/callers/"
-        f"{escape(view.id, quote=True)}",
+        switch_path,
         body,
         crumbs=((localize(locale, "Libraries"), "/admin/libraries"),),
         script_src="/admin/reveal.js" if allow_master_actions and view.kind == "agent" else None,

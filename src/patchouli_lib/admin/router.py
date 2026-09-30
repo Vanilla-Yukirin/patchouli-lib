@@ -242,6 +242,12 @@ def create_admin_router(
             raise ValueError("Invalid revision history cursor")
         return before
 
+    def activity_before(request: Request) -> str | None:
+        values = request.query_params.getlist("before")
+        if len(values) > 1:
+            raise ValueError("Invalid activity cursor")
+        return values[0] if values else None
+
     def html(
         content: str,
         *,
@@ -600,12 +606,21 @@ def create_admin_router(
 
     @router.get("")
     def dashboard(request: Request) -> Response:
-        return protected_page(
-            request,
-            lambda csrf, locale: dashboard_page(
-                csrf, locale=locale, activities=read_model.recent_content_activity()
-            ),
-        )
+        def render(csrf: str, locale: AdminLocale) -> str | None:
+            try:
+                before = activity_before(request)
+                activity = read_model.content_activity_page(before=before)
+            except ValueError:
+                return None
+            return dashboard_page(
+                csrf,
+                locale=locale,
+                activities=activity.items,
+                activity_next_cursor=activity.next_cursor,
+                activity_before_cursor=before,
+            )
+
+        return protected_page(request, render)
 
     @router.get("/setup")
     def setup(request: Request) -> Response:
@@ -981,16 +996,23 @@ def create_admin_router(
     def caller_detail(request: Request, library_id: str, caller_id: str) -> Response:
         def render(csrf: str, locale: AdminLocale) -> str | None:
             view = read_model.get_caller(library_id, caller_id)
-            return (
-                None
-                if view is None
-                else caller_page(
-                    csrf,
-                    view,
-                    locale=locale,
-                    allow_master_actions=isinstance(current_session(request), MasterAdminSession),
-                    activities=read_model.recent_content_activity(actor=(view.library_id, view.id)),
+            if view is None:
+                return None
+            try:
+                before = activity_before(request)
+                activity = read_model.content_activity_page(
+                    before=before, actor=(view.library_id, view.id)
                 )
+            except ValueError:
+                return None
+            return caller_page(
+                csrf,
+                view,
+                locale=locale,
+                allow_master_actions=isinstance(current_session(request), MasterAdminSession),
+                activities=activity.items,
+                activity_next_cursor=activity.next_cursor,
+                activity_before_cursor=before,
             )
 
         return protected_page(request, render, allow_self_script=True)
@@ -1055,13 +1077,15 @@ def create_admin_router(
                 locale=locale,
                 status_code=404,
             )
+        activity = read_model.content_activity_page(actor=(view.library_id, view.id))
         return html(
             caller_page(
                 session.csrf_token,
                 view,
                 locale=locale,
                 allow_master_actions=True,
-                activities=read_model.recent_content_activity(actor=(view.library_id, view.id)),
+                activities=activity.items,
+                activity_next_cursor=activity.next_cursor,
                 message=message,
             ),
             locale=locale,

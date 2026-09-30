@@ -31,10 +31,48 @@ from patchouli_lib.tags.models import PageTag, Tag
 
 _MAX_FILE_SET_PREVIEW_BYTES = 64 * 1024
 _PAGE_HISTORY_SIZE = 20
+_ACTIVITY_PAGE_SIZE = 20
 
 
 def _lower_hex_id(value: str) -> bool:
     return len(value) == 32 and all(character in "0123456789abcdef" for character in value)
+
+
+def _parse_activity_cursor(value: str | None) -> tuple[int, str, str] | None:
+    if value is None:
+        return None
+    if len(value) > 55:
+        raise ValueError("Invalid activity cursor.")
+    parts = value.split(":")
+    if len(parts) != 3:
+        raise ValueError("Invalid activity cursor.")
+    timestamp, source, event_id = parts
+    if (
+        not timestamp
+        or not timestamp.isascii()
+        or not timestamp.isdecimal()
+        or (len(timestamp) > 1 and timestamp[0] == "0")
+        or source not in ("a", "m")
+        or not _lower_hex_id(event_id)
+    ):
+        raise ValueError("Invalid activity cursor.")
+    parsed_timestamp = int(timestamp)
+    if parsed_timestamp > (1 << 63) - 1:
+        raise ValueError("Invalid activity cursor.")
+    return parsed_timestamp, source, event_id
+
+
+def _activity_before(
+    timestamp: Any, event_id: Any, source: str, cursor: tuple[int, str, str]
+) -> Any:
+    before_time, before_source, before_id = cursor
+    if source < before_source:
+        return or_(timestamp < before_time, and_(timestamp == before_time, event_id <= before_id))
+    return or_(timestamp < before_time, and_(timestamp == before_time, event_id < before_id))
+
+
+def _activity_cursor(entry: tuple[int, str, str, ContentActivityItem]) -> str:
+    return f"{entry[0]}:{entry[1]}:{entry[2]}"
 
 
 @dataclass(frozen=True)
@@ -210,6 +248,12 @@ class ContentActivityItem:
 
 
 @dataclass(frozen=True)
+class ContentActivityPage:
+    items: tuple[ContentActivityItem, ...]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True)
 class CallerView:
     library_id: str
     id: str
@@ -377,6 +421,29 @@ class AdminReadModel:
 
         if not 1 <= limit <= 50:
             raise ValueError("Activity limit must be between 1 and 50.")
+        entries = self._content_activity_entries(limit=limit, actor=actor, before=None)
+        return tuple(item for _, _, _, item in entries)
+
+    def content_activity_page(
+        self, *, before: str | None = None, actor: tuple[str, str] | None = None
+    ) -> ContentActivityPage:
+        cursor = _parse_activity_cursor(before)
+        entries = self._content_activity_entries(
+            limit=_ACTIVITY_PAGE_SIZE + 1, actor=actor, before=cursor
+        )
+        visible = entries[:_ACTIVITY_PAGE_SIZE]
+        return ContentActivityPage(
+            tuple(item for _, _, _, item in visible),
+            _activity_cursor(visible[-1]) if len(entries) > _ACTIVITY_PAGE_SIZE else None,
+        )
+
+    def _content_activity_entries(
+        self,
+        *,
+        limit: int,
+        actor: tuple[str, str] | None,
+        before: tuple[int, str, str] | None,
+    ) -> tuple[tuple[int, str, str, ContentActivityItem], ...]:
         with self._engine.connect() as connection:
             # Keep the two audit streams and their linked content in one snapshot.
             connection.exec_driver_sql("BEGIN")
@@ -422,6 +489,10 @@ class AdminReadModel:
                     AuditEvent.actor_home_library_id == actor[0],
                     AuditEvent.actor_caller_id == actor[1],
                 )
+            if before is not None:
+                agent_events = agent_events.where(
+                    _activity_before(AuditEvent.occurred_at, AuditEvent.id, "a", before)
+                )
             events = (
                 connection.execute(
                     agent_events.order_by(
@@ -431,7 +502,7 @@ class AdminReadModel:
                 .mappings()
                 .all()
             )
-            items: list[tuple[int, str, ContentActivityItem]] = []
+            items: list[tuple[int, str, str, ContentActivityItem]] = []
             for event in events:
                 action = event["action"]
                 resource_type = event["resource_type"]
@@ -516,6 +587,7 @@ class AdminReadModel:
                 items.append(
                     (
                         event["occurred_at"],
+                        "a",
                         event["id"],
                         ContentActivityItem(
                             library_id=event["library_id"],
@@ -537,28 +609,34 @@ class AdminReadModel:
                 )
             master_events: Sequence[RowMapping] = ()
             if actor is None:
+                master_query = select(
+                    MasterAuditEvent.id,
+                    MasterAuditEvent.action,
+                    MasterAuditEvent.target_type,
+                    MasterAuditEvent.target_id,
+                    MasterAuditEvent.occurred_at,
+                ).where(
+                    MasterAuditEvent.action.in_(
+                        (
+                            "content.archive.restore",
+                            "content.page.title.edit",
+                            "tag.create",
+                            "tag.page.attach",
+                            "tag.page.detach",
+                        )
+                    )
+                )
+                if before is not None:
+                    master_query = master_query.where(
+                        _activity_before(
+                            MasterAuditEvent.occurred_at, MasterAuditEvent.id, "m", before
+                        )
+                    )
                 master_events = (
                     connection.execute(
-                        select(
-                            MasterAuditEvent.id,
-                            MasterAuditEvent.action,
-                            MasterAuditEvent.target_type,
-                            MasterAuditEvent.target_id,
-                            MasterAuditEvent.occurred_at,
-                        )
-                        .where(
-                            MasterAuditEvent.action.in_(
-                                (
-                                    "content.archive.restore",
-                                    "content.page.title.edit",
-                                    "tag.create",
-                                    "tag.page.attach",
-                                    "tag.page.detach",
-                                )
-                            )
-                        )
-                        .order_by(MasterAuditEvent.occurred_at.desc(), MasterAuditEvent.id.desc())
-                        .limit(limit)
+                        master_query.order_by(
+                            MasterAuditEvent.occurred_at.desc(), MasterAuditEvent.id.desc()
+                        ).limit(limit)
                     )
                     .mappings()
                     .all()
@@ -567,10 +645,10 @@ class AdminReadModel:
                 parts = event["target_id"].split(":")
                 if event["action"] in ("content.archive.restore", "content.page.title.edit"):
                     if event["target_type"] != "page" or len(parts) != 2:
-                        continue
+                        raise RuntimeError("Invalid content activity audit target.")
                     library_id, page_uid_hex = parts
                     if not all(_lower_hex_id(value) for value in parts):
-                        continue
+                        raise RuntimeError("Invalid content activity audit target.")
                     tag_id = None
                     page = (
                         connection.execute(
@@ -590,17 +668,17 @@ class AdminReadModel:
                     )
                 elif event["action"] == "tag.create":
                     if event["target_type"] != "tag" or len(parts) != 2:
-                        continue
+                        raise RuntimeError("Invalid content activity audit target.")
                     library_id, tag_id = parts
                     page = None
                 else:
                     if event["target_type"] != "page_tag" or len(parts) != 3:
-                        continue
+                        raise RuntimeError("Invalid content activity audit target.")
                     library_id, page_uid_hex, tag_id = parts
                     if not all(
                         _lower_hex_id(value) for value in (library_id, page_uid_hex, tag_id)
                     ):
-                        continue
+                        raise RuntimeError("Invalid content activity audit target.")
                     page = (
                         connection.execute(
                             select(
@@ -620,7 +698,8 @@ class AdminReadModel:
                 if not _lower_hex_id(library_id) or (
                     tag_id is not None and not _lower_hex_id(tag_id)
                 ):
-                    continue
+                    # A truncated page would otherwise look complete after SQL LIMIT.
+                    raise RuntimeError("Invalid content activity audit target.")
                 tag = (
                     connection.execute(
                         select(Tag.id, Tag.display_name).where(
@@ -635,6 +714,7 @@ class AdminReadModel:
                 items.append(
                     (
                         event["occurred_at"],
+                        "m",
                         event["id"],
                         ContentActivityItem(
                             library_id=library_id,
@@ -654,8 +734,9 @@ class AdminReadModel:
                         ),
                     )
                 )
-            items.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
-            return tuple(item for _, _, item in items[:limit])
+            # Keep the prior time/ID ordering; source only breaks an exact cross-table tie.
+            items.sort(key=lambda entry: (entry[0], entry[2], entry[1]), reverse=True)
+            return tuple(items[:limit])
 
     def get_caller(self, library_id: str, caller_id: str) -> CallerView | None:
         with self._engine.connect() as connection:

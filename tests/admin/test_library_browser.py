@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from hashlib import sha256
+from html import unescape
 from pathlib import Path
+from re import search
 
 import pytest
 from fastapi.testclient import TestClient
@@ -1712,5 +1714,259 @@ def test_activity_limit_and_tie_breaker_are_stable(browser: tuple[TestClient, En
     _login(client)
     home = client.get("/admin?lang=en")
     assert home.status_code == 200
-    assert home.text.count("Created a tag") == 49
+    assert home.text.count("Created a tag") == 19
     assert "Corrected a page's occurrence time" in home.text
+    assert 'href="/admin?before=33:a:00000000000000000000000000000021"' in home.text
+
+
+def test_activity_keyset_pages_cross_audit_sources_and_keeps_actor_scope(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    library, _, _ = _seed_structure(engine)
+    actor_id, credential_id = _seed_activity_actor(engine, library, "a")
+    other_id, other_credential_id = _seed_activity_actor(engine, library, "c")
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            insert(Tag),
+            [
+                {
+                    "library_id": library,
+                    "id": f"{index:032x}",
+                    "display_name": f"Paging tag {index}",
+                    "match_key": f"paging tag {index}",
+                    "created_at": 1,
+                }
+                for index in range(1, 23)
+            ]
+            + [
+                {
+                    "library_id": library,
+                    "id": "d" * 32,
+                    "display_name": "Older master paging tag",
+                    "match_key": "older master paging tag",
+                    "created_at": 1,
+                },
+                {
+                    "library_id": library,
+                    "id": "e" * 32,
+                    "display_name": "Other paging tag",
+                    "match_key": "other paging tag",
+                    "created_at": 1,
+                },
+                {
+                    "library_id": library,
+                    "id": "f" * 32,
+                    "display_name": "Master paging tag",
+                    "match_key": "master paging tag",
+                    "created_at": 1,
+                },
+            ],
+        )
+        connection.execute(
+            insert(AuditEvent),
+            [
+                {
+                    "id": f"{index:032x}",
+                    "library_id": library,
+                    "actor_home_library_id": library,
+                    "actor_caller_id": actor_id,
+                    "actor_credential_id": credential_id,
+                    "action": "tag.create",
+                    "resource_type": "tag",
+                    "resource_id": f"{index:032x}",
+                    "outcome": "succeeded",
+                    "request_id": "synthetic-page-request",
+                    "occurred_at": 3_000_000,
+                }
+                for index in range(1, 23)
+            ]
+            + [
+                {
+                    "id": "c" * 32,
+                    "library_id": library,
+                    "actor_home_library_id": library,
+                    "actor_caller_id": other_id,
+                    "actor_credential_id": other_credential_id,
+                    "action": "tag.create",
+                    "resource_type": "tag",
+                    "resource_id": "e" * 32,
+                    "outcome": "succeeded",
+                    "request_id": "synthetic-other-request",
+                    "occurred_at": 4_000_000,
+                }
+            ],
+        )
+        connection.execute(
+            insert(MasterAuditEvent),
+            [
+                {
+                    "id": f"{index:032x}",  # ID 4 ties an Agent event at the page boundary.
+                    "identity_id": "b" * 32,
+                    "session_generation": 1,
+                    "session_fingerprint": b"s" * 32,
+                    "action": "tag.create",
+                    "target_type": "tag",
+                    "target_id": f"{library}:{tag_id}",
+                    "occurred_at": 3_000_000,
+                }
+                for index, tag_id in ((4, "f" * 32), (3, "d" * 32))
+            ],
+        )
+
+    assert client.get("/admin?before=bad").status_code == 303
+    _login(client)
+    home = client.get("/admin?lang=zh-CN")
+    assert home.status_code == 200
+    assert home.text.count("创建了标签") == 20
+    assert "Master paging tag" in home.text
+    assert "Other paging tag" in home.text
+    assert "Paging tag 22" in home.text
+    assert "Paging tag 1</a>" not in home.text
+    older = search(r'href="(/admin\?before=[^"]+)">更早的内容活动</a>', home.text)
+    assert older is not None
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            insert(Tag),
+            {
+                "library_id": library,
+                "id": "b" * 32,
+                "display_name": "Newer after first page",
+                "match_key": "newer after first page",
+                "created_at": 1,
+            },
+        )
+        connection.execute(
+            insert(AuditEvent),
+            {
+                "id": "b" * 32,
+                "library_id": library,
+                "actor_home_library_id": library,
+                "actor_caller_id": other_id,
+                "actor_credential_id": other_credential_id,
+                "action": "tag.create",
+                "resource_type": "tag",
+                "resource_id": "b" * 32,
+                "outcome": "succeeded",
+                "request_id": "synthetic-newer-request",
+                "occurred_at": 5_000_000,
+            },
+        )
+    second = client.get(older.group(1))
+    assert second.status_code == 200
+    assert second.text.count("创建了标签") == 5
+    assert "Paging tag 1</a>" in second.text
+    assert "Paging tag 4</a>" in second.text
+    assert "Paging tag 22</a>" not in second.text
+    assert "Master paging tag" not in second.text
+    assert "Older master paging tag" in second.text
+    assert "Other paging tag" not in second.text
+    assert "Newer after first page" not in second.text
+    assert "更早的内容活动" not in second.text
+    assert "synthetic-page-request" not in home.text + second.text
+    for index in range(1, 23):
+        marker = f"Paging tag {index}</a>"
+        assert (marker in home.text) != (marker in second.text)
+    english_switch = search(r'href="([^"]+)" hreflang="en"', second.text)
+    assert english_switch is not None
+    assert "/admin?before=" in english_switch.group(1)
+    assert "%3A" in english_switch.group(1)
+    assert "&amp;lang=en" in english_switch.group(1)
+    home_english = client.get(unescape(english_switch.group(1)))
+    assert home_english.status_code == 200
+    assert home_english.text.count("Created a tag") == 5
+    assert "Paging tag 22</a>" not in home_english.text
+    chinese_switch = search(r'href="([^"]+)" hreflang="zh-CN"', home_english.text)
+    assert chinese_switch is not None
+    home_chinese = client.get(unescape(chinese_switch.group(1)))
+    assert home_chinese.status_code == 200
+    assert home_chinese.text.count("创建了标签") == 5
+    assert "Paging tag 22</a>" not in home_chinese.text
+
+    detail_path = f"/admin/libraries/{library}/callers/{actor_id}"
+    detail = client.get(f"{detail_path}?lang=en")
+    assert detail.status_code == 200
+    assert detail.text.count("Created a tag") == 20
+    assert "Master paging tag" not in detail.text
+    assert "Other paging tag" not in detail.text
+    detail_older = search(rf'href="({detail_path}\?before=[^"]+)">Older activity</a>', detail.text)
+    assert detail_older is not None
+    detail_second = client.get(detail_older.group(1))
+    assert detail_second.status_code == 200
+    assert detail_second.text.count("Created a tag") == 2
+    assert "Paging tag 1</a>" in detail_second.text
+    assert "Master paging tag" not in detail_second.text
+    assert "Older master paging tag" not in detail_second.text
+    assert "Other paging tag" not in detail_second.text
+    assert "Older activity" not in detail_second.text
+    for index in range(1, 23):
+        marker = f"Paging tag {index}</a>"
+        assert (marker in detail.text) != (marker in detail_second.text)
+    detail_chinese_switch = search(r'href="([^"]+)" hreflang="zh-CN"', detail_second.text)
+    assert detail_chinese_switch is not None
+    assert f"{detail_path}?before=" in detail_chinese_switch.group(1)
+    assert "%3A" in detail_chinese_switch.group(1)
+    assert "&amp;lang=zh-CN" in detail_chinese_switch.group(1)
+    detail_chinese = client.get(unescape(detail_chinese_switch.group(1)))
+    assert detail_chinese.status_code == 200
+    assert detail_chinese.text.count("创建了标签") == 2
+    assert "Paging tag 22</a>" not in detail_chinese.text
+
+    invalid = (
+        "",
+        "bad",
+        "01:a:" + "a" * 32,
+        "２:a:" + "a" * 32,
+        f"{1 << 63}:a:" + "a" * 32,
+        "0:a:" + "a" * 100,
+        "1:x:" + "a" * 32,
+        "1:a:" + "A" * 32,
+        "1:a:" + "a" * 31,
+        "%3Cscript%3E",
+        "1:a:" + "a" * 32 + "&before=2:a:" + "b" * 32,
+    )
+    for cursor in invalid:
+        assert client.get(f"/admin?before={cursor}").status_code == 404
+        assert client.get(f"{detail_path}?before={cursor}").status_code == 404
+    maximum = f"{(1 << 63) - 1}:a:{'a' * 32}"
+    assert client.get(f"/admin?before={maximum}").status_code == 200
+    empty = client.get(f"{detail_path}?before=0:a:{'a' * 32}&lang=en")
+    assert empty.status_code == 200
+    assert "No content activity yet." in empty.text
+    assert "Older activity" not in empty.text
+
+
+@pytest.mark.parametrize(
+    ("action", "target_type", "target_id"),
+    (
+        ("content.archive.restore", "tag", "malformed"),
+        ("content.archive.restore", "page", f"{'a' * 32}:bad"),
+        ("tag.create", "tag", "malformed"),
+        ("tag.create", "tag", f"{'a' * 32}:bad"),
+        ("tag.page.attach", "page_tag", "malformed"),
+        ("tag.page.attach", "page_tag", f"{'a' * 32}:bad:{'c' * 32}"),
+    ),
+)
+def test_activity_rejects_malformed_master_target_instead_of_truncating_page(
+    browser: tuple[TestClient, Engine],
+    action: str,
+    target_type: str,
+    target_id: str,
+) -> None:
+    _, engine = browser
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            insert(MasterAuditEvent),
+            {
+                "id": "a" * 32,
+                "identity_id": "b" * 32,
+                "session_generation": 1,
+                "session_fingerprint": b"s" * 32,
+                "action": action,
+                "target_type": target_type,
+                "target_id": target_id,
+                "occurred_at": 3_000_000,
+            },
+        )
+    with pytest.raises(RuntimeError, match="Invalid content activity audit target"):
+        AdminReadModel(engine).content_activity_page()
