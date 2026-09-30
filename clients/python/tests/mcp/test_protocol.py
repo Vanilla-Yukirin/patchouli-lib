@@ -52,7 +52,7 @@ _TOOL_NAMES = {
     "whoami",
     "sections_list",
     "books_list",
-    "section_search",
+    "pages_search",
     "page_current",
     "page_revision",
     "archive_create",
@@ -245,17 +245,21 @@ def test_read_tools_use_exact_typed_client_requests_and_redact_credential_id(
                 ],
                 "next_cursor": None,
             }
-        elif path == "/api/v1/sections/sec_synthetic/search":
-            page = sample_page()
+        elif path == "/api/v1/search":
             body = {
                 "items": [
                     {
-                        "page": page["page"],
-                        "citation": page["citation"],
-                        "snippet": "synthetic hit",
+                        "library_id": "lib_synthetic",
+                        "section_id": "sec_synthetic",
+                        "book_id": "book_synthetic",
+                        "page_id": _PAGE_ID,
+                        "revision_id": "rev_synthetic",
+                        "revision_number": 1,
+                        "title": "Synthetic",
+                        "occurred_at": 1_000_000,
+                        "match_sources": [{"kind": "title", "file_name": None}],
                     }
                 ],
-                "next_cursor": None,
             }
         else:
             body = sample_page()
@@ -273,8 +277,13 @@ def test_read_tools_use_exact_typed_client_requests_and_redact_credential_id(
             await session.call_tool("sections_list", {"limit": 20}),
             await session.call_tool("books_list", {"section_id": "sec_synthetic", "limit": 10}),
             await session.call_tool(
-                "section_search",
-                {"section_id": "sec_synthetic", "query": "synthetic", "limit": 5},
+                "pages_search",
+                {
+                    "keywords": ["synthetic"],
+                    "occurred_from_us": None,
+                    "occurred_before_us": None,
+                    "limit": 5,
+                },
             ),
             await session.call_tool(
                 "page_current", {"section_id": "sec_synthetic", "page_id": _PAGE_ID}
@@ -304,11 +313,12 @@ def test_read_tools_use_exact_typed_client_requests_and_redact_credential_id(
         ("GET", "/api/v1/auth/whoami"),
         ("GET", "/api/v1/sections"),
         ("GET", "/api/v1/sections/sec_synthetic/books"),
-        ("POST", "/api/v1/sections/sec_synthetic/search"),
+        ("POST", "/api/v1/search"),
         ("GET", f"/api/v1/sections/sec_synthetic/pages/{_PAGE_ID}"),
         ("GET", f"/api/v1/sections/sec_synthetic/pages/{_PAGE_ID}/revisions/1"),
     ]
-    assert json.loads(requests[4].content) == {"query": "synthetic", "limit": 5}
+    assert json.loads(requests[4].content)["keywords"] == ["synthetic"]
+    assert json.loads(requests[4].content)["limit"] == 5
     assert harness.clients[0].close_calls == 1
 
 
@@ -728,9 +738,7 @@ def test_invalid_query_and_content_fail_before_network(tmp_path: Path) -> None:
     harness = RuntimeHarness(tmp_path, httpx.MockTransport(handler))
 
     async def action(session: ClientSession) -> list[mcp_types.CallToolResult]:
-        query = await session.call_tool(
-            "section_search", {"section_id": "sec_synthetic", "query": "x" * 4_097}
-        )
+        query = await session.call_tool("pages_search", {"keywords": ["x" * 32_769]})
         content = await session.call_tool(
             "archive_create",
             {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import unicodedata
 from collections.abc import Mapping, Sequence
@@ -15,6 +16,9 @@ MAX_ARCHIVE_BYTES = 2 * 1024 * 1024
 DEFAULT_PAGE_LIMIT = 20
 MAX_PAGE_LIMIT = 100
 MAX_CURSOR_LENGTH = 4_096
+MAX_SEARCH_REQUEST_BYTES = 96 * 1024
+MAX_SEARCH_KEYWORD_BYTES = 32 * 1024
+MAX_SEARCH_ITEMS = 256
 MAX_FILE_SET_FILES = 64
 MAX_FILE_SET_FILE_BYTES = 16 * 1024 * 1024
 MAX_FILE_SET_PAGE_BYTES = 64 * 1024 * 1024
@@ -885,6 +889,39 @@ class CurrentPageSearchRequest:
     libraries: tuple[str, ...] | None = None
     limit: int = DEFAULT_PAGE_LIMIT
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> CurrentPageSearchRequest:
+        allowed = {
+            "keywords",
+            "tags_any",
+            "occurred_from_us",
+            "occurred_before_us",
+            "libraries",
+            "limit",
+        }
+        if set(data) - allowed:
+            raise ValueError("search request has unsupported fields")
+        keywords = data.get("keywords", [])
+        tags = data.get("tags_any", [])
+        libraries = data.get("libraries")
+        if not isinstance(keywords, list) or not isinstance(tags, list):
+            raise ValueError("search keywords and Tags must be arrays")
+        if libraries is not None and not isinstance(libraries, list):
+            raise ValueError("search Libraries must be an array or null")
+        if any(not isinstance(tag, dict) or set(tag) != {"library_id", "tag_id"} for tag in tags):
+            raise ValueError("search Tags must identify a Library and Tag")
+        return cls(
+            keywords=tuple(cast("list[str]", keywords)),
+            tags_any=tuple(
+                SearchTagRef(cast("str", tag["library_id"]), cast("str", tag["tag_id"]))
+                for tag in tags
+            ),
+            occurred_from_us=cast("int | None", data.get("occurred_from_us")),
+            occurred_before_us=cast("int | None", data.get("occurred_before_us")),
+            libraries=None if libraries is None else tuple(cast("list[str]", libraries)),
+            limit=cast("int", data.get("limit", DEFAULT_PAGE_LIMIT)),
+        )
+
     def __post_init__(self) -> None:
         if not (
             self.keywords
@@ -895,12 +932,26 @@ class CurrentPageSearchRequest:
             raise ValueError("search requires at least one keyword, Tag, or time bound")
         if any(not isinstance(value, str) or not value for value in self.keywords):
             raise ValueError("search keywords must be non-empty strings")
+        if len(self.keywords) > MAX_SEARCH_ITEMS:
+            raise ValueError("search keyword count exceeds the supported limit")
+        try:
+            keyword_bytes = sum(len(value.encode("utf-8")) for value in self.keywords)
+        except UnicodeError as exc:
+            raise ValueError("search keywords must be valid UTF-8") from exc
+        if keyword_bytes > MAX_SEARCH_KEYWORD_BYTES:
+            raise ValueError("search keywords exceed the supported byte limit")
         if any(not isinstance(value, SearchTagRef) for value in self.tags_any):
             raise ValueError("search Tags must carry their Library identity")
+        if len(self.tags_any) > MAX_SEARCH_ITEMS:
+            raise ValueError("search Tag count exceeds the supported limit")
+        if self.libraries is not None and not self.libraries:
+            raise ValueError("search Libraries must not be an empty selection")
         if self.libraries is not None and any(
             not isinstance(value, str) or not value for value in self.libraries
         ):
             raise ValueError("search Libraries must be non-empty identifiers")
+        if self.libraries is not None and len(self.libraries) > MAX_SEARCH_ITEMS:
+            raise ValueError("search Library count exceeds the supported limit")
         for bound in (self.occurred_from_us, self.occurred_before_us):
             if bound is not None and (isinstance(bound, bool) or not isinstance(bound, int)):
                 raise ValueError("search time bounds must be integer UTC microseconds")
@@ -916,6 +967,16 @@ class CurrentPageSearchRequest:
             or not 1 <= self.limit <= MAX_PAGE_LIMIT
         ):
             raise ValueError("search limit must be within the supported page range")
+        try:
+            request_bytes = len(
+                json.dumps(
+                    self.to_wire(), ensure_ascii=False, separators=(",", ":"), allow_nan=False
+                ).encode("utf-8")
+            )
+        except (UnicodeError, ValueError) as exc:
+            raise ValueError("search request must be valid UTF-8 JSON") from exc
+        if request_bytes > MAX_SEARCH_REQUEST_BYTES:
+            raise ValueError("search request exceeds the supported byte limit")
 
     def to_wire(self) -> dict[str, object]:
         return {

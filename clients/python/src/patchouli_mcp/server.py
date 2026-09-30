@@ -28,20 +28,19 @@ from patchouli_client import (
     ArchiveRevisionMetadata,
     BearerToken,
     ClientResponse,
+    CurrentPageSearchRequest,
     MarkdownContent,
     Page,
     PageDocument,
     PatchouliClient,
     ProblemError,
     ProtocolError,
-    SearchRequest,
     SourceInput,
     TransportError,
     WhoAmI,
 )
 from patchouli_client.models import MAX_ARCHIVE_BYTES, MAX_CURSOR_LENGTH, parse_rfc3339
 
-MAX_QUERY_BYTES = 4_096
 MAX_SOURCE_BYTES = 16_384
 _SERVER_NAME = "patchouli-agent"
 _SERVER_VERSION = "0.1.0a0"
@@ -135,7 +134,7 @@ def create_server(*, runtime_factory: RuntimeFactory = runtime_from_environment)
         _SERVER_NAME,
         version=_SERVER_VERSION,
         instructions=(
-            "Section-scoped PatchouliLib Agent tools. Configuration and caller credentials "
+            "PatchouliLib Agent tools. Configuration and caller credentials "
             "are process startup concerns and are never tool inputs."
         ),
         lifespan=lifespan,
@@ -206,18 +205,11 @@ def _dispatch(runtime: McpRuntime, name: str, arguments: Mapping[str, object]) -
                 cursor=_optional_string(arguments, "cursor"),
             ),
         )
-    elif name == "section_search":
-        query = _bounded_text(
-            _required_string(arguments, "query"), label="search query", max_bytes=MAX_QUERY_BYTES
-        )
-        request = SearchRequest(
-            query=query,
-            limit=_limit(arguments),
-            cursor=_optional_string(arguments, "cursor"),
-        )
+    elif name == "pages_search":
+        request = CurrentPageSearchRequest.from_dict(arguments)
         response = cast(
             ClientResponse[object],
-            runtime.client.search(_required_string(arguments, "section_id"), request, token=token),
+            runtime.client.search_pages(request, token=token),
         )
     elif name == "page_current":
         response = cast(
@@ -490,14 +482,38 @@ def _tool_inventory() -> list[types.Tool]:
             read,
         ),
         _tool(
-            "section_search",
-            "Search current Revisions within one explicit Section.",
+            "pages_search",
+            "Search current Pages in readable Libraries by literal keywords, Tags, and time.",
             {
-                "section_id": _string_schema(),
-                "query": _string_schema(max_length=MAX_QUERY_BYTES),
-                **_pagination_properties(),
+                "keywords": {
+                    "type": "array",
+                    "items": _string_schema(max_length=32_768),
+                    "maxItems": 256,
+                },
+                "tags_any": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "library_id": _string_schema(),
+                            "tag_id": _string_schema(),
+                        },
+                        "required": ["library_id", "tag_id"],
+                        "additionalProperties": False,
+                    },
+                    "maxItems": 256,
+                },
+                "libraries": {
+                    "anyOf": [
+                        {"type": "array", "items": _string_schema(), "maxItems": 256},
+                        {"type": "null"},
+                    ]
+                },
+                "occurred_from_us": {"type": ["integer", "null"]},
+                "occurred_before_us": {"type": ["integer", "null"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
             },
-            ["section_id", "query"],
+            [],
             read,
         ),
         _tool(

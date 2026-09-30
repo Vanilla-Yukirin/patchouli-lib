@@ -628,6 +628,18 @@ def test_current_page_search_request_rejects_invalid_scope_and_window() -> None:
         CurrentPageSearchRequest(tags_any=("tag",))  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="Libraries"):
         CurrentPageSearchRequest(keywords=("term",), libraries=("",))
+    with pytest.raises(ValueError, match="empty selection"):
+        CurrentPageSearchRequest(keywords=("term",), libraries=())
+    with pytest.raises(ValueError, match="keyword count"):
+        CurrentPageSearchRequest(keywords=("term",) * 257)
+    with pytest.raises(ValueError, match="keyword.*byte limit"):
+        CurrentPageSearchRequest(keywords=("x" * 32_769,))
+    with pytest.raises(ValueError, match="Tag count"):
+        CurrentPageSearchRequest(tags_any=(SearchTagRef("lib", "tag"),) * 257)
+    with pytest.raises(ValueError, match="request.*byte limit"):
+        CurrentPageSearchRequest(
+            tags_any=tuple(SearchTagRef("lib" + str(index), "x" * 400) for index in range(256))
+        )
     with pytest.raises(ValueError, match="microseconds"):
         CurrentPageSearchRequest(occurred_from_us=True)
     with pytest.raises(ValueError, match="interval"):

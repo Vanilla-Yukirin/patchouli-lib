@@ -215,10 +215,7 @@ def test_stdin_cannot_be_shared_by_token_and_sensitive_input(tmp_path: Path) -> 
     result = invoke_cli(
         [
             "--token-stdin",
-            "section",
             "search",
-            "--section",
-            "sec_synthetic",
             "--query-stdin",
         ],
         handler=handler,

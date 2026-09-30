@@ -23,7 +23,6 @@ from patchouli_cli.files import (
     MAX_METADATA_BYTES,
     MAX_QUERY_BYTES,
     InputRoot,
-    decode_text,
     open_input_root,
     read_stdin,
 )
@@ -32,11 +31,11 @@ from patchouli_cli.render import emit_error, emit_success
 from patchouli_client import (
     ArchiveCreateMetadata,
     ArchiveRevisionMetadata,
+    CurrentPageSearchRequest,
     MarkdownContent,
     PatchouliClient,
     ProblemError,
     ProtocolError,
-    SearchRequest,
     SourceInput,
     TransportError,
 )
@@ -101,16 +100,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_pagination(page_list)
     page_list.set_defaults(handler="pages.list")
 
-    section = commands.add_parser("section", help="Section-scoped queries").add_subparsers(
-        dest="section_action", required=True
-    )
-    search = section.add_parser("search", help="search current Revisions in one Section")
-    search.add_argument("--section", required=True)
+    search = commands.add_parser("search", help="search current Pages in readable Libraries")
     query = search.add_mutually_exclusive_group(required=True)
     query.add_argument("--query-file")
     query.add_argument("--query-stdin", action="store_true")
-    _add_pagination(search)
-    search.set_defaults(handler="section.search")
+    search.set_defaults(handler="search.pages")
 
     page = commands.add_parser("page", help="Page and Revision reads").add_subparsers(
         dest="page_action", required=True
@@ -349,17 +343,19 @@ def _dispatch(
             ),
             None,
         )
-    if operation == "section.search":
+    if operation == "search.pages":
         if args.query_stdin:
             query_data = read_stdin(stdin, max_bytes=MAX_QUERY_BYTES)
         else:
             with open_input_root(cast(str | None, args.input_root), environ) as input_root:
                 query_data = _read_sensitive(args, "query", stdin, input_root, MAX_QUERY_BYTES)
-        query = decode_text(query_data, label="search query", trim_terminal_newline=True)
-        request = SearchRequest(query=query, limit=args.limit, cursor=args.cursor)
-        return cast(
-            ClientResponse[object], client.search(args.section, request, token=caller_token)
-        ), None
+        try:
+            request = CurrentPageSearchRequest.from_dict(
+                _parse_json_object(query_data, label="search query")
+            )
+        except ValueError as exc:
+            raise input_error("search query did not match the expected schema") from exc
+        return cast(ClientResponse[object], client.search_pages(request, token=caller_token)), None
     if operation == "page.current":
         return cast(
             ClientResponse[object], client.get_page(args.section, args.page, token=caller_token)
@@ -459,12 +455,21 @@ def _read_sensitive(
 
 def _parse_json_object(data: bytes, *, label: str) -> dict[str, object]:
     try:
-        parsed: object = json.loads(data)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        parsed: object = json.loads(data, object_pairs_hook=_unique_json_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise input_error(f"{label} must be a valid UTF-8 JSON object") from exc
     if not isinstance(parsed, dict) or not all(isinstance(key, str) for key in parsed):
         raise input_error(f"{label} must be a JSON object")
     return cast(dict[str, object], parsed)
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON field")
+        result[key] = value
+    return result
 
 
 def _create_metadata(data: Mapping[str, object]) -> ArchiveCreateMetadata:

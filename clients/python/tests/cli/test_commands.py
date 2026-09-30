@@ -181,25 +181,31 @@ def test_whoami_from_old_server_marks_library_policy_unknown(tmp_path: Path) -> 
 
 def test_search_reads_private_query_from_file_and_uses_post_json(tmp_path: Path) -> None:
     query_path = tmp_path / "query.txt"
-    query_path.write_text("synthetic private query\n", encoding="utf-8")
+    query_path.write_text('{"keywords":["synthetic private query"],"limit":5}\n', encoding="utf-8")
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
-        assert request.url.path == "/api/v1/sections/sec_synthetic/search"
+        assert request.url.path == "/api/v1/search"
         assert request.url.query == b""
-        assert json.loads(request.content) == {"query": "synthetic private query", "limit": 5}
+        assert json.loads(request.content)["keywords"] == ["synthetic private query"]
+        assert json.loads(request.content)["limit"] == 5
         return httpx.Response(
             200,
             headers=protected_headers(),
             json={
                 "items": [
                     {
-                        "page": sample_page()["page"],
-                        "citation": sample_page()["citation"],
-                        "snippet": "Synthetic snippet",
+                        "library_id": "a" * 32,
+                        "section_id": "sec_synthetic",
+                        "book_id": "book_synthetic",
+                        "page_id": "page_synthetic",
+                        "revision_id": "rev_synthetic",
+                        "revision_number": 1,
+                        "title": "Synthetic",
+                        "occurred_at": 1_000_000,
+                        "match_sources": [{"kind": "title", "file_name": None}],
                     }
                 ],
-                "next_cursor": None,
             },
         )
 
@@ -207,14 +213,9 @@ def test_search_reads_private_query_from_file_and_uses_post_json(tmp_path: Path)
         [
             "--output",
             "json",
-            "section",
             "search",
-            "--section",
-            "sec_synthetic",
             "--query-file",
             "query.txt",
-            "--limit",
-            "5",
         ],
         handler=handler,
         tmp_path=tmp_path,
@@ -222,7 +223,26 @@ def test_search_reads_private_query_from_file_and_uses_post_json(tmp_path: Path)
 
     assert result.status == ExitCode.SUCCESS
     assert "query.txt" not in result.stdout + result.stderr
-    assert json.loads(result.stdout)["data"]["items"][0]["snippet"] == "Synthetic snippet"
+    assert json.loads(result.stdout)["data"]["items"][0]["revision_number"] == 1
+
+
+def test_search_rejects_duplicate_json_fields_before_network_request(tmp_path: Path) -> None:
+    (tmp_path / "query.txt").write_text(
+        '{"keywords":["synthetic"],"libraries":["lib_only"],"libraries":null}',
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected network request: {request.method}")
+
+    result = invoke_cli(
+        ["--output", "json", "search", "--query-file", "query.txt"],
+        handler=handler,
+        tmp_path=tmp_path,
+    )
+    assert result.status == ExitCode.VALIDATION
+    assert result.stdout == ""
+    assert "lib_only" not in result.stderr
 
 
 def test_doctor_rejects_an_unadvertised_api_version(tmp_path: Path) -> None:
@@ -240,24 +260,19 @@ def test_doctor_rejects_an_unadvertised_api_version(tmp_path: Path) -> None:
 
 def test_search_can_take_its_single_sensitive_value_from_stdin(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert json.loads(request.content)["query"] == "stdin query"
-        return httpx.Response(
-            200, headers=protected_headers(), json={"items": [], "next_cursor": None}
-        )
+        assert json.loads(request.content)["keywords"] == ["stdin query"]
+        return httpx.Response(200, headers=protected_headers(), json={"items": []})
 
     result = invoke_cli(
         [
             "--output",
             "json",
-            "section",
             "search",
-            "--section",
-            "sec_synthetic",
             "--query-stdin",
         ],
         handler=handler,
         tmp_path=tmp_path,
-        stdin="stdin query\n",
+        stdin='{"keywords":["stdin query"]}\n',
     )
     assert result.status == ExitCode.SUCCESS
 

@@ -53,6 +53,32 @@ Library，不能据此发现其他 Library 的 Section／Book。跨库文件集�
 Library 授权执行，但目标 Library／Section／Book ID 仍需由管理员或其他已授权
 来源提供并核实，不可推测或扫描。
 
+## 当前 Page 搜索
+
+仅当能力响应包含 `search` 时，发送受保护的 `POST /api/v1/search`，正文为 JSON：
+
+```json
+{
+  "keywords": ["技术", "报告"],
+  "tags_any": [],
+  "libraries": null,
+  "occurred_from_us": null,
+  "occurred_before_us": null,
+  "limit": 20
+}
+```
+
+关键词数组按任一项命中；每项是同一字段内的连续字面片段，不自动分词或纠错。
+`tags_any` 若非空，元素必须同时提供 `library_id` 与 `tag_id`，至少命中其中
+一个 Tag；Tag 与关键词组合时两种条件都要满足。`libraries: null` 表示凭据
+实际可读的全部知识库；显式列出无权访问的库或不存在／不可见的 Tag 不会扩大权限。
+时间为文档声明时间的 UTC Unix 微秒，范围是左闭右开，任一端可为 `null`。
+关键词、Tag、时间条件不能全部为空；不填条件时改用浏览列表。返回按 Page 排序
+的 `items`，每项携带 Library、Section、Book、Page、准确 Revision ID／序号、
+标题、声明时间与命中字段；首版只返回前 `limit` 项，不提供游标或片段摘要。
+索引未就绪时返回 `search_unavailable`，不得当作无结果。搜索词只放请求正文，
+不要放 URL、普通诊断或日志中。
+
 ## 统一文件集：单 Markdown 与多文件使用同一接口
 
 先确认实际服务的 `/api/v1/capabilities` 包含 `file-sets`，并核对其中
@@ -291,5 +317,6 @@ Tag 列表当作全文检索结果。
 
 本参考列出了开发分支的统一文件集接口，但它尚未合并或部署；目标服务仍须按能力
 响应与实际请求核对。文件集及 Tag API 已支持按精确凭据的目标 Library 授权跨库
-读写；旧 Archive 写路径仍只限归属库。真实搜索仍未完成。已有 CLI/MCP 若可用，仍能
+读写；旧 Archive 写路径仍只限归属库。搜索已在开发分支实现，目标服务是否已合并、
+部署及重建索引必须实际核对。已有 CLI/MCP 若可用，仍能
 完成各自已实现的兼容流程，但并非下载本 Skill 或调用 HTTP API 的前提。
