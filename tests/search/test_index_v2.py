@@ -15,10 +15,14 @@ from patchouli_lib.database import build_engine, immediate_transaction
 from patchouli_lib.search.index_v2 import (
     INDEX_VERSION,
     SearchIndexProjectionError,
+    SearchIndexUnavailableError,
     rebuild_search_index,
     require_ready_index,
 )
-from patchouli_lib.search.literal_v2 import candidate_match_expression
+from patchouli_lib.search.literal_v2 import (
+    candidate_match_expression,
+    encoded_library_token,
+)
 
 
 @pytest.fixture
@@ -93,6 +97,49 @@ def test_rebuild_indexes_exact_current_title_filename_and_text(migrated_engine: 
             connection.exec_driver_sql("SELECT COUNT(*) FROM search_dirty_pages").scalar_one() == 0
         )
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+
+
+def test_rebuild_partitions_fts_candidates_by_library(migrated_engine: Engine) -> None:
+    first = seed_library_structure(migrated_engine)
+    second = seed_library_structure(migrated_engine, prefix="4", label="Other")
+    with immediate_transaction(migrated_engine) as connection:
+        for structure, page_byte in ((first, 0x11), (second, 0x12)):
+            insert_page_graph(
+                connection,
+                page_graph_values(
+                    library_id=structure[0],
+                    section_id=structure[1],
+                    book_id=structure[2],
+                    page_byte=page_byte,
+                    title="技术报告",
+                    content_md=b"shared content",
+                ),
+            )
+    rebuild_search_index(migrated_engine, clock=lambda: 2_000_000)
+    with migrated_engine.connect() as connection:
+        for structure in (first, second):
+            scoped_expression = (
+                f'"{encoded_library_token(structure[0])}" AND '
+                f"({candidate_match_expression(('技术',))})"
+            )
+            actual = connection.exec_driver_sql(
+                "SELECT DISTINCT d.library_id FROM search_terms "
+                "JOIN search_documents AS d ON d.id = search_terms.rowid "
+                "WHERE search_terms MATCH ?",
+                (scoped_expression,),
+            ).all()
+            assert [str(row[0]) for row in actual] == [structure[0]]
+
+
+def test_old_posting_format_is_unavailable_until_rebuilt(migrated_engine: Engine) -> None:
+    rebuild_search_index(migrated_engine, clock=lambda: 1_000_000)
+    with migrated_engine.begin() as connection:
+        connection.exec_driver_sql("UPDATE search_meta SET index_version = ?", ("v2:old",))
+    with migrated_engine.connect() as connection, pytest.raises(SearchIndexUnavailableError):
+        require_ready_index(connection)
+    rebuilt = rebuild_search_index(migrated_engine, clock=lambda: 2_000_000)
+    with migrated_engine.connect() as connection:
+        assert require_ready_index(connection).generation == rebuilt
 
 
 def test_immediate_transaction_indexes_new_page_before_commit(migrated_engine: Engine) -> None:

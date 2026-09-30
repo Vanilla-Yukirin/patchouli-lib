@@ -16,6 +16,7 @@ from patchouli_lib.search.literal_v2 import (
     LiteralHit,
     candidate_match_expression,
     encoded_grams,
+    encoded_library_token,
     find_page_hits,
     normalize_keywords,
     normalize_literal,
@@ -33,6 +34,16 @@ def test_normalization_and_query_deduplication() -> None:
     assert normalize_keywords(("Straße", "STRASSE", "é", "e\u0301")) == ("strasse", "é")
     assert normalize_keywords(()) == ()
     assert normalize_keywords((" ",)) == (" ",)
+
+
+def test_library_posting_token_is_stable_and_separate_from_text_grams() -> None:
+    first = encoded_library_token("library-one")
+    assert first == encoded_library_token("library-one")
+    assert first != encoded_library_token("library-two")
+    assert re.fullmatch(r"libx[0-9a-f]{32}", first)
+    assert first not in encoded_grams("library-one")
+    with pytest.raises(ValueError):
+        encoded_library_token("")
 
 
 def test_every_unicode_codepoint_and_boundary_can_be_indexed() -> None:

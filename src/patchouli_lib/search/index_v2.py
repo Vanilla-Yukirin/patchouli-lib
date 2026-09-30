@@ -24,6 +24,7 @@ from patchouli_lib.search.literal_v2 import (
     GRAM_VERSION,
     UNICODE_DATA_VERSION,
     encoded_grams,
+    encoded_library_token,
     normalize_literal,
 )
 from patchouli_lib.search.text_classification_v2 import (
@@ -34,7 +35,7 @@ from patchouli_lib.search.text_classification_v2 import (
 if TYPE_CHECKING:
     from patchouli_lib.content.file_manifest import FileManifest
 
-INDEX_VERSION = f"v2:{GRAM_VERSION}:{TEXT_CLASSIFICATION_VERSION}:u{UNICODE_DATA_VERSION}"
+INDEX_VERSION = f"v2:libscope1:{GRAM_VERSION}:{TEXT_CLASSIFICATION_VERSION}:u{UNICODE_DATA_VERSION}"
 
 
 class SearchIndexUnavailableError(RuntimeError):
@@ -239,7 +240,7 @@ def _project_page(
     )
     for document in documents:
         normalized = normalize_literal(document.text)
-        tokens = " ".join(encoded_grams(document.text))
+        tokens = " ".join((encoded_library_token(page.library_id), *encoded_grams(document.text)))
         result = connection.exec_driver_sql(
             "INSERT INTO search_documents "
             "(generation, library_id, page_uid, revision_id, revision_number, "

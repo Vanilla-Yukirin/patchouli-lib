@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import unicodedata
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Literal
 
 from patchouli_lib.content.file_manifest import (
@@ -122,6 +123,19 @@ def _encoded_gram(gram: str) -> str:
     # A letter prefix and hexadecimal UTF-8 bytes form one unicode61 token.
     # Neither the user's punctuation nor FTS5 operators enter MATCH syntax.
     return f"g{len(gram)}x{gram.encode('utf-8').hex()}"
+
+
+def encoded_library_token(library_id: str) -> str:
+    """Return a safe, fixed-width FTS token for one Library's postings.
+
+    The exact Library ID is still checked against search_documents after FTS;
+    a hash collision can widen candidates but cannot grant access or omit a hit.
+    """
+
+    if type(library_id) is not str or not library_id:
+        raise ValueError("Library identity must be nonempty text.")
+    digest = sha256(library_id.encode("utf-8", errors="strict")).hexdigest()[:32]
+    return f"libx{digest}"
 
 
 def encoded_grams(value: str | bytes) -> tuple[str, ...]:
@@ -255,6 +269,7 @@ __all__ = [
     "UNICODE_DATA_VERSION",
     "LiteralHit",
     "candidate_match_expression",
+    "encoded_library_token",
     "encoded_grams",
     "find_page_hits",
     "normalize_keywords",

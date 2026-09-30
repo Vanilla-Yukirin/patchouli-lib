@@ -19,7 +19,11 @@ from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import CallerKind, SectionAction
 from patchouli_lib.auth.service import AuthenticationError, utc_microseconds
 from patchouli_lib.search.index_v2 import SearchIndexUnavailableError, require_ready_index
-from patchouli_lib.search.literal_v2 import candidate_match_expression, normalize_keywords
+from patchouli_lib.search.literal_v2 import (
+    candidate_match_expression,
+    encoded_library_token,
+    normalize_keywords,
+)
 from patchouli_lib.search.query_v2 import InvalidSearchQueryV2, SearchQueryV2
 
 _FIELD_WEIGHT = {"title": 100, "file_name": 30, "file_text": 10}
@@ -249,35 +253,42 @@ def _rows_for_scope(
     candidate_parameters: tuple[object, ...] = ()
     exact_short_keyword = len(needles) == 1 and len(needles[0]) <= 3
     if candidate_expression is not None:
+        scoped_expression = (
+            f'"{encoded_library_token(scope.library_id)}" AND ({candidate_expression})'
+        )
         if exact_short_keyword:
             # A complete 1/2/3-codepoint gram is the exact literal within one
             # indexed field. Retain its document ID so a broad hit never scans
             # or transfers every normalized file body just to confirm itself.
+            # Keep MATCH outermost: a normal JOIN can scan Library documents
+            # first and re-run the same FTS query once per document.
             candidate_cte = (
                 "WITH candidate_documents AS MATERIALIZED ("
                 "SELECT search_terms.rowid FROM search_terms "
-                "JOIN search_documents AS candidate ON candidate.id = search_terms.rowid "
+                "CROSS JOIN search_documents AS candidate "
                 "WHERE search_terms MATCH ? AND candidate.generation = ? "
-                "AND candidate.library_id = ?) "
+                "AND candidate.library_id = ? AND candidate.id = search_terms.rowid) "
             )
             exact_document_join = "JOIN candidate_documents AS cd ON cd.rowid = d.id "
-            candidate_parameters = (candidate_expression, generation, scope.library_id)
+            candidate_parameters = (scoped_expression, generation, scope.library_id)
         else:
             # Evaluate FTS once per Library. A correlated MATCH under a Page
             # scan reparses the same expression thousands of times.
             candidate_cte = (
                 "WITH candidate_pages AS MATERIALIZED ("
                 "SELECT DISTINCT candidate.library_id, candidate.page_uid "
-                "FROM search_terms JOIN search_documents AS candidate "
-                "ON candidate.id = search_terms.rowid "
+                # SQLite may otherwise choose the Library index first and
+                # run MATCH once for every document. CROSS JOIN keeps the FTS
+                # posting scan outermost; the rowid lookup then narrows scope.
+                "FROM search_terms CROSS JOIN search_documents AS candidate "
                 "WHERE search_terms MATCH ? AND candidate.generation = ? "
-                "AND candidate.library_id = ?) "
+                "AND candidate.library_id = ? AND candidate.id = search_terms.rowid) "
             )
             candidate_join = (
                 "JOIN candidate_pages AS cp ON cp.library_id = s.library_id "
                 "AND cp.page_uid = s.page_uid "
             )
-            candidate_parameters = (candidate_expression, generation, scope.library_id)
+            candidate_parameters = (scoped_expression, generation, scope.library_id)
     # The count projection appears before WHERE placeholders in SQL.
     count_parameters: tuple[object, ...] = tag_ids if query.tags_any else ()
     # Let SQLite test the exact literal against indexed text in C. Returning
