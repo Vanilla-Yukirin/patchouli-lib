@@ -40,17 +40,87 @@ _API_ENDPOINTS = (
     ),
     (
         "GET",
+        "/api/v1/sections/{section_id}/pages",
+        "Pages in a Section",
+        "分区中的页面",
+        "retrieval",
+    ),
+    (
+        "GET",
         "/api/v1/sections/{section_id}/pages/{page_id}",
         "Current Page and Revision",
         "当前页面与版本",
         "retrieval",
     ),
     (
+        "GET",
+        "/api/v1/sections/{section_id}/pages/{page_id}/revisions/{revision_number}",
+        "Read an exact Markdown Revision",
+        "读取指定 Markdown 版本",
+        "retrieval",
+    ),
+    (
+        "GET",
+        "/api/v1/sections/{section_id}/pages/{page_id}/revisions/{revision_number}/files",
+        "Files in an exact Revision",
+        "指定版本的文件清单",
+        "retrieval",
+    ),
+    (
+        "GET",
+        "/api/v1/sections/{section_id}/pages/{page_id}/revisions/{revision_number}/files/{filename}",
+        "Download a file from an exact Revision",
+        "下载指定版本中的文件",
+        "retrieval",
+    ),
+    (
         "POST",
         "/api/v1/sections/{section_id}/books/{book_id}/pages",
-        "Create one Markdown Archive",
-        "创建单份 Markdown 归档",
+        "Create one Markdown Archive (legacy-compatible route)",
+        "创建单份 Markdown 归档（旧版兼容接口）",
         "always",
+    ),
+    (
+        "POST",
+        "/api/v1/sections/{section_id}/pages/{page_id}/revisions",
+        "Revise a Markdown Archive (legacy-compatible route)",
+        "修订单份 Markdown 归档（旧版兼容接口）",
+        "always",
+    ),
+    (
+        "PATCH",
+        "/api/v1/sections/{section_id}/pages/{page_id}/occurrence",
+        "Correct a Page's declared occurrence time",
+        "更正页面声明的发生时间",
+        "always",
+    ),
+    (
+        "DELETE",
+        "/api/v1/sections/{section_id}/pages/{page_id}",
+        "Move a Page to Trash",
+        "将页面移入回收站",
+        "always",
+    ),
+    (
+        "POST",
+        "/api/v1/sections/{section_id}/pages/{page_id}/restore",
+        "Restore a Page from Trash",
+        "从回收站恢复页面",
+        "always",
+    ),
+    (
+        "GET",
+        "/api/v1/sections/{section_id}/trash/{page_id}",
+        "Read one Page in Trash",
+        "查看回收站中的指定页面",
+        "always",
+    ),
+    (
+        "GET",
+        "/api/v1/sections/{section_id}/trash",
+        "List Pages in Trash",
+        "列出回收站中的页面",
+        "retrieval",
     ),
     (
         "POST",
@@ -75,6 +145,20 @@ _API_ENDPOINTS = (
     ),
     (
         "GET",
+        "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/revisions",
+        "List file-set Revision history",
+        "列出文件集版本历史",
+        "always",
+    ),
+    (
+        "GET",
+        "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/revisions/{revision_id}/files",
+        "List files in an exact file-set Revision",
+        "列出指定文件集版本中的文件",
+        "always",
+    ),
+    (
+        "GET",
         "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/revisions/{revision_id}/files/{file_name}",
         "Safely download a file from an exact Revision",
         "安全下载指定版本中的文件",
@@ -95,10 +179,45 @@ _API_ENDPOINTS = (
         "always",
     ),
     (
+        "POST",
+        "/api/v1/libraries/{library_id}/tags",
+        "Create a Tag in one Library",
+        "在知识库中创建标签",
+        "always",
+    ),
+    (
+        "GET",
+        "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/tags",
+        "List a Page's Tags",
+        "列出页面的标签",
+        "always",
+    ),
+    (
+        "PUT",
+        "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/tags/{tag_id}",
+        "Attach a Tag to a Page",
+        "为页面关联标签",
+        "always",
+    ),
+    (
+        "DELETE",
+        "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/tags/{tag_id}",
+        "Detach a Tag from a Page",
+        "解除页面的标签关联",
+        "always",
+    ),
+    (
         "GET",
         "/api/v1/agent/skill/manifest",
         "Protected Skill manifest",
         "受保护的 Skill 清单",
+        "always",
+    ),
+    (
+        "GET",
+        "/api/v1/agent/skill/files/{resource_path}",
+        "Download a protected Skill file",
+        "下载受保护的 Skill 文件",
         "always",
     ),
     (
@@ -255,21 +374,34 @@ def api_guide(locale: GuideLocale, *, retrieval_available: bool) -> str:
         )
         + "</p></li>"
         for method, path, english, chinese, status in _API_ENDPOINTS
+        if status != "retrieval" or retrieval_available
     )
     return (
         '<section aria-labelledby="api-guide"><h2 id="api-guide">API</h2>'
         "<p>"
         + _text(
             locale,
-            "This is a selected, reviewed interface directory, not a request console. "
+            "This lists the registered v1 interfaces, not a request console. "
             "Content API and protected Skill downloads require a separate Bearer token; "
             "the admin login cookie does not authorize them. Confirm actual features with "
             "capabilities. This page sends no content API requests.",
-            "这里是经过审核的精选接口目录，不是请求控制台。内容 API 和受保护的 Skill "
+            "这里列出已注册的 v1 接口，不是请求控制台。内容 API 和受保护的 Skill "
             "下载需要独立的 Bearer Token；管理登录 Cookie 不能代替它。实际能力请以 "
             "capabilities 为准。本页不会调用内容 API。",
         )
-        + '</p><ul class="item-list interface-list">'
+        + "</p>"
+        + (
+            ""
+            if retrieval_available
+            else '<p class="meta">'
+            + _text(
+                locale,
+                "Retrieval routes are not registered; they require retrieval configuration.",
+                "检索接口尚未注册，需要检索配置。",
+            )
+            + "</p>"
+        )
+        + '<ul class="item-list interface-list">'
         + rows
         + "</ul></section>"
         + _preview(

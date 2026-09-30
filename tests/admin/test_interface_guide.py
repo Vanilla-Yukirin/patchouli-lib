@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi.routing import APIRoute, iter_route_contexts
 from fastapi.testclient import TestClient
 
+from patchouli_lib.admin.interface_guide import api_guide
 from patchouli_lib.admin.passwords import hash_password
 from patchouli_lib.api.agent_skill_routes import SkillBundle
 from patchouli_lib.api.auth_contracts import CapabilitiesResponse
@@ -59,6 +61,15 @@ def _preview(html: str, identifier: str) -> dict[str, Any]:
     value = json.loads(unescape(match.group(1)))
     assert isinstance(value, dict)
     return value
+
+
+def _directory_routes(html: str) -> set[tuple[str, str]]:
+    entries = re.findall(
+        r"<strong>(GET|POST|PUT|PATCH|DELETE)</strong> <code>(/api/v1/[^<]+)</code>",
+        html,
+    )
+    assert len(entries) == len(set(entries))
+    return set(entries)
 
 
 def test_interface_pages_are_session_protected_and_remain_read_only(
@@ -118,6 +129,32 @@ def test_api_directory_and_synthetic_examples_match_reviewed_wire_shapes(
     assert file_set.files[0].filename == "content.md"
     tags = TagCollection.model_validate(_preview(response.text, "tags-preview"))
     assert tags.items[0].page_count == 1
+
+
+@pytest.mark.parametrize("retrieval_available", [False, True])
+def test_api_directory_matches_registered_v1_routes(retrieval_available: bool) -> None:
+    values: dict[str, object] = {
+        "environment": "test",
+        "database_url": "sqlite:///:memory:",
+        "admin_enabled": False,
+    }
+    if retrieval_available:
+        values["retrieval_cursor_signing_secret"] = "synthetic-retrieval-secret-1234567890"
+    app = create_app(Settings.model_validate(values))
+    registered = {
+        (method, route.path_format)
+        for context in iter_route_contexts(app.routes)
+        if isinstance(route := context.route, APIRoute) and route.path_format.startswith("/api/v1/")
+        for method in route.methods or ()
+        if method in {"GET", "POST", "PUT", "PATCH", "DELETE"}
+    }
+    directory = _directory_routes(api_guide("zh-CN", retrieval_available=retrieval_available))
+    assert directory == registered
+    assert ("POST", "/api/v1/sections/{section_id}/search") in directory
+    if retrieval_available:
+        assert ("GET", "/api/v1/sections") in directory
+    else:
+        assert ("GET", "/api/v1/sections") not in directory
 
 
 def test_skill_guide_shows_only_packaged_manifest_and_escaped_fixed_files(
