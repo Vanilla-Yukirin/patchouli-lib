@@ -214,24 +214,35 @@ def _rows_for_scope(
         )
     else:
         tag_count = "0"
+    candidate_cte = ""
+    candidate_join = ""
+    candidate_parameters: tuple[object, ...] = ()
     if candidate_expression is not None:
-        conditions.append(
-            "EXISTS (SELECT 1 FROM search_documents AS candidate "
-            "JOIN search_terms ON search_terms.rowid = candidate.id "
-            "WHERE candidate.generation = s.generation "
-            "AND candidate.library_id = s.library_id AND candidate.page_uid = s.page_uid "
-            "AND search_terms MATCH ?)"
+        # Evaluate FTS once per Library. A correlated MATCH under a Page scan
+        # reparses the same expression thousands of times on broad queries.
+        candidate_cte = (
+            "WITH candidate_pages AS MATERIALIZED ("
+            "SELECT DISTINCT candidate.library_id, candidate.page_uid "
+            "FROM search_terms JOIN search_documents AS candidate "
+            "ON candidate.id = search_terms.rowid "
+            "WHERE search_terms MATCH ? AND candidate.generation = ? "
+            "AND candidate.library_id = ?) "
         )
-        parameters.append(candidate_expression)
+        candidate_join = (
+            "JOIN candidate_pages AS cp ON cp.library_id = s.library_id "
+            "AND cp.page_uid = s.page_uid "
+        )
+        candidate_parameters = (candidate_expression, generation, scope.library_id)
     # The count projection appears before WHERE placeholders in SQL.
     count_parameters: tuple[object, ...] = tag_ids if query.tags_any else ()
     sql = (
-        "SELECT p.library_id, p.section_id, p.book_id, p.page_id, "
+        candidate_cte + "SELECT p.library_id, p.section_id, p.book_id, p.page_id, "
         "p.current_revision_id, p.title, p.occurred_at, "
         + tag_count
         + ", d.source_kind, d.file_name, d.normalized_text "
         "FROM search_page_state AS s "
-        "JOIN pages AS p ON p.library_id = s.library_id AND p.page_uid = s.page_uid "
+        + candidate_join
+        + "JOIN pages AS p ON p.library_id = s.library_id AND p.page_uid = s.page_uid "
         "AND p.section_id = s.section_id AND p.book_id = s.book_id "
         "AND p.page_id = s.page_id AND p.current_revision_id = s.revision_id "
         "AND p.current_revision_number = s.revision_number "
@@ -245,7 +256,9 @@ def _rows_for_scope(
     )
     return [
         tuple(row)
-        for row in connection.exec_driver_sql(sql, (*count_parameters, *parameters)).all()
+        for row in connection.exec_driver_sql(
+            sql, (*candidate_parameters, *count_parameters, *parameters)
+        ).all()
     ]
 
 

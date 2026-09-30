@@ -12,7 +12,11 @@ from sqlalchemy import Engine
 from sqlalchemy.exc import IntegrityError
 
 from patchouli_lib.backup import validate_database
-from patchouli_lib.backup.manifest import PAGE_TITLE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION
+from patchouli_lib.backup.manifest import (
+    PAGE_TITLE_SCHEMA_REVISION,
+    REQUEST_LOG_SCHEMA_REVISION,
+    SUPPORTED_SCHEMA_REVISION,
+)
 from patchouli_lib.database import build_engine, immediate_transaction
 from patchouli_lib.request_log import UNMATCHED_ROUTE, RequestLogRepository, RequestLogWrite
 
@@ -177,7 +181,9 @@ def test_migration_downgrade_never_discards_records(
         RequestLogRepository(connection).add(_entry(1))
     with pytest.raises(RuntimeError, match="Cannot discard stored HTTP request records"):
         command.downgrade(config, PAGE_TITLE_SCHEMA_REVISION)
-    assert validate_database(path).schema_revision == SUPPORTED_SCHEMA_REVISION
+    assert validate_database(path, schema_revision=REQUEST_LOG_SCHEMA_REVISION).schema_revision == (
+        REQUEST_LOG_SCHEMA_REVISION
+    )
     with immediate_transaction(engine) as connection:
         assert RequestLogRepository(connection).delete_before(2) == 1
     command.downgrade(config, PAGE_TITLE_SCHEMA_REVISION)

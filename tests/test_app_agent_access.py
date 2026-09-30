@@ -250,6 +250,7 @@ def test_application_registers_exact_agent_access_routes(tmp_path: Path) -> None
                 "PATCH",
             ),
             ("/api/v1/sections/{section_id}/search", "POST"),
+            ("/api/v1/search", "POST"),
         }
     finally:
         application.state.engine.dispose()

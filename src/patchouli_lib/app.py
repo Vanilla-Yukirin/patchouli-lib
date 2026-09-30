@@ -19,11 +19,13 @@ from patchouli_lib.api.file_set_write_routes import create_file_set_write_router
 from patchouli_lib.api.request_ids import RequestIDMiddleware
 from patchouli_lib.api.retrieval_routes import create_retrieval_router
 from patchouli_lib.api.search_routes import create_search_router
+from patchouli_lib.api.search_routes_v2 import create_search_v2_router
 from patchouli_lib.api.tag_routes import create_tag_router
 from patchouli_lib.config import Settings
 from patchouli_lib.database import DatabaseNotReadyError, build_engine, check_database
 from patchouli_lib.request_log.middleware import RequestLogMiddleware, run_request_log_retention
 from patchouli_lib.retrieval.cursor import CursorCodec
+from patchouli_lib.search.index_v2 import SearchIndexUnavailableError, require_ready_index
 
 
 class ServiceResponse(BaseModel):
@@ -53,6 +55,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         successful_replay_retention="indefinite-alpha",
     )
 
+    def search_ready() -> bool:
+        try:
+            with engine.connect() as connection:
+                require_ready_index(connection)
+        except SearchIndexUnavailableError:
+            return False
+        return True
+
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         application.state.engine = engine
@@ -78,6 +88,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         create_auth_router(
             engine,
             capability_configuration=capabilities,
+            search_ready=search_ready,
         )
     )
     application.include_router(create_archive_router(engine, cursor_codec=cursor_codec))
@@ -85,6 +96,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(create_file_set_write_router(engine))
     application.include_router(create_tag_router(engine))
     application.include_router(create_search_router(engine))
+    application.include_router(create_search_v2_router(engine))
     application.include_router(create_agent_skill_router(engine))
     if cursor_codec is not None:
         application.include_router(

@@ -227,6 +227,13 @@ _API_ENDPOINTS = (
         "搜索：不可用（503）",
         "unavailable",
     ),
+    (
+        "POST",
+        "/api/v1/search",
+        "Current-Page search (requires a rebuilt index)",
+        "当前页面搜索（需先重建索引）",
+        "always",
+    ),
 )
 
 _SEARCH_EXAMPLE: dict[str, object] = {
@@ -237,6 +244,15 @@ _SEARCH_EXAMPLE: dict[str, object] = {
     "code": "search_unavailable",
     "request_id": "req_00000000000000000000000000000000",
     "details": {},
+}
+
+_SEARCH_V2_REQUEST_EXAMPLE: dict[str, object] = {
+    "keywords": ["示例", "example"],
+    "tags_any": [],
+    "libraries": None,
+    "occurred_from_us": None,
+    "occurred_before_us": None,
+    "limit": 20,
 }
 
 
@@ -414,6 +430,12 @@ def api_guide(locale: GuideLocale, *, retrieval_available: bool) -> str:
             "search-preview",
             "POST /api/v1/sections/{section_id}/search · 503",
             _SEARCH_EXAMPLE,
+            locale,
+        )
+        + _preview(
+            "search-v2-preview",
+            "POST /api/v1/search · JSON request",
+            _SEARCH_V2_REQUEST_EXAMPLE,
             locale,
         )
         + _preview(

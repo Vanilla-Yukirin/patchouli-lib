@@ -173,10 +173,15 @@ def _documents(
 
 
 def _erase_page(connection: Connection, generation: int, library_id: str, page_uid: bytes) -> None:
-    identifiers = connection.exec_driver_sql(
-        "SELECT id FROM search_documents WHERE generation = ? AND library_id = ? AND page_uid = ?",
-        (generation, library_id, page_uid),
-    ).scalars().all()
+    identifiers = (
+        connection.exec_driver_sql(
+            "SELECT id FROM search_documents "
+            "WHERE generation = ? AND library_id = ? AND page_uid = ?",
+            (generation, library_id, page_uid),
+        )
+        .scalars()
+        .all()
+    )
     for document_id in identifiers:
         connection.exec_driver_sql("DELETE FROM search_terms WHERE rowid = ?", (document_id,))
     connection.exec_driver_sql(
@@ -355,9 +360,13 @@ def rebuild_search_index(engine: Engine, *, clock: Callable[[], int] = utc_micro
         )
         connection.exec_driver_sql("DELETE FROM search_dirty_pages")
         if old_generation is not None:
-            old_documents = connection.exec_driver_sql(
-                "SELECT id FROM search_documents WHERE generation = ?", (old_generation,)
-            ).scalars().all()
+            old_documents = (
+                connection.exec_driver_sql(
+                    "SELECT id FROM search_documents WHERE generation = ?", (old_generation,)
+                )
+                .scalars()
+                .all()
+            )
             for document_id in old_documents:
                 connection.exec_driver_sql(
                     "DELETE FROM search_terms WHERE rowid = ?", (document_id,)

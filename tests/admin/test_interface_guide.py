@@ -151,6 +151,7 @@ def test_api_directory_matches_registered_v1_routes(retrieval_available: bool) -
     directory = _directory_routes(api_guide("zh-CN", retrieval_available=retrieval_available))
     assert directory == registered
     assert ("POST", "/api/v1/sections/{section_id}/search") in directory
+    assert ("POST", "/api/v1/search") in directory
     if retrieval_available:
         assert ("GET", "/api/v1/sections") in directory
     else:

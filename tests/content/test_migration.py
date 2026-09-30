@@ -182,6 +182,10 @@ def test_page_content_migration_upgrade_check_downgrade_upgrade(
                 "trg_revisions_mirror_content_file",
                 "trg_revisions_require_file_seal",
                 "trg_revisions_sequential_insert",
+                "trg_search_revisions_insert",
+                "trg_search_revisions_update",
+                "trg_search_revisions_update_old",
+                "trg_search_revisions_delete",
             }
             file_seal_triggers = set(
                 first.execute(
@@ -203,6 +207,14 @@ def test_page_content_migration_upgrade_check_downgrade_upgrade(
                 "trg_revision_file_seals_no_delete",
                 "trg_revision_file_seal_guards_no_update",
                 "trg_revision_file_seal_guards_no_delete",
+                "trg_search_revision_files_insert",
+                "trg_search_revision_files_update",
+                "trg_search_revision_files_update_old",
+                "trg_search_revision_files_delete",
+                "trg_search_revision_file_seals_insert",
+                "trg_search_revision_file_seals_update",
+                "trg_search_revision_file_seals_update_old",
+                "trg_search_revision_file_seals_delete",
             }
             content_triggers = set(
                 first.execute(

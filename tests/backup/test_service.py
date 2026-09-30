@@ -593,17 +593,19 @@ def test_backup_discards_only_disposable_search_projection(
     validate_database(restored)
 
     with closing(sqlite3.connect(restored)) as artifact:
-        assert artifact.execute(
-            "SELECT active_generation, ready FROM search_meta"
-        ).fetchone() == (None, 0)
+        assert artifact.execute("SELECT active_generation, ready FROM search_meta").fetchone() == (
+            None,
+            0,
+        )
         assert artifact.execute("SELECT count(*) FROM search_documents").fetchone() == (0,)
         assert artifact.execute("SELECT count(*) FROM search_terms").fetchone() == (0,)
         assert artifact.execute("SELECT count(*) FROM pages").fetchone() == (1,)
     with complete_engine.connect() as connection:
         assert connection.exec_driver_sql("SELECT ready FROM search_meta").scalar_one() == 1
-        assert connection.exec_driver_sql(
-            "SELECT count(*) FROM search_documents"
-        ).scalar_one() == source_documents
+        assert (
+            connection.exec_driver_sql("SELECT count(*) FROM search_documents").scalar_one()
+            == source_documents
+        )
 
 
 def test_online_backup_observes_one_consistent_concurrent_snapshot(
