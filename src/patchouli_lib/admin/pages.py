@@ -18,6 +18,7 @@ from patchouli_lib.admin.read_model import (
     RequestLogItem,
     SectionView,
     TagDirectoryView,
+    TagItem,
     TagView,
     TrashDirectoryView,
     TrashPageView,
@@ -26,6 +27,7 @@ from patchouli_lib.admin.service import DeliveredCredential
 from patchouli_lib.api.agent_skill_routes import SkillBundle
 from patchouli_lib.auth.library_policy import LibraryAction, target_library_grants_digest
 from patchouli_lib.auth.schemas import SectionAction
+from patchouli_lib.search.service_v2 import SearchPageV2
 
 AdminLocale = Literal["en", "zh-CN"]
 _TAG_TOKEN_HELP = (
@@ -474,6 +476,39 @@ _ZH_CN: dict[str, str] = {
     "No sections yet.": "暂无分区。",
     "No books yet.": "暂无书籍。",
     "No pages yet.": "暂无页面。",
+    "Search": "搜索",
+    "Search current Pages": "搜索当前页面",
+    "Search words": "搜索词",
+    (
+        "Separate multiple words with spaces. Without spaces, "
+        "Chinese text is one literal search item."
+    ): ("多个关键词用空格分隔；没有空格的中文内容会作为一个完整词项搜索。"),
+    "All libraries": "所有知识库",
+    "Filter by Library": "筛选知识库",
+    "Any selected Tag": "任一所选标签",
+    "Hold Ctrl or Command to select multiple Tags. No selection means no Tag filter. "
+    "When filtering one Library, select its Tags only.": (
+        "按住 Ctrl 或 Command 可多选标签；不选则不限标签。指定知识库时只能选该库的标签。"
+    ),
+    "Occurred from (UTC)": "声明时间起点（UTC）",
+    "Occurred before (UTC)": "声明时间终点（UTC，不含）",
+    "Time filters use the Page's declared occurrence time, not its upload time.": (
+        "时间筛选依据页面声明的发生时间，而非上传时间。"
+    ),
+    "Run search": "开始搜索",
+    "Search results": "搜索结果",
+    "No matching Pages.": "没有匹配的页面。",
+    "Search index is not ready. Rebuild it before searching.": (
+        "搜索索引尚未就绪，请先重建索引再搜索。"
+    ),
+    "Choose a keyword, Tag, or time range before searching.": (
+        "请先填写关键词、选择标签或填写时间范围。"
+    ),
+    "The search form is invalid. Check the selected fields and UTC times.": (
+        "搜索表单无效，请检查筛选项与 UTC 时间。"
+    ),
+    "The selected search scope is unavailable.": "所选搜索范围不可用。",
+    "Only the Master Token session can search here.": "此处仅允许主 Token 会话搜索。",
     "Create Library": "新建知识库",
     "Create Section": "新建分区",
     "Create Book": "新建书籍",
@@ -828,6 +863,102 @@ def dashboard_page(
 </div>
 """
     return _document(localize(locale, "Home"), content, locale)
+
+
+def search_page(
+    csrf_token: str,
+    libraries: tuple[tuple[LibraryItem, tuple[TagItem, ...]], ...],
+    *,
+    locale: AdminLocale = "en",
+    results: tuple[SearchPageV2, ...] | None = None,
+    message: str | None = None,
+) -> str:
+    """Render a server-side search form without placing terms or credentials in URLs."""
+
+    csrf = escape(csrf_token, quote=True)
+    keyword_help = localize(
+        locale,
+        "Separate multiple words with spaces. Without spaces, "
+        "Chinese text is one literal search item.",
+    )
+    tag_help = localize(
+        locale,
+        "Hold Ctrl or Command to select multiple Tags. No selection means no Tag filter. "
+        "When filtering one Library, select its Tags only.",
+    )
+    time_help = localize(
+        locale, "Time filters use the Page's declared occurrence time, not its upload time."
+    )
+    library_options = "".join(
+        f'<option value="{escape(library.id, quote=True)}">{escape(library.name)}</option>'
+        for library, _ in libraries
+    )
+    tag_options = "".join(
+        '<optgroup label="'
+        + escape(library.name, quote=True)
+        + '">'
+        + "".join(
+            f'<option value="{escape(library.id, quote=True)}:{escape(tag.id, quote=True)}">'
+            f"{escape(tag.name)}</option>"
+            for tag in tags
+        )
+        + "</optgroup>"
+        for library, tags in libraries
+        if tags
+    )
+    result_html = ""
+    if results is not None:
+        cards = "".join(
+            '<li><a href="/admin/libraries/'
+            f"{escape(item.library_id, quote=True)}/sections/"
+            f"{escape(item.section_id, quote=True)}/books/"
+            f"{escape(item.book_id, quote=True)}/pages/"
+            f'{escape(item.page_id, quote=True)}">{escape(item.title)}</a>'
+            f'<p class="meta">{localize(locale, "Occurred")}: {_time(item.occurred_at)}'
+            f" · {localize(locale, 'Version')}: {item.revision_number}</p></li>"
+            for item in results
+        )
+        result_html = (
+            f"<section><h2>{localize(locale, 'Search results')}</h2>"
+            + (
+                f'<ul class="item-list">{cards}</ul>'
+                if cards
+                else f'<p class="card">{localize(locale, "No matching Pages.")}</p>'
+            )
+            + "</section>"
+        )
+    notice = "" if message is None else _notice(localize(locale, message), error=True)
+    content = f"""
+{_header(csrf, locale, switch_path="/admin/search")}
+<div class="admin-shell">
+{_sidebar(locale, current="search")}
+<main>
+  <h1>{localize(locale, "Search current Pages")}</h1>
+  {notice}
+  <form class="card" method="post" action="/admin/search" autocomplete="off">
+    {_csrf(csrf)}
+    <label for="keywords">{localize(locale, "Search words")}</label>
+    <input id="keywords" name="keywords" type="text" maxlength="32768">
+    <small class="field-help">{keyword_help}</small>
+    <label for="library_id">{localize(locale, "Filter by Library")}</label>
+    <select id="library_id" name="library_id">
+      <option value="">{localize(locale, "All libraries")}</option>{library_options}
+    </select>
+    <label for="tags">{localize(locale, "Any selected Tag")}</label>
+    <select id="tags" name="tags" multiple size="6">{tag_options}</select>
+    <small class="field-help">{tag_help}</small>
+    <label for="occurred_from">{localize(locale, "Occurred from (UTC)")}</label>
+    <input id="occurred_from" name="occurred_from" type="datetime-local" step="1">
+    <label for="occurred_before">{localize(locale, "Occurred before (UTC)")}</label>
+    <input id="occurred_before" name="occurred_before" type="datetime-local" step="1">
+    <small class="field-help">{time_help}</small>
+    <button type="submit">{localize(locale, "Run search")}</button>
+  </form>
+  {result_html}
+</main>
+</div>
+"""
+    return _document(localize(locale, "Search"), content, locale)
 
 
 def request_log_page(
@@ -2312,6 +2443,7 @@ def _sidebar(locale: AdminLocale, *, current: str) -> str:
     entries = [
         ("home", "Home", "/admin"),
         ("libraries", "Libraries", "/admin/libraries"),
+        ("search", "Search", "/admin/search"),
         ("tags", "Tags", "/admin/tags"),
         ("trash", "Trash", "/admin/trash"),
         ("agents", "Identities", "/admin/agents"),
@@ -2376,6 +2508,7 @@ def _header(
   <nav aria-label="{localize(locale, "Administration")}">
     <a href="/admin"><strong>PatchouliLib</strong></a>
     <a href="/admin/libraries">{localize(locale, "Libraries")}</a>
+    <a href="/admin/search">{localize(locale, "Search")}</a>
     <a href="/admin/agents">{localize(locale, "Identities")}</a>
     <a href="/admin/guide">{localize(locale, "Guide")}</a>
     <a href="/admin/agent">Agent</a>

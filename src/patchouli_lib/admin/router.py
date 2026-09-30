@@ -5,8 +5,10 @@ import binascii
 import hashlib
 import hmac
 import json
+import re
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from ipaddress import IPv6Address
 from typing import Final, cast
 from urllib.parse import parse_qsl, urlsplit
@@ -59,6 +61,7 @@ from patchouli_lib.admin.pages import (
     page_preview_page,
     request_log_page,
     restore_error_page,
+    search_page,
     section_page,
     tag_detail_page,
     tag_directory_page,
@@ -66,7 +69,7 @@ from patchouli_lib.admin.pages import (
     trash_directory_page,
 )
 from patchouli_lib.admin.passwords import password_matches
-from patchouli_lib.admin.read_model import AdminReadModel
+from patchouli_lib.admin.read_model import AdminReadModel, LibraryItem, TagItem
 from patchouli_lib.admin.service import (
     AdminActionService,
     AgentMetadataVersionConflictError,
@@ -108,6 +111,14 @@ from patchouli_lib.operator.service import (
     PolicyConflictError,
     ResourceNotFoundError,
 )
+from patchouli_lib.search.index_v2 import SearchIndexUnavailableError
+from patchouli_lib.search.query_v2 import (
+    MAX_QUERY_BODY_BYTES,
+    InvalidSearchQueryV2,
+    SearchQueryV2,
+    parse_query_v2_json,
+)
+from patchouli_lib.search.service_v2 import SearchScopeError, search_pages_for_master
 from patchouli_lib.tags.service import (
     TagAuthorizationError,
     TagNotFoundError,
@@ -704,6 +715,102 @@ def create_admin_router(
             request,
             lambda csrf, locale: libraries_page(csrf, read_model.list_libraries(), locale=locale),
         )
+
+    def search_filters() -> tuple[tuple[LibraryItem, tuple[TagItem, ...]], ...]:
+        libraries = read_model.list_libraries()
+        return tuple(
+            (library, view.tags if (view := read_model.list_library_tags(library.id)) else ())
+            for library in libraries
+        )
+
+    @router.get("/search")
+    def search_form(request: Request) -> Response:
+        locale = locale_for(request)
+        session = current_session(request)
+        if session is None:
+            response = redirect("/admin/login")
+            _clear_cookie(response, secure=secure_cookie(request))
+            remember_requested_locale(response, request)
+            return response
+        if not isinstance(session, MasterAdminSession):
+            return forbidden(request, "Only the Master Token session can search here.")
+        page_response = html(
+            search_page(session.csrf_token, search_filters(), locale=locale), locale=locale
+        )
+        remember_requested_locale(page_response, request)
+        return page_response
+
+    @router.post("/search")
+    async def search_submit(request: Request) -> Response:
+        locale = locale_for(request)
+        if not _same_origin_submission(request):
+            return forbidden(request)
+        session = current_session(request)
+        if session is None:
+            response = html(
+                login_page(locale=locale, message="Sign in again."), locale=locale, status_code=401
+            )
+            _clear_cookie(response, secure=secure_cookie(request))
+            return response
+        if not isinstance(session, MasterAdminSession):
+            return forbidden(request, "Only the Master Token session can search here.")
+        try:
+            values = await _read_form(
+                request,
+                allowed_fields=frozenset(
+                    {
+                        "csrf_token",
+                        "keywords",
+                        "library_id",
+                        "tags",
+                        "occurred_from",
+                        "occurred_before",
+                    }
+                ),
+                repeatable_fields=frozenset({"tags"}),
+                max_fields=261,
+                max_bytes=MAX_QUERY_BODY_BYTES,
+            )
+            _require_csrf(values, session)
+            query = _search_query_from_form(values)
+            result = await run_in_threadpool(
+                search_pages_for_master,
+                engine,
+                request.cookies.get(_SESSION_COOKIE, ""),
+                codec,
+                query,
+            )
+        except _FormError as exc:
+            message, status = exc.safe_message, exc.status_code
+        except InvalidSearchQueryV2:
+            message = "The search form is invalid. Check the selected fields and UTC times."
+            status = 422
+        except SearchScopeError:
+            message, status = "The selected search scope is unavailable.", 422
+        except SearchIndexUnavailableError:
+            message, status = "Search index is not ready. Rebuild it before searching.", 503
+        except AuthenticationError:
+            response = html(
+                login_page(locale=locale, message="Sign in again."), locale=locale, status_code=401
+            )
+            _clear_cookie(response, secure=secure_cookie(request))
+            return response
+        else:
+            filters = await run_in_threadpool(search_filters)
+            response = html(
+                search_page(session.csrf_token, filters, locale=locale, results=result.items),
+                locale=locale,
+            )
+            remember_requested_locale(response, request)
+            return response
+        filters = await run_in_threadpool(search_filters)
+        response = html(
+            search_page(session.csrf_token, filters, locale=locale, message=message),
+            locale=locale,
+            status_code=status,
+        )
+        remember_requested_locale(response, request)
+        return response
 
     @router.get("/tags")
     def tags_index(request: Request) -> Response:
@@ -2261,6 +2368,59 @@ def _single(values: FormValues, name: str) -> str:
     if not isinstance(value, str):
         raise _FormError(422, "A required form field is missing.")
     return value
+
+
+def _form_utc_microseconds(value: str) -> int | None:
+    if not value:
+        return None
+    if (
+        re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}"
+            r"(?::[0-9]{2}(?:\.[0-9]{1,6})?)?",
+            value,
+        )
+        is None
+    ):
+        raise InvalidSearchQueryV2
+    try:
+        parsed = datetime.fromisoformat(value).replace(tzinfo=UTC)
+    except ValueError:
+        raise InvalidSearchQueryV2 from None
+    delta = parsed - datetime(1970, 1, 1, tzinfo=UTC)
+    return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+
+
+def _search_query_from_form(values: FormValues) -> SearchQueryV2:
+    """Translate the bounded HTML form into the exact v2 API query contract."""
+
+    keywords = _single(values, "keywords").split()
+    library_id = _single(values, "library_id")
+    tags = values.get("tags", [])
+    if not isinstance(tags, list):
+        raise InvalidSearchQueryV2
+    tag_identities = []
+    for tag in tags:
+        library, separator, identity = tag.partition(":")
+        if separator != ":" or not library or not identity or ":" in identity:
+            raise InvalidSearchQueryV2
+        tag_identities.append({"library_id": library, "tag_id": identity})
+    query: dict[str, object] = {"keywords": keywords, "tags_any": tag_identities}
+    if library_id:
+        query["libraries"] = [library_id]
+    for name, field in (
+        ("occurred_from", "occurred_from_us"),
+        ("occurred_before", "occurred_before_us"),
+    ):
+        value = _form_utc_microseconds(_single(values, name))
+        if value is not None:
+            query[field] = value
+    if (
+        not keywords
+        and not tag_identities
+        and not any(field in query for field in ("occurred_from_us", "occurred_before_us"))
+    ):
+        raise _FormError(422, "Choose a keyword, Tag, or time range before searching.")
+    return parse_query_v2_json(json.dumps(query, ensure_ascii=False).encode("utf-8"))
 
 
 def _clear_cookie(response: Response, *, secure: bool) -> None:
