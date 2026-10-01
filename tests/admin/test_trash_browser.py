@@ -313,6 +313,20 @@ def test_master_delete_retains_history_and_can_be_restored(
     assert _restore(client, detail, _master_restore_form(client, detail)).status_code == 303
     assert client.get(path).status_code == 200
     assert "# searchable needle" in client.get(path).text
+    restored_search = client.post(
+        "/admin/search",
+        data={
+            "csrf_token": values["csrf_token"],
+            "keywords": "needle",
+            "library_id": "",
+            "occurred_from": "",
+            "occurred_before": "",
+        },
+        headers={"Origin": _ORIGIN},
+    )
+    assert restored_search.status_code == 200
+    assert page_id in restored_search.text
+    assert f'href="{path}"' in restored_search.text
 
 
 def test_master_delete_rejects_wrong_session_form_and_path(

@@ -331,6 +331,115 @@ def test_page_top_k_uses_stable_tie_breaker_without_candidate_truncation(engine:
     assert all(item.revision_number == 1 for item in top_two)
 
 
+def test_current_multifile_search_ranks_fields_tags_and_time_without_binary_text(
+    engine: Engine,
+) -> None:
+    home = seed_library_structure(engine)
+    context = _agent(engine, home[0], home[1])
+    # All Pages satisfy the Tag OR filter. The first Page is newer than the
+    # last; the older two-Tag Page must still win an otherwise tied query.
+    cases = (
+        (
+            0x21,
+            "amber",
+            "2026-08-13T10:00:03.123456Z",
+            (("indigo.bin", b"\xff\xfeopaque-secret"), ("plain.txt", b"neutral")),
+            (TAG_A,),
+        ),
+        (
+            0x22,
+            "Mixed",
+            "2026-08-13T10:00:04.123456Z",
+            (("amber.bin", b"\xff\xfeopaque-secret"), ("notes.txt", b"indigo")),
+            (TAG_A,),
+        ),
+        (
+            0x23,
+            "Texts",
+            "2026-08-13T10:00:05.123456Z",
+            (("part-a.md", b"amber"), ("part-b.txt", b"indigo")),
+            (TAG_A,),
+        ),
+        (
+            0x24,
+            "amber",
+            "2026-08-13T10:00:01.123456Z",
+            (("neutral.txt", b"plain"),),
+            (TAG_A, TAG_B),
+        ),
+        (
+            0x25,
+            "amber",
+            "2026-08-13T10:00:02.123456Z",
+            (("neutral.txt", b"plain"),),
+            (TAG_A,),
+        ),
+    )
+    pages = [
+        _page(
+            engine,
+            home,
+            page_byte=page_byte,
+            title=title,
+            content=b"legacy-revision-only",
+            occurrence=occurrence,
+        )
+        for page_byte, title, occurrence, _files, _tags in cases
+    ]
+    with immediate_transaction(engine) as connection:
+        repository = ContentRepository(connection)
+        tags = TagRepository(connection)
+        for tag_id in (TAG_A, TAG_B):
+            tags.add_tag(
+                library_id=home[0], tag_id=tag_id, name=f"Synthetic {tag_id[0]}", created_at=0
+            )
+        for (page_byte, _title, _occurrence, files, assigned), (uid, page_id, _time) in zip(
+            cases, pages, strict=True
+        ):
+            page = repository.get_page(home[0], page_id)
+            assert page is not None
+            revision_id = f"rev_{page_byte:032x}"
+            repository.add_file_set_revision(
+                page,
+                revision_id=revision_id,
+                created_at=CLOCK,
+                manifest=build_file_manifest(files),
+            )
+            assert (
+                repository.advance_file_set_current_revision(
+                    page, revision_id=revision_id, updated_at=CLOCK
+                )
+                is not None
+            )
+            for tag_id in assigned:
+                tags.attach_page(library_id=home[0], page_uid=uid, tag_id=tag_id, created_at=0)
+    rebuild_search_index(engine, clock=lambda: CLOCK)
+    tag_filter = [{"library_id": home[0], "tag_id": tag_id} for tag_id in (TAG_A, TAG_B)]
+
+    both = _search(engine, context, keywords=["amber", "indigo"], tags_any=tag_filter)
+    assert [item.page_id for item in both] == [pages[index][1] for index in (0, 1, 2, 3, 4)]
+    assert all(item.revision_number == 2 for item in both)
+    assert [
+        [(source.kind, source.file_name) for source in item.match_sources] for item in both
+    ] == [
+        [("title", None), ("file_name", "indigo.bin")],
+        [("file_name", "amber.bin"), ("file_text", "notes.txt")],
+        [("file_text", "part-a.md"), ("file_text", "part-b.txt")],
+        [("title", None)],
+        [("title", None)],
+    ]
+    # With one keyword, the older two-Tag title outranks newer one-Tag titles;
+    # those titles then order by declared time before weaker file fields.
+    one = _search(engine, context, keywords=["amber"], tags_any=tag_filter)
+    assert [item.page_id for item in one] == [pages[index][1] for index in (3, 0, 4, 1, 2)]
+    assert [item.page_id for item in _search(engine, context, keywords=["indigo.bin"])] == [
+        pages[0][1]
+    ]
+    assert _search(engine, context, keywords=["opaque-secret"]) == ()
+    assert _search(engine, context, keywords=["amberindigo"]) == ()
+    assert _search(engine, context, keywords=["legacy-revision-only"]) == ()
+
+
 def test_tag_time_unicode_binary_name_and_old_revision(engine: Engine) -> None:
     home = seed_library_structure(engine)
     context = _agent(engine, home[0], home[1])
