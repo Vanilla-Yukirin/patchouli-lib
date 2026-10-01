@@ -1,8 +1,8 @@
 """Storage primitives for the single-person administration identity.
 
-An empty table never authorizes remote initialization. Only local commands
-may initialize or recover the identity after verifying their execution
-context. The HTTP login reads the verifier but cannot create or recover it.
+An empty table never authorizes remote initialization. A local command or
+the separately authorized first-setup service may initialize the identity;
+lost-token recovery remains local-only. HTTP login only reads the verifier.
 """
 
 from __future__ import annotations
@@ -82,6 +82,17 @@ class MasterTokenRepository:
 
         No storage method can establish that a process is local. Never expose
         this operation through an empty-database HTTP registration route.
+        """
+
+        return self.initialize_after_authorized_setup(token, now=now)
+
+    def initialize_after_authorized_setup(self, token: str, *, now: int) -> MasterTokenState:
+        """Persist the first identity in the caller's authorized transaction.
+
+        This primitive grants no authorization. The caller must establish
+        local CLI authority or recheck the protected browser setup proof and
+        absence of an identity under its own ``BEGIN IMMEDIATE`` lock.
+        It does not commit, create a session, or perform lost-token recovery.
         """
 
         if not _valid_time(now):

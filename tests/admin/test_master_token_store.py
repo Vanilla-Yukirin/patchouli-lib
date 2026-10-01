@@ -58,6 +58,22 @@ def test_first_setup_stores_only_salted_verifier_and_one_identity(master_engine:
         assert connection.execute(select(MasterIdentity.slot)).scalars().all() == [1]
 
 
+def test_authorized_setup_primitive_retains_caller_transaction_ownership(
+    master_engine: Engine,
+) -> None:
+    with (
+        pytest.raises(RuntimeError, match="Synthetic setup rollback"),
+        immediate_transaction(master_engine) as connection,
+    ):
+        repository = MasterTokenRepository(connection, identity_factory=lambda: IDENTITY)
+        state = repository.initialize_after_authorized_setup(OLD_TOKEN, now=1_000)
+        assert state.identity_id == IDENTITY
+        assert repository.authenticate(OLD_TOKEN) == state
+        raise RuntimeError("Synthetic setup rollback")
+    with master_engine.connect() as connection:
+        assert not MasterTokenRepository(connection).has_identity()
+
+
 def test_rotation_rejects_old_token_and_old_session_generation(master_engine: Engine) -> None:
     with immediate_transaction(master_engine) as connection:
         repository = MasterTokenRepository(connection, identity_factory=lambda: IDENTITY)

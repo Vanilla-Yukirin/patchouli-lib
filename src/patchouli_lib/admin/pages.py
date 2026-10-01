@@ -613,8 +613,15 @@ def localize(locale: AdminLocale, text: str) -> str:
     return text
 
 
-def login_page(*, locale: AdminLocale = "en", message: str | None = None) -> str:
+def login_page(
+    *, locale: AdminLocale = "en", message: str | None = None, master_mode: bool = False
+) -> str:
     notice = "" if message is None else _notice(localize(locale, message), error=True)
+    label = (
+        ("管理 Token" if locale == "zh-CN" else "Master Token")
+        if master_mode
+        else localize(locale, "Administration password")
+    )
     description = (
         "此面板用于管理本地应用状态，不能部署镜像、执行主机命令或控制 Docker。"
         if locale == "zh-CN"
@@ -631,15 +638,84 @@ def login_page(*, locale: AdminLocale = "en", message: str | None = None) -> str
     <p>{description}</p>
     {notice}
     <form method="post" action="/admin/login" autocomplete="off">
-      <label for="password">{localize(locale, "Administration password")}</label>
+      <label for="password">{label}</label>
       <input id="password" name="password" type="password"
-        minlength="12" maxlength="1024" autocomplete="current-password" required>
+        maxlength="1024" autocomplete="current-password" required>
       <button type="submit">{localize(locale, "Sign in")}</button>
     </form>
   </section>
 </main>
 """
     return _document(localize(locale, "Administration sign in"), content, locale)
+
+
+def master_setup_page(
+    csrf_token: str | None,
+    *,
+    require_proof: bool,
+    locale: AdminLocale = "en",
+    message: str | None = None,
+) -> str:
+    """First identity setup; never prefill or reflect any credential."""
+
+    chinese = locale == "zh-CN"
+    title = "首次设置主 Token" if chinese else "Set up your master Token"
+    explanation = (
+        "主 Token 用于登录和管理，不需要用户名。请使用密码管理器生成并保存至少 "
+        "32 字节的随机值；服务器仅保存校验值。设置后旧网页登录密码立即失效，"
+        "现有 Agent Token 不受影响。"
+        if chinese
+        else "Use your master Token to sign in and manage the service, without a username. "
+        "Generate and save at least 32 random bytes with a password manager. The server "
+        "stores only a verifier. Setup disables the legacy web password immediately, "
+        "but does not change existing Agent Tokens."
+    )
+    notice = "" if message is None else _notice(message, error=True)
+    form = ""
+    if csrf_token is not None:
+        proof = ""
+        if require_proof:
+            label = "一次性设置凭据" if chinese else "One-time setup proof"
+            help_text = (
+                "输入部署时配置的设置凭据。它不是主 Token，设置成功后不能再次使用。"
+                if chinese
+                else "Enter the setup proof configured by the operator. This is not your "
+                "master Token and cannot be used again after setup succeeds."
+            )
+            proof = (
+                f'<label for="setup_proof">{label}</label>'
+                '<input id="setup_proof" name="setup_proof" type="password" '
+                'maxlength="1024" autocomplete="off" required>'
+                f'<small class="field-help">{help_text}</small>'
+            )
+        token_label = "新的主 Token" if chinese else "New master Token"
+        confirm_label = "再次输入主 Token" if chinese else "Confirm master Token"
+        button = "保存并进入管理面板" if chinese else "Save and open administration"
+        form = f"""
+    <form method="post" action="/admin/master/setup">
+      {_csrf(escape(csrf_token, quote=True))}
+      {proof}
+      <label for="master_token">{token_label}</label>
+      <input id="master_token" name="master_token" type="password"
+        maxlength="1024" autocomplete="new-password" required>
+      <label for="confirmation">{confirm_label}</label>
+      <input id="confirmation" name="confirmation" type="password"
+        maxlength="1024" autocomplete="new-password" required>
+      <button type="submit">{button}</button>
+    </form>"""
+    back = "返回登录" if chinese else "Back to sign in"
+    content = f"""
+<main class="narrow">
+  <section class="card">
+    <div class="login-tools">{_language_switch(locale, "/admin/master/setup")}</div>
+    <h1>{title}</h1>
+    <p class="section-help">{explanation}</p>
+    {notice}
+    {form}
+    <p><a href="/admin/login">{back}</a></p>
+  </section>
+</main>"""
+    return _document(title, content, locale)
 
 
 def operations_page(
@@ -680,6 +756,11 @@ def operations_page(
 </div>
 """
         return _document(localize(locale, "Setup and credentials"), content, locale)
+    master_setup_link = (
+        "首次设置主 Token，统一网页登录和管理操作"
+        if locale == "zh-CN"
+        else "Set up your master Token for unified sign-in and administration"
+    )
     grants = "".join(
         (
             '<label><input type="checkbox" name="grants" '
@@ -796,6 +877,7 @@ def operations_page(
   <p class="section-help">{localize(locale, "Manage setup and credentials.")}</p>
   <p class="notice">{credential_notice}</p>
   {notice}
+  <p><a href="/admin/master/setup">{master_setup_link}</a></p>
   <div class="grid">
     <section class="card">
       <h2>{localize(locale, "First-time setup")}</h2>

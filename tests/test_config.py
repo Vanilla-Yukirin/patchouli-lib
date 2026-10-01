@@ -109,6 +109,71 @@ def test_admin_console_accepts_signing_secret_without_legacy_password() -> None:
     assert "s" * 32 not in repr(configured)
 
 
+@pytest.mark.parametrize("proof", [None, "", SecretStr("")])
+def test_admin_setup_token_has_no_default_and_blank_values_disable_it(
+    proof: str | SecretStr | None,
+) -> None:
+    settings = Settings.model_validate({"environment": "test", "admin_setup_token": proof})
+    assert settings.admin_setup_token is None
+    assert not settings.admin_enabled
+
+
+@pytest.mark.parametrize("proof", ["p" * 32, "p" * 1_024, "界" * 11])
+def test_admin_setup_token_is_separate_optional_redacted_utf8_material(proof: str) -> None:
+    settings = Settings.model_validate(
+        {
+            "environment": "test",
+            "admin_setup_token": proof,
+            "admin_session_signing_secret": "s" * 32,
+        }
+    )
+    assert isinstance(settings.admin_setup_token, SecretStr)
+    assert settings.admin_setup_token.get_secret_value() == proof
+    assert proof not in repr(settings)
+
+
+@pytest.mark.parametrize("proof", ["p" * 31, "p" * 1_025, "界" * 342, "p" * 32 + "\ud800"])
+def test_admin_setup_token_rejects_invalid_utf8_byte_length_without_echo(proof: str) -> None:
+    with pytest.raises(ValidationError) as error:
+        Settings.model_validate(
+            {
+                "environment": "test",
+                "admin_setup_token": proof,
+                "admin_session_signing_secret": "s" * 32,
+            }
+        )
+    assert proof not in str(error.value)
+
+
+@pytest.mark.parametrize("signing_secret", [None, "same synthetic shared secret material 0001"])
+def test_admin_setup_token_requires_an_independent_session_secret(
+    signing_secret: str | None,
+) -> None:
+    proof = "same synthetic shared secret material 0001"
+    with pytest.raises(ValidationError, match="admin setup token") as error:
+        Settings.model_validate(
+            {
+                "environment": "test",
+                "admin_setup_token": proof,
+                "admin_session_signing_secret": signing_secret,
+            }
+        )
+    assert proof not in str(error.value)
+
+
+def test_admin_setup_token_is_loaded_from_prefixed_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proof = "synthetic environment setup material 0001"
+    monkeypatch.setenv("PATCHOULI_ENVIRONMENT", "test")
+    monkeypatch.setenv("PATCHOULI_ADMIN_SETUP_TOKEN", proof)
+    monkeypatch.setenv("PATCHOULI_ADMIN_SESSION_SIGNING_SECRET", "s" * 32)
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.admin_setup_token is not None
+    assert settings.admin_setup_token.get_secret_value() == proof
+    assert proof not in repr(settings)
+
+
 @pytest.mark.parametrize(
     "values",
     [

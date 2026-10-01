@@ -43,7 +43,16 @@ from patchouli_lib.admin.contracts import (
 from patchouli_lib.admin.file_download import AdminFileDownloadService
 from patchouli_lib.admin.file_set_routes import create_master_file_set_router
 from patchouli_lib.admin.master_audit import MasterAuditRepository
-from patchouli_lib.admin.master_token_store import MasterTokenRepository
+from patchouli_lib.admin.master_setup import (
+    MasterSetupAuthorizationError,
+    MasterSetupService,
+    MasterSetupUnavailableError,
+)
+from patchouli_lib.admin.master_setup_session import MasterSetupSessionCodec
+from patchouli_lib.admin.master_token_store import (
+    MasterTokenAlreadyInitialized,
+    MasterTokenRepository,
+)
 from patchouli_lib.admin.pages import (
     REVEAL_SCRIPT,
     STYLESHEET,
@@ -60,7 +69,9 @@ from patchouli_lib.admin.pages import (
     libraries_page,
     library_page,
     library_scope_index_page,
+    localize,
     login_page,
+    master_setup_page,
     operations_page,
     page_delete_error_page,
     page_preview_page,
@@ -131,6 +142,9 @@ from patchouli_lib.tags.service import (
 )
 
 _SESSION_COOKIE: Final[str] = "patchouli_admin_session"
+_SETUP_COOKIE: Final[str] = "patchouli_master_setup_session"
+_SETUP_PATH: Final[str] = "/admin/master/setup"
+_SETUP_TTL: Final[int] = 300
 _LOCALE_COOKIE: Final[str] = "patchouli_admin_locale"
 _TAG_FLASH_COOKIE: Final[str] = "patchouli_admin_tag_result"
 _LOCALE_COOKIE_MAX_AGE: Final[int] = 31_536_000
@@ -192,6 +206,10 @@ def create_admin_router(
     codec = session_codec or AdminSessionCodec(
         signing_secret.encode("utf-8"),
         ttl_seconds=settings.admin_session_ttl_seconds,
+    )
+    setup_codec = MasterSetupSessionCodec(signing_secret.encode("utf-8"), ttl_seconds=_SETUP_TTL)
+    master_setup_service = MasterSetupService(
+        engine, settings, legacy_session_codec=codec, setup_session_codec=setup_codec
     )
     service = action_service or AdminActionService(engine)
     read_model = AdminReadModel(engine)
@@ -714,9 +732,167 @@ def create_admin_router(
             redirect_response = redirect("/admin")
             remember_requested_locale(redirect_response, request)
             return redirect_response
-        page_response = html(login_page(locale=locale), locale=locale)
+        with engine.connect() as connection:
+            has_master = MasterTokenRepository(connection).has_identity()
+        if not has_master and password_hash is None and settings.admin_setup_token is not None:
+            response = redirect(_SETUP_PATH)
+            remember_requested_locale(response, request)
+            return response
+        page_response = html(login_page(locale=locale, master_mode=has_master), locale=locale)
         remember_requested_locale(page_response, request)
         return page_response
+
+    def setup_error(request: Request, status: int, message: str) -> Response:
+        locale = locale_for(request)
+        legacy = current_session(request)
+        form_session = setup_codec.verify(request.cookies.get(_SETUP_COOKIE, ""))
+        with engine.connect() as connection:
+            has_master = MasterTokenRepository(connection).has_identity()
+        csrf = None
+        if not has_master:
+            if legacy is not None:
+                csrf = legacy.csrf_token
+            elif form_session is not None and settings.admin_setup_token is not None:
+                csrf = form_session.csrf_token
+        return html(
+            master_setup_page(
+                csrf,
+                require_proof=legacy is None,
+                locale=locale,
+                message=message,
+            ),
+            locale=locale,
+            status_code=status,
+        )
+
+    @router.get("/master/setup")
+    def master_setup_form(request: Request) -> Response:
+        response: Response
+        locale = locale_for(request)
+        with engine.connect() as connection:
+            if MasterTokenRepository(connection).has_identity():
+                return redirect("/admin/login")
+        legacy = current_session(request)
+        if legacy is None and settings.admin_setup_token is None:
+            if password_hash is not None:
+                response = redirect("/admin/login")
+                remember_requested_locale(response, request)
+                return response
+            return setup_error(
+                request,
+                403,
+                "网页首次设置未启用。请在服务器本机设置主 Token，或由部署者配置一次性设置凭据。"
+                if locale == "zh-CN"
+                else "Web setup is disabled. Initialize the master Token locally, or ask the "
+                "operator to configure a one-time setup proof.",
+            )
+        encoded, form_session = setup_codec.issue()
+        csrf = legacy.csrf_token if legacy is not None else form_session.csrf_token
+        response = html(
+            master_setup_page(csrf, require_proof=legacy is None, locale=locale), locale=locale
+        )
+        if legacy is None:
+            response.set_cookie(
+                _SETUP_COOKIE,
+                encoded,
+                max_age=_SETUP_TTL,
+                path=_SETUP_PATH,
+                secure=secure_cookie(request),
+                httponly=True,
+                samesite="strict",
+            )
+        remember_requested_locale(response, request)
+        return response
+
+    @router.post("/master/setup")
+    async def master_setup_submit(request: Request) -> Response:
+        locale = locale_for(request)
+        if not _same_origin_submission(request):
+            return forbidden(request)
+        legacy = current_session(request)
+        if isinstance(legacy, MasterAdminSession):
+            return setup_error(
+                request,
+                409,
+                "主 Token 已设置，不能再次初始化。"
+                if locale == "zh-CN"
+                else "The master Token is already set up and cannot be initialized again.",
+            )
+        form_session = setup_codec.verify(request.cookies.get(_SETUP_COOKIE, ""))
+        csrf_session = legacy if legacy is not None else form_session
+        if csrf_session is None:
+            return setup_error(
+                request,
+                401,
+                "设置表单已过期，请重新打开。"
+                if locale == "zh-CN"
+                else "The setup form expired. Open it again.",
+            )
+        try:
+            values = await _read_form(
+                request,
+                allowed_fields=frozenset(
+                    {"csrf_token", "master_token", "confirmation", "setup_proof"}
+                ),
+            )
+            presented = _single(values, "csrf_token")
+            if not presented.isascii() or not hmac.compare_digest(
+                presented, csrf_session.csrf_token
+            ):
+                raise _FormError(403, "The form expired or failed its safety check.")
+            state = await run_in_threadpool(
+                master_setup_service.initialize,
+                _single(values, "master_token"),
+                _single(values, "confirmation"),
+                legacy_cookie=request.cookies.get(_SESSION_COOKIE) if legacy is not None else None,
+                setup_proof=_single(values, "setup_proof") if legacy is None else None,
+                setup_cookie=request.cookies.get(_SETUP_COOKIE) if legacy is None else None,
+            )
+        except _FormError as exc:
+            return setup_error(request, exc.status_code, localize(locale, exc.safe_message))
+        except MasterTokenAlreadyInitialized:
+            return setup_error(
+                request,
+                409,
+                "主 Token 已设置，不能再次初始化。"
+                if locale == "zh-CN"
+                else "The master Token is already set up and cannot be initialized again.",
+            )
+        except (MasterSetupAuthorizationError, MasterSetupUnavailableError):
+            return setup_error(
+                request,
+                403,
+                "设置凭据不正确或此设置方式未启用。"
+                if locale == "zh-CN"
+                else "The setup proof is invalid or this setup method is not enabled.",
+            )
+        except ValueError:
+            return setup_error(
+                request,
+                422,
+                "主 Token 必须为 32 至 1024 字节，两次输入必须一致。"
+                if locale == "zh-CN"
+                else "The master Token must contain 32 to 1024 bytes and both entries must match.",
+            )
+        encoded, _ = codec.issue_master(state.identity_id, state.session_generation)
+        response = redirect("/admin")
+        response.set_cookie(
+            _SESSION_COOKIE,
+            encoded,
+            max_age=settings.admin_session_ttl_seconds,
+            path="/admin",
+            secure=secure_cookie(request),
+            httponly=True,
+            samesite="strict",
+        )
+        response.delete_cookie(
+            _SETUP_COOKIE,
+            path=_SETUP_PATH,
+            secure=secure_cookie(request),
+            httponly=True,
+            samesite="strict",
+        )
+        return response
 
     @router.get("/libraries")
     def libraries(request: Request) -> Response:
@@ -2325,7 +2501,9 @@ def create_admin_router(
             encoded, _ = codec.issue()
         else:
             return html(
-                login_page(locale=locale, message="Invalid password."),
+                login_page(
+                    locale=locale, message="Invalid password.", master_mode=master_initialized
+                ),
                 locale=locale,
                 status_code=401,
             )
