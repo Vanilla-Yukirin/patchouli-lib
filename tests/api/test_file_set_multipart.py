@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
+import json
+import shutil
+import subprocess
 from collections.abc import Sequence
 
 import pytest
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
@@ -52,6 +57,7 @@ def _parse(
     headers: Sequence[tuple[bytes, bytes]] = (),
     chunk_size: int | None = None,
     include_content_length: bool = True,
+    allow_browser_metadata: bool = False,
 ) -> upload.ParsedFileSetUpload:
     raw_headers = [(b"content-type", content_type or b"multipart/form-data; boundary=" + BOUNDARY)]
     if include_content_length:
@@ -73,7 +79,11 @@ def _parse(
         return {"type": "http.request", "body": chunk, "more_body": index < len(chunks) - 1}
 
     scope = {"type": "http", "method": "POST", "path": "/upload", "headers": raw_headers}
-    return asyncio.run(upload.parse_file_set_multipart(Request(scope, receive_chunk)))
+    return asyncio.run(
+        upload.parse_file_set_multipart(
+            Request(scope, receive_chunk), allow_browser_metadata=allow_browser_metadata
+        )
+    )
 
 
 def _assert_problem(
@@ -83,9 +93,16 @@ def _assert_problem(
     content_type: bytes | None = None,
     headers: Sequence[tuple[bytes, bytes]] = (),
     chunk_size: int | None = None,
+    allow_browser_metadata: bool = False,
 ) -> None:
     with pytest.raises(ApplicationProblem) as failure:
-        _parse(body, content_type=content_type, headers=headers, chunk_size=chunk_size)
+        _parse(
+            body,
+            content_type=content_type,
+            headers=headers,
+            chunk_size=chunk_size,
+            allow_browser_metadata=allow_browser_metadata,
+        )
     assert failure.value.status_code == status
 
 
@@ -254,6 +271,161 @@ def test_metadata_media_label_and_duplicate_headers_rejected() -> None:
         ),
         422,
     )
+
+
+@pytest.mark.parametrize(
+    "media_header",
+    [
+        None,
+        b"Content-Type: text/plain",
+        b"Content-Type: text/plain; charset=UTF-8",
+    ],
+)
+def test_browser_metadata_variants_are_explicit_opt_in(media_header: bytes | None) -> None:
+    headers = [b'Content-Disposition: form-data; name="metadata"']
+    if media_header is not None:
+        headers.append(media_header)
+    body = _body(metadata_headers=headers)
+    _assert_problem(body, 415)
+    parsed = _parse(body, allow_browser_metadata=True, chunk_size=3)
+    assert parsed.metadata == METADATA
+    assert parsed.manifest.files[0].content == b"# Example\n"
+
+
+def test_browser_opt_in_still_accepts_strict_json_metadata() -> None:
+    assert _parse(_body(), allow_browser_metadata=True).metadata == METADATA
+
+
+@pytest.mark.parametrize(
+    "metadata_headers,status",
+    [
+        (
+            (
+                b'Content-Disposition: form-data; name="metadata"',
+                b"Content-Type: text/plain; charset=latin-1",
+            ),
+            415,
+        ),
+        (
+            (
+                b'Content-Disposition: form-data; name="metadata"',
+                b"Content-Type: text/plain; charset=utf-8; charset=utf-8",
+            ),
+            415,
+        ),
+        (
+            (
+                b'Content-Disposition: form-data; name="metadata"',
+                b"Content-Type: text/plain; format=flowed",
+            ),
+            415,
+        ),
+        (
+            (
+                b'Content-Disposition: form-data; name="metadata"',
+                b"Content-Type: application/octet-stream",
+            ),
+            415,
+        ),
+        (
+            (b'Content-Disposition: form-data; name="metadata"; filename="metadata.json"',),
+            422,
+        ),
+        (
+            (
+                b'Content-Disposition: form-data; name="metadata"',
+                b"Content-Type: text/plain",
+                b"Content-Type: text/plain",
+            ),
+            422,
+        ),
+    ],
+)
+def test_browser_opt_in_rejects_non_string_or_ambiguous_metadata(
+    metadata_headers: Sequence[bytes], status: int
+) -> None:
+    _assert_problem(_body(metadata_headers=metadata_headers), status, allow_browser_metadata=True)
+
+
+def test_browser_opt_in_keeps_part_order_duplicates_and_metadata_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    browser_headers = (b'Content-Disposition: form-data; name="metadata"',)
+    extra_metadata = _part(browser_headers, b"{}")
+    _assert_problem(
+        _body(metadata_headers=browser_headers, extra_parts=(extra_metadata,)),
+        422,
+        allow_browser_metadata=True,
+    )
+    file_before_metadata = _part(
+        (b'Content-Disposition: form-data; name="file"; filename="first.md"',), b"x"
+    ) + _body(metadata_headers=browser_headers)
+    _assert_problem(file_before_metadata, 422, allow_browser_metadata=True)
+    monkeypatch.setattr(upload, "MAX_FILE_SET_METADATA_BYTES", len(METADATA) - 1)
+    _assert_problem(_body(metadata_headers=browser_headers), 413, allow_browser_metadata=True)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_node_standard_formdata_string_metadata_requires_browser_opt_in() -> None:
+    # The wire bytes come from a real Node Request/FormData serializer, not a
+    # hand-written multipart body. This is not a full browser UI acceptance test.
+    script = """
+if (typeof FormData !== 'function' || typeof Request !== 'function' ||
+    typeof Blob !== 'function') process.exit(75);
+const form = new FormData();
+form.append('metadata', JSON.stringify({title: 'Synthetic Page'}));
+form.append('file', new Blob(['# Example\\n'], {type: 'text/markdown'}), 'content.md');
+const request = new Request('https://example.invalid/upload', {method: 'POST', body: form});
+const body = Buffer.from(await request.arrayBuffer());
+process.stdout.write(JSON.stringify({contentType: request.headers.get('content-type'),
+  body: body.toString('base64')}));
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode == 75:
+        pytest.skip("Node.js standard Request/FormData globals are unavailable")
+    result.check_returncode()
+    wire = json.loads(result.stdout)
+    body = base64.b64decode(wire["body"], validate=True)
+    content_type = wire["contentType"]
+    assert isinstance(content_type, str)
+    assert isinstance(body, bytes)
+
+    app = FastAPI()
+
+    @app.exception_handler(ApplicationProblem)
+    async def handle_problem(_request: Request, problem: ApplicationProblem) -> JSONResponse:
+        return JSONResponse({}, status_code=problem.status_code)
+
+    @app.post("/strict")
+    async def strict(request: Request) -> dict[str, str]:
+        await upload.parse_file_set_multipart(request)
+        return {"result": "accepted"}
+
+    @app.post("/browser")
+    async def browser(request: Request) -> dict[str, object]:
+        parsed = await upload.parse_file_set_multipart(request, allow_browser_metadata=True)
+        return {
+            "metadata": parsed.metadata.decode("utf-8"),
+            "files": [entry.name for entry in parsed.manifest.files],
+            "content": parsed.manifest.files[0].content.decode("utf-8"),
+        }
+
+    headers = {"Content-Type": content_type}
+    with TestClient(app) as client:
+        strict_response = client.post("/strict", content=body, headers=headers)
+        browser_response = client.post("/browser", content=body, headers=headers)
+    assert strict_response.status_code == 415
+    assert browser_response.status_code == 200
+    assert browser_response.json() == {
+        "metadata": METADATA.decode(),
+        "files": ["content.md"],
+        "content": "# Example\n",
+    }
 
 
 def test_predeclared_and_streamed_body_ceiling_rejected(monkeypatch: pytest.MonkeyPatch) -> None:

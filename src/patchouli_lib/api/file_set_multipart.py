@@ -197,7 +197,8 @@ def _declared_length(request: Request) -> int | None:
 
 
 class _FileSetCollector:
-    def __init__(self) -> None:
+    def __init__(self, *, allow_browser_metadata: bool = False) -> None:
+        self._allow_browser_metadata = allow_browser_metadata
         self.metadata: bytes | None = None
         self.files: list[tuple[str, bytes]] = []
         self.ended = False
@@ -272,18 +273,26 @@ class _FileSetCollector:
         media_header = self._headers.get(_CONTENT_TYPE)
         if name == b"metadata":
             if media_header is None:
-                raise _UnsupportedPartMedia
-            try:
-                media, media_parameters = _parameters(media_header)
-            except (AssertionError, UnicodeError, ValueError):
-                raise _UnsupportedPartMedia from None
-            if b"charset" in media_parameters:
-                media_parameters[b"charset"] = media_parameters[b"charset"].lower()
-            if media != b"application/json" or media_parameters not in (
-                {},
-                {b"charset": b"utf-8"},
-            ):
-                raise _UnsupportedPartMedia
+                if not self._allow_browser_metadata:
+                    raise _UnsupportedPartMedia
+            else:
+                try:
+                    media, media_parameters = _parameters(media_header)
+                except (AssertionError, UnicodeError, ValueError):
+                    raise _UnsupportedPartMedia from None
+                if b"charset" in media_parameters:
+                    media_parameters[b"charset"] = media_parameters[b"charset"].lower()
+                valid_json = media == b"application/json" and media_parameters in (
+                    {},
+                    {b"charset": b"utf-8"},
+                )
+                valid_browser_text = (
+                    self._allow_browser_metadata
+                    and media == b"text/plain"
+                    and media_parameters in ({}, {b"charset": b"utf-8"})
+                )
+                if not (valid_json or valid_browser_text):
+                    raise _UnsupportedPartMedia
         else:
             if len(self.files) >= MAX_FILES_PER_PAGE:
                 raise _PayloadTooLarge
@@ -350,19 +359,23 @@ def _valid_media_label(media: bytes, parameters: Mapping[bytes, bytes]) -> bool:
     return charset is None or charset.lower() == b"utf-8"
 
 
-async def parse_file_set_multipart(request: Request) -> ParsedFileSetUpload:
+async def parse_file_set_multipart(
+    request: Request, *, allow_browser_metadata: bool = False
+) -> ParsedFileSetUpload:
     """Read a complete 1..64-file snapshot from a bounded multipart stream.
 
     The first part is ``metadata`` JSON bytes; each subsequent ``file`` part
     has one UTF-8 flat filename. Business metadata schema remains the caller's
     responsibility. The returned manifest owns all file bytes and hashes.
+    Only an explicit browser opt-in also accepts a metadata string part with
+    no media header or with UTF-8 ``text/plain``. Agent callers stay strict.
     """
 
     boundary = _boundary(request)
     length = _declared_length(request)
     if length is not None and length > MAX_FILE_SET_MULTIPART_BYTES:
         raise _size_problem()
-    collector = _FileSetCollector()
+    collector = _FileSetCollector(allow_browser_metadata=allow_browser_metadata)
     try:
         parser = MultipartParser(
             boundary,
