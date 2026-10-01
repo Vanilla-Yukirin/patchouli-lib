@@ -29,6 +29,7 @@ from patchouli_lib.content.models import (
     MAX_OCCURRENCE_MICROSECONDS,
     MIN_OCCURRENCE_MICROSECONDS,
     Page,
+    PageOccurrenceCorrection,
     Revision,
     RevisionFile,
 )
@@ -745,6 +746,7 @@ class AdminReadModel:
                             "content.archive.delete",
                             "content.archive.restore",
                             "content.page.title.edit",
+                            "content.page.occurrence.correct",
                             "content.page.file_set.create",
                             "content.page.file_set.revise",
                             "tag.create",
@@ -775,6 +777,7 @@ class AdminReadModel:
                     "content.archive.delete",
                     "content.archive.restore",
                     "content.page.title.edit",
+                    "content.page.occurrence.correct",
                     "content.page.file_set.create",
                     "content.page.file_set.revise",
                 ):
@@ -807,6 +810,22 @@ class AdminReadModel:
                         revision_number = _master_file_set_activity_revision(
                             connection, event, page
                         )
+                    elif event["action"] == "content.page.occurrence.correct":
+                        corrections = connection.execute(
+                            select(
+                                PageOccurrenceCorrection.library_id,
+                                PageOccurrenceCorrection.page_uid,
+                                PageOccurrenceCorrection.corrected_at,
+                            ).where(PageOccurrenceCorrection.master_audit_event_id == event["id"])
+                        ).all()
+                        if (
+                            page is None
+                            or len(corrections) != 1
+                            or corrections[0].library_id != library_id
+                            or corrections[0].page_uid != bytes.fromhex(page_uid_hex)
+                            or corrections[0].corrected_at != event["occurred_at"]
+                        ):
+                            raise RuntimeError("Invalid occurrence activity audit association.")
                 elif event["action"] == "tag.create":
                     if event["target_type"] != "tag" or len(parts) != 2:
                         raise RuntimeError("Invalid content activity audit target.")

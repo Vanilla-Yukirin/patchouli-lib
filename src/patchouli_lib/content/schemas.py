@@ -231,14 +231,28 @@ class PageOccurrenceCorrectionCommand(ContentSchema):
     page_uid: PageUid
     old_occurred_at: OccurrenceMicros
     new_occurred_at: OccurrenceMicros
-    actor_caller_id: OpaqueId
-    actor_home_library_id: OpaqueId
+    actor_caller_id: OpaqueId | None = None
+    actor_home_library_id: OpaqueId | None = None
+    master_audit_event_id: OpaqueId | None = None
     corrected_at: StoredTimestamp
 
     @model_validator(mode="after")
     def require_actual_change_and_valid_time(self) -> Self:
         if self.old_occurred_at == self.new_occurred_at:
             raise ValueError("Page occurrence correction must change the timestamp.")
+        if not (
+            (
+                self.actor_caller_id is not None
+                and self.actor_home_library_id is not None
+                and self.master_audit_event_id is None
+            )
+            or (
+                self.actor_caller_id is None
+                and self.actor_home_library_id is None
+                and self.master_audit_event_id is not None
+            )
+        ):
+            raise ValueError("Page occurrence correction must identify exactly one actor kind.")
         canonical_utc_wire(self.corrected_at)
         return self
 

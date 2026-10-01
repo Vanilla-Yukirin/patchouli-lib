@@ -238,6 +238,7 @@ def test_page_content_migration_upgrade_check_downgrade_upgrade(
                 "trg_page_occurrence_guards_validate_insert",
                 "trg_page_occurrence_guards_no_update",
                 "trg_page_occurrence_guards_safe_delete",
+                "trg_page_occurrence_guards_master_audit",
                 "trg_page_lifecycle_events_validate_insert",
                 "trg_page_lifecycle_events_no_update",
                 "trg_page_lifecycle_events_no_delete",

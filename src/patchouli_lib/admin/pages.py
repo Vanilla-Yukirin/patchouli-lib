@@ -27,6 +27,7 @@ from patchouli_lib.admin.service import DeliveredCredential
 from patchouli_lib.api.agent_skill_routes import SkillBundle
 from patchouli_lib.auth.library_policy import LibraryAction, target_library_grants_digest
 from patchouli_lib.auth.schemas import SectionAction
+from patchouli_lib.identifiers import canonical_utc_wire
 from patchouli_lib.search.service_v2 import SearchPageV2
 
 AdminLocale = Literal["en", "zh-CN"]
@@ -411,6 +412,16 @@ _ZH_CN: dict[str, str] = {
     "Revised a page": "更新了页面",
     "Changed a page title": "修改了页面标题",
     "Corrected a page's occurrence time": "更正了页面的发生时间",
+    "Edit declared time": "修改文档发生时间",
+    "Declared time (RFC3339)": "文档发生时间（带时区的标准时间）",
+    "Save declared time": "保存发生时间",
+    "Declared time saved.": "发生时间已保存；文件和历史版本未改动。",
+    "Declared time is unchanged.": "发生时间相同，没有改动。",
+    "Use a timestamp with a timezone, for example 2026-08-13T10:00:00Z. "
+    "This changes search and browse dates, not files, history or Page ID.": (
+        "填写带时区的时间，例如 2026-08-13T10:00:00Z。"
+        "这会改变搜索与浏览使用的日期，不改文件、历史版本或页面 ID。"
+    ),
     "Deleted a page": "删除了页面",
     "Restored a page": "恢复了页面",
     "Created a tag": "创建了标签",
@@ -1104,6 +1115,7 @@ def _content_activity_timeline(
                 "content.page.file_set.create": "Created a page",
                 "content.page.file_set.revise": "Revised a page",
                 "content.archive.correct_occurrence": "Corrected a page's occurrence time",
+                "content.page.occurrence.correct": "Corrected a page's occurrence time",
                 "content.archive.delete": "Deleted a page",
                 "content.archive.restore": "Restored a page",
                 "content.page.title.edit": "Changed a page title",
@@ -2371,6 +2383,24 @@ def page_preview_page(
             f'<input id="page-title" name="title" type="text" '
             f'value="{escape(view.page.title, quote=True)}" required>'
             f'<button type="submit">{localize(locale, "Save title")}</button>'
+            "</form></section>"
+        )
+        time_help = localize(
+            locale,
+            "Use a timestamp with a timezone, for example 2026-08-13T10:00:00Z. "
+            "This changes search and browse dates, not files, history or Page ID.",
+        )
+        body += (
+            f'<section class="card"><h2>{localize(locale, "Edit declared time")}</h2>'
+            f'<p class="meta">{time_help}</p>'
+            f'<form method="post" action="{base}/occurrence" autocomplete="off">'
+            f"{_csrf(escape(csrf_token, quote=True))}"
+            f'<input type="hidden" name="expected_etag" '
+            f'value="{escape(view.current_etag, quote=True)}">'
+            f'<label for="page-occurrence">{localize(locale, "Declared time (RFC3339)")}</label>'
+            '<input id="page-occurrence" name="occurred_at" type="text" maxlength="64" '
+            f'value="{canonical_utc_wire(view.page.occurred_at)}" required>'
+            f'<button type="submit">{localize(locale, "Save declared time")}</button>'
             "</form></section>"
         )
     tag_path = f"{library_path}/tags"

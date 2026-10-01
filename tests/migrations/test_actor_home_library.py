@@ -225,8 +225,14 @@ def test_empty_upgrade_and_downgrade_match_models(
         ):
             actual = {column["name"] for column in inspector.get_columns(model.__tablename__)}
             expected = set(model.__table__.columns.keys())
-            if model in (PageLifecycleEvent, PageLifecycleGuard):
-                # Master audit linkage is introduced after actor-home in 0019.
+            if model in (
+                PageLifecycleEvent,
+                PageLifecycleGuard,
+                PageOccurrenceCorrection,
+                PageOccurrenceCorrectionGuard,
+            ):
+                # This historical 0017 schema predates the 0019 lifecycle and
+                # 0027 occurrence master-audit columns on the current models.
                 expected.remove("master_audit_event_id")
             assert actual == expected
             foreign_keys = inspector.get_foreign_keys(model.__tablename__)

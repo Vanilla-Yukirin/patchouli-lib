@@ -10,6 +10,7 @@ from patchouli_lib.auth.schemas import (
     SectionAction,
 )
 from patchouli_lib.content.schemas import StrongPageETag
+from patchouli_lib.identifiers import parse_occurrence_time
 from patchouli_lib.library.schemas import BoundedText, OpaqueId, ResourceName, TimestampMicros
 
 CredentialTtlSeconds = Annotated[
@@ -145,6 +146,26 @@ class MasterUpdatePageTitleInput(AdminActionInput):
     def reject_nul_title(cls, value: str) -> str:
         if "\x00" in value:
             raise ValueError("Page title must not contain NUL characters.")
+        return value
+
+
+class MasterCorrectOccurrenceInput(AdminActionInput):
+    """A required, explicit-timezone declaration and exact current precondition."""
+
+    occurred_at: Annotated[str, Field(min_length=1, max_length=64)]
+    expected_etag: StrongPageETag
+
+    @field_validator("occurred_at")
+    @classmethod
+    def require_valid_declaration(cls, value: str) -> str:
+        parse_occurrence_time(value)
+        return value
+
+    @field_validator("expected_etag", mode="before")
+    @classmethod
+    def reject_padded_precondition(cls, value: object) -> object:
+        if isinstance(value, str) and value != value.strip():
+            raise ValueError("ETag must not contain surrounding whitespace.")
         return value
 
 

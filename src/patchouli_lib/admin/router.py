@@ -23,6 +23,7 @@ from starlette.concurrency import run_in_threadpool
 
 from patchouli_lib.admin.contracts import (
     BootstrapInput,
+    MasterCorrectOccurrenceInput,
     MasterDeletePageFormInput,
     MasterPageTagFormInput,
     MasterProvisionAgentInput,
@@ -2046,6 +2047,81 @@ def create_admin_router(
                 master_mode=True,
                 message=message,
                 error=True,
+            ),
+            locale=locale,
+            status_code=404 if view is None else status,
+        )
+
+    @router.post(
+        "/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages/{page_id}/occurrence"
+    )
+    async def correct_page_occurrence(
+        request: Request, library_id: str, section_id: str, book_id: str, page_id: str
+    ) -> Response:
+        locale = locale_for(request)
+        if not _same_origin_submission(request):
+            return forbidden(request)
+        session = current_session(request)
+        if session is None:
+            response = html(
+                login_page(locale=locale, message="Sign in again."), locale=locale, status_code=401
+            )
+            _clear_cookie(response, secure=secure_cookie(request))
+            return response
+        if not isinstance(session, MasterAdminSession):
+            return forbidden(request, "A master session is required.")
+        try:
+            values = await _read_form(
+                request,
+                allowed_fields=frozenset(MasterCorrectOccurrenceInput.model_fields)
+                | {"csrf_token"},
+            )
+            _require_csrf(values, session)
+            submitted = MasterCorrectOccurrenceInput.model_validate(values)
+            changed = await run_in_threadpool(
+                service.correct_page_occurrence_as_master,
+                library_id,
+                section_id,
+                book_id,
+                page_id,
+                submitted,
+                master_session=session,
+            )
+        except _FormError as exc:
+            status, message = exc.status_code, exc.safe_message
+        except AuthenticationError:
+            status, message = 401, "Sign in again."
+        except ArchiveNotFoundError:
+            status, message = 404, "The requested local resource was not found."
+        except ArchivePreconditionFailedError:
+            status, message = (
+                412,
+                "The Page changed since this form was opened. Reload and try again.",
+            )
+        except (ValidationError, ValueError):
+            status, message = 422, "Check the submitted fields and try again."
+        except Exception:
+            status, message = 500, "The action could not be completed."
+        else:
+            status = 200
+            message = "Declared time saved." if changed else "Declared time is unchanged."
+        if status == 401:
+            response = html(
+                login_page(locale=locale, message=message), locale=locale, status_code=status
+            )
+            _clear_cookie(response, secure=secure_cookie(request))
+            return response
+        view = read_model.get_page(library_id, section_id, book_id, page_id)
+        return html(
+            browser_not_found_page(session.csrf_token, locale=locale)
+            if view is None
+            else page_preview_page(
+                session.csrf_token,
+                view,
+                locale=locale,
+                master_mode=True,
+                message=message,
+                error=status != 200,
             ),
             locale=locale,
             status_code=404 if view is None else status,

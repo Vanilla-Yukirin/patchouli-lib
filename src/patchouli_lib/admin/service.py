@@ -11,6 +11,7 @@ from sqlalchemy import Connection, Engine, delete, insert, select
 
 from patchouli_lib.admin.contracts import (
     BootstrapInput,
+    MasterCorrectOccurrenceInput,
     MasterDeletePageFormInput,
     MasterPageTagFormInput,
     MasterProvisionAgentInput,
@@ -56,7 +57,11 @@ from patchouli_lib.auth.service import (
 )
 from patchouli_lib.content.models import Page
 from patchouli_lib.content.repository import ContentRepository
-from patchouli_lib.content.schemas import ArchiveIdempotencyKey, PageLifecycleCommand
+from patchouli_lib.content.schemas import (
+    ArchiveIdempotencyKey,
+    PageLifecycleCommand,
+    PageOccurrenceCorrectionCommand,
+)
 from patchouli_lib.content.service import (
     ArchiveLifecycleUnchangedError,
     ArchiveNotFoundError,
@@ -71,7 +76,7 @@ from patchouli_lib.idempotency.schemas import (
     ReplayResponse,
     digest_idempotency_key,
 )
-from patchouli_lib.identifiers import canonical_utc_wire
+from patchouli_lib.identifiers import canonical_utc_wire, parse_occurrence_time
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import (
     BookRecord,
@@ -1175,6 +1180,75 @@ class AdminActionService:
             )
             if content.update_page_title(page, title=request.title, updated_at=changed_at) is None:
                 raise PageTitleVersionConflictError
+
+    def correct_page_occurrence_as_master(
+        self,
+        library_id: str,
+        section_id: str,
+        book_id: str,
+        page_id: str,
+        request: MasterCorrectOccurrenceInput,
+        *,
+        master_session: MasterAdminSession,
+    ) -> bool:
+        """Correct metadata only; preserve stable identity and every file Revision."""
+
+        occurred_at = parse_occurrence_time(request.occurred_at).utc_microseconds
+        with immediate_transaction(self._engine) as connection:
+            self._require_current_admin_session(
+                connection, master_session, master_session.audit_fingerprint()
+            )
+            content = ContentRepository(connection)
+            page = content.get_page(library_id, page_id)
+            if (
+                page is None
+                or page.page_type != "archive"
+                or page.section_id != section_id
+                or page.book_id != book_id
+                or page.deleted_at is not None
+            ):
+                raise ArchiveNotFoundError
+            etag = page_current_etag(
+                page.page_uid,
+                page.current_revision_id,
+                page.current_revision_number,
+                page.occurred_at,
+                page.updated_at,
+            )
+            if not hmac.compare_digest(request.expected_etag, etag):
+                raise ArchivePreconditionFailedError
+            if occurred_at == page.occurred_at:
+                return False
+            changed_at = max(self._clock(), page.updated_at + 1)
+            try:
+                canonical_utc_wire(changed_at)
+            except ValueError:
+                raise ArchivePersistenceError from None
+            event_id = uuid4().hex
+            MasterAuditRepository(connection).add_success(
+                identity_id=master_session.identity_id,
+                session_generation=master_session.session_generation,
+                session_fingerprint=master_session.audit_fingerprint(),
+                action="content.page.occurrence.correct",
+                target_type="page",
+                target_id=f"{library_id}:{page.page_uid.hex()}",
+                occurred_at=changed_at,
+                event_id=event_id,
+            )
+            content.correct_occurrence(
+                page,
+                PageOccurrenceCorrectionCommand(
+                    library_id=page.library_id,
+                    page_uid=page.page_uid,
+                    old_occurred_at=page.occurred_at,
+                    new_occurred_at=occurred_at,
+                    actor_caller_id=None,
+                    actor_home_library_id=None,
+                    master_audit_event_id=event_id,
+                    corrected_at=changed_at,
+                ),
+            )
+        return True
 
 
 def _expires_at(now: int, ttl_seconds: int) -> int:
