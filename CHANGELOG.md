@@ -39,6 +39,9 @@ PatchouliLib 的所有重要变更都会记录在本文件中。
 
 ### 变更
 
+- 开发分支的 Python 客户端源码包排除本地 `.tmp-*` 测试目录，制品验证同时拒绝
+  wheel／源码包夹带此类路径；不删除本地材料，也不改变客户端运行时配置安全检查。
+  尚未发布。
 - 开发分支将旧 `POST /api/v1/sections/{section_id}/search` 及客户端旧搜索入口退役，
   改由 `POST /api/v1/search` 按凭据可读范围查询当前 Page；这是不兼容变更。
   搜索索引未就绪时明确返回 `search_unavailable`，不返回空结果。本项尚未发布或部署。

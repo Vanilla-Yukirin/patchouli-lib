@@ -5,7 +5,7 @@ import tarfile
 import zipfile
 from collections.abc import Sequence
 from email.parser import BytesParser
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 def _single_artifact(directory: Path, pattern: str) -> Path:
@@ -22,9 +22,15 @@ def _license_declared(metadata: bytes, *, artifact: str) -> None:
         raise ValueError(f"{artifact} metadata did not declare License-File: LICENSE")
 
 
+def _reject_local_test_artifacts(names: Sequence[str], *, artifact: str) -> None:
+    if any(part.startswith(".tmp-") for name in names for part in PurePosixPath(name).parts):
+        raise ValueError(f"{artifact} contained local test artifacts")
+
+
 def verify_wheel(path: Path) -> None:
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
+        _reject_local_test_artifacts(names, artifact="wheel")
         metadata_names = [name for name in names if name.endswith(".dist-info/METADATA")]
         license_names = [name for name in names if name.endswith(".dist-info/licenses/LICENSE")]
         if len(metadata_names) != 1 or len(license_names) != 1:
@@ -35,6 +41,7 @@ def verify_wheel(path: Path) -> None:
 def verify_sdist(path: Path) -> None:
     with tarfile.open(path, mode="r:gz") as archive:
         names = archive.getnames()
+        _reject_local_test_artifacts(names, artifact="sdist")
         metadata_names = [name for name in names if name.endswith("/PKG-INFO")]
         license_names = [name for name in names if name.endswith("/LICENSE")]
         if len(metadata_names) != 1 or len(license_names) != 1:
@@ -46,7 +53,7 @@ def verify_sdist(path: Path) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Verify license metadata in built artifacts.")
+    parser = argparse.ArgumentParser(description="Verify licenses and test-artifact exclusions.")
     parser.add_argument("directory", nargs="?", type=Path, default=Path("dist"))
     args = parser.parse_args(argv)
 

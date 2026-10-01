@@ -39,7 +39,7 @@ requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build]
-exclude = ["/.venv*", "/dist"]
+exclude = ["/.venv*", "/dist", "/.tmp-*"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/patchouli_client", "src/patchouli_cli", "src/patchouli_mcp"]

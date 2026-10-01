@@ -854,7 +854,16 @@ def test_inflight_cancellation_leaves_no_background_client_work(tmp_path: Path) 
     assert harness.clients[0].close_calls == 1
 
 
-def test_real_stdio_entrypoint_has_protocol_clean_stdout_and_safe_stderr(tmp_path: Path) -> None:
+def test_real_stdio_entrypoint_has_protocol_clean_stdout_and_safe_stderr(
+    trusted_tmp_path: Path,
+) -> None:
+    config = trusted_tmp_path / "config.toml"
+    config.write_text(
+        'version = 1\n[profiles.default]\nendpoint = "https://patchouli.example.invalid"\n'
+        'api_version = "v1"\n',
+        encoding="utf-8",
+    )
+
     async def exercise() -> str:
         with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as error:
             params = StdioServerParameters(
@@ -862,9 +871,10 @@ def test_real_stdio_entrypoint_has_protocol_clean_stdout_and_safe_stderr(tmp_pat
                 args=["-m", "patchouli_mcp"],
                 cwd=Path.cwd(),
                 env={
+                    "PATCHOULI_CONFIG_FILE": str(config),
                     "PATCHOULI_ENDPOINT": "https://patchouli.example.invalid",
                     "PATCHOULI_TOKEN": "cred_synthetic_123",
-                    "PATCHOULI_STATE_DIR": str(tmp_path / "state"),
+                    "PATCHOULI_STATE_DIR": str(trusted_tmp_path / "state"),
                 },
             )
             async with (
