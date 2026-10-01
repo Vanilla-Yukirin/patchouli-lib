@@ -2,6 +2,7 @@ from logging.config import fileConfig
 
 from alembic import context
 
+from patchouli_lib.admin import file_set_receipts as master_file_set_models
 from patchouli_lib.auth import models as auth_models
 from patchouli_lib.config import Settings
 from patchouli_lib.content import models as content_models
@@ -31,6 +32,8 @@ if tag_models.Tag.metadata is not Base.metadata:
     raise RuntimeError("Tag models must use the shared SQLAlchemy metadata.")
 if request_log_models.RequestLogRecord.metadata is not Base.metadata:
     raise RuntimeError("Request log models must use the shared SQLAlchemy metadata.")
+if master_file_set_models.MasterFileSetReceiptRow.metadata is not Base.metadata:
+    raise RuntimeError("Master file-set models must use the shared SQLAlchemy metadata.")
 target_metadata = Base.metadata
 
 

@@ -13,6 +13,11 @@ from urllib.parse import quote
 
 from pydantic import Field
 
+from patchouli_lib.admin.file_set_receipt_validation import (
+    MasterFileSetReceiptCorruptError,
+    validate_master_file_set_receipt,
+)
+from patchouli_lib.admin.file_set_receipts import MasterFileSetReceipt
 from patchouli_lib.admin.passwords import parse_password_hash
 from patchouli_lib.auth.tokens import InvalidTokenError, parse_token, verify_token
 from patchouli_lib.backup.errors import BackupDatabaseError
@@ -29,6 +34,7 @@ from patchouli_lib.backup.manifest import (
     MASTER_AUDIT_SCHEMA_REVISION,
     MASTER_IDENTITY_SCHEMA_REVISION,
     MASTER_LIFECYCLE_SCHEMA_REVISION,
+    MASTER_PAGE_DELETE_SCHEMA_REVISION,
     OCCURRENCE_SCHEMA_REVISION,
     PAGE_TITLE_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
@@ -668,6 +674,18 @@ _EXPECTED_SQL_HASHES_0025: Final = _EXPECTED_SQL_HASHES_0024 | {
         "b1ff6e8a67f7c3eda27b1454368ac2312ee54d1b00f2d2fce0eb5bf64c1e2924"
     ),
 }
+_EXPECTED_SQL_HASHES_0026: Final = _EXPECTED_SQL_HASHES_0025 | {
+    # Derived from a fresh Alembic 0026 database with _canonical_schema_sql.
+    ("table", "admin_master_file_set_receipts"): (
+        "91597ee868abf68e4e636cc4a6b8656e0d7b8d06c52d08f9b8e879b4f8651244"
+    ),
+    ("trigger", "trg_master_file_set_receipts_no_update"): (
+        "e9fdf74fb604a4a0ab75a3eabf1173f7ce11757295a289f0986ad5a9145b6aa6"
+    ),
+    ("trigger", "trg_master_file_set_receipts_no_delete"): (
+        "be95a935ab564a48f9af4481a8a5ae184c76a4b9df261a7ebc32b2ca168c93b9"
+    ),
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
     PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
@@ -687,7 +705,8 @@ _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     PAGE_TITLE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0022,
     REQUEST_LOG_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0023,
     SEARCH_INDEX_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0024,
-    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0025,
+    MASTER_PAGE_DELETE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0025,
+    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0026,
 }
 _FILE_SET_REVISIONS: Final = frozenset(
     {
@@ -703,6 +722,7 @@ _FILE_SET_REVISIONS: Final = frozenset(
         PAGE_TITLE_SCHEMA_REVISION,
         REQUEST_LOG_SCHEMA_REVISION,
         SEARCH_INDEX_SCHEMA_REVISION,
+        MASTER_PAGE_DELETE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }
 )
@@ -714,6 +734,7 @@ _MASTER_LIFECYCLE_REVISIONS: Final = frozenset(
         PAGE_TITLE_SCHEMA_REVISION,
         REQUEST_LOG_SCHEMA_REVISION,
         SEARCH_INDEX_SCHEMA_REVISION,
+        MASTER_PAGE_DELETE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }
 )
@@ -1181,6 +1202,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
         PAGE_TITLE_SCHEMA_REVISION,
         REQUEST_LOG_SCHEMA_REVISION,
         SEARCH_INDEX_SCHEMA_REVISION,
+        MASTER_PAGE_DELETE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         for row in connection.execute(
@@ -1272,7 +1294,11 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
                 schema_revision not in _MASTER_LIFECYCLE_REVISIONS
                 or type(master_audit_event_id) is not str
                 or actor is not None
-                or (action == "delete" and schema_revision != SUPPORTED_SCHEMA_REVISION)
+                or (
+                    action == "delete"
+                    and schema_revision
+                    not in {MASTER_PAGE_DELETE_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}
+                )
             ):
                 raise BackupDatabaseError
             audit = connection.execute(
@@ -1742,7 +1768,10 @@ def _require_master_audit(connection: sqlite3.Connection, schema_revision: str) 
             "content.archive.restore",
             "content.archive.delete",
         }:
-            if action == "content.archive.delete" and schema_revision != SUPPORTED_SCHEMA_REVISION:
+            if action == "content.archive.delete" and schema_revision not in {
+                MASTER_PAGE_DELETE_SCHEMA_REVISION,
+                SUPPORTED_SCHEMA_REVISION,
+            }:
                 raise BackupDatabaseError
             linked_events = connection.execute(
                 "SELECT library_id, page_uid, changed_at, action FROM page_lifecycle_events "
@@ -1768,6 +1797,7 @@ def _require_master_audit(connection: sqlite3.Connection, schema_revision: str) 
                 PAGE_TITLE_SCHEMA_REVISION,
                 REQUEST_LOG_SCHEMA_REVISION,
                 SEARCH_INDEX_SCHEMA_REVISION,
+                MASTER_PAGE_DELETE_SCHEMA_REVISION,
                 SUPPORTED_SCHEMA_REVISION,
             }
             and action == "content.page.title.edit"
@@ -1878,6 +1908,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         PAGE_TITLE_SCHEMA_REVISION,
         REQUEST_LOG_SCHEMA_REVISION,
         SEARCH_INDEX_SCHEMA_REVISION,
+        MASTER_PAGE_DELETE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         invalid_library_policies = _one_integer(
@@ -1903,6 +1934,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         PAGE_TITLE_SCHEMA_REVISION,
         REQUEST_LOG_SCHEMA_REVISION,
         SEARCH_INDEX_SCHEMA_REVISION,
+        MASTER_PAGE_DELETE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_agent_token_values(connection)
@@ -1917,6 +1949,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         PAGE_TITLE_SCHEMA_REVISION,
         REQUEST_LOG_SCHEMA_REVISION,
         SEARCH_INDEX_SCHEMA_REVISION,
+        MASTER_PAGE_DELETE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_master_identity(connection)
@@ -1930,6 +1963,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         PAGE_TITLE_SCHEMA_REVISION,
         REQUEST_LOG_SCHEMA_REVISION,
         SEARCH_INDEX_SCHEMA_REVISION,
+        MASTER_PAGE_DELETE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_actor_home_graph(connection, schema_revision)
@@ -1942,6 +1976,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         PAGE_TITLE_SCHEMA_REVISION,
         REQUEST_LOG_SCHEMA_REVISION,
         SEARCH_INDEX_SCHEMA_REVISION,
+        MASTER_PAGE_DELETE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_master_audit(connection, schema_revision)
@@ -2194,6 +2229,7 @@ def _file_set_valid_current_etags(
         PAGE_TITLE_SCHEMA_REVISION,
         REQUEST_LOG_SCHEMA_REVISION,
         SEARCH_INDEX_SCHEMA_REVISION,
+        MASTER_PAGE_DELETE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         for (changed_at,) in connection.execute(
@@ -2406,6 +2442,7 @@ def _page_title_at(
         PAGE_TITLE_SCHEMA_REVISION,
         REQUEST_LOG_SCHEMA_REVISION,
         SEARCH_INDEX_SCHEMA_REVISION,
+        MASTER_PAGE_DELETE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         return current_title
@@ -2810,6 +2847,26 @@ def _require_search_projection_reset(connection: sqlite3.Connection) -> None:
             raise BackupDatabaseError
 
 
+def _require_master_file_set_receipts(connection: sqlite3.Connection) -> None:
+    cursor = connection.execute("SELECT * FROM admin_master_file_set_receipts")
+    names = [column[0] for column in cursor.description]
+    try:
+        for row in cursor:
+            receipt = MasterFileSetReceipt.model_validate(dict(zip(names, row, strict=True)))
+            validate_master_file_set_receipt(connection, receipt)
+    except (ValueError, MasterFileSetReceiptCorruptError):
+        raise BackupDatabaseError from None
+    # Every new master content audit must describe exactly one changed success.
+    # No-op and replay deliberately create neither Source nor content activity.
+    if connection.execute(
+        "SELECT 1 FROM admin_master_audit_events a "
+        "LEFT JOIN admin_master_file_set_receipts r ON r.master_audit_event_id = a.id "
+        "WHERE a.action IN ('content.page.file_set.create', 'content.page.file_set.revise') "
+        "AND r.master_audit_event_id IS NULL LIMIT 1"
+    ).fetchone():
+        raise BackupDatabaseError
+
+
 def _validate_connection(
     connection: sqlite3.Connection, schema_revision: str
 ) -> DatabaseValidationReport:
@@ -2832,6 +2889,7 @@ def _validate_connection(
         PAGE_TITLE_SCHEMA_REVISION,
         REQUEST_LOG_SCHEMA_REVISION,
         SEARCH_INDEX_SCHEMA_REVISION,
+        MASTER_PAGE_DELETE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_library_descriptions(connection)
@@ -2845,13 +2903,20 @@ def _validate_connection(
         _require_tag_graph(connection)
     _require_auth_graph(connection, schema_revision)
     _require_idempotency_graph(connection, schema_revision)
+    if schema_revision == SUPPORTED_SCHEMA_REVISION:
+        _require_master_file_set_receipts(connection)
     if schema_revision in {
         REQUEST_LOG_SCHEMA_REVISION,
         SEARCH_INDEX_SCHEMA_REVISION,
+        MASTER_PAGE_DELETE_SCHEMA_REVISION,
         SUPPORTED_SCHEMA_REVISION,
     }:
         _require_request_log_graph(connection)
-    if schema_revision in {SEARCH_INDEX_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
+    if schema_revision in {
+        SEARCH_INDEX_SCHEMA_REVISION,
+        MASTER_PAGE_DELETE_SCHEMA_REVISION,
+        SUPPORTED_SCHEMA_REVISION,
+    }:
         _require_search_projection_reset(connection)
     return DatabaseValidationReport(
         schema_revision=schema_revision,

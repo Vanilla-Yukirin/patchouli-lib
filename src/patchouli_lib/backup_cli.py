@@ -49,6 +49,7 @@ from patchouli_lib.backup.manifest import (
     MASTER_AUDIT_SCHEMA_REVISION,
     MASTER_IDENTITY_SCHEMA_REVISION,
     MASTER_LIFECYCLE_SCHEMA_REVISION,
+    MASTER_PAGE_DELETE_SCHEMA_REVISION,
     OCCURRENCE_SCHEMA_REVISION,
     PAGE_TITLE_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
@@ -165,6 +166,7 @@ def _add_schema_revision(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--schema-revision",
         choices=(
+            MASTER_PAGE_DELETE_SCHEMA_REVISION,
             SUPPORTED_SCHEMA_REVISION,
             SEARCH_INDEX_SCHEMA_REVISION,
             REQUEST_LOG_SCHEMA_REVISION,
