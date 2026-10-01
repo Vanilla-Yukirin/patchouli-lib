@@ -185,6 +185,19 @@ def test_skill_guide_shows_only_packaged_manifest_and_escaped_fixed_files(
         assert escape(contents.decode("utf-8")) in response.text
 
 
+@pytest.mark.parametrize("locale", ("en", "zh-CN"))
+def test_agent_guide_explains_search_without_claiming_index_readiness(
+    admin_client: TestClient, locale: str
+) -> None:
+    _login(admin_client)
+    response = admin_client.get(f"/admin/agent?lang={locale}")
+    assert response.status_code == 200
+    assert "POST /api/v1/search" in response.text
+    assert "503" in response.text
+    assert "真实搜索尚未提供" not in response.text
+    assert "Real search is not yet" not in response.text
+
+
 def test_mcp_inventory_and_synthetic_structured_content(
     admin_client: TestClient,
 ) -> None:

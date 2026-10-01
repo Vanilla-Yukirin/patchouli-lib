@@ -1764,7 +1764,7 @@ def guide_page(
 <p>旧版初始化与管理员凭据仅用于兼容；恢复管理员凭据会使此前仍有效的管理员凭据失效。</p>
 <p>为每个 Agent 明确选择归属知识库与目标知识库的独立读／写权限。
 请记录调用方 ID 和凭据 ID，以便之后查看、轮换或撤销凭据。</p>
-<p>此面板不能更新镜像、回滚、控制 Docker、恢复备份、执行 Shell 命令或部署。
+<p>此面板不能更新或回滚镜像、控制 Docker、恢复备份、执行 Shell 命令或部署。
 这些操作仍需通过独立的本地管理员流程完成。</p>
 """,
             ),
@@ -1778,7 +1778,9 @@ def guide_page(
 Skill 文件及摘要清单。标准 HTTP 是首选，不要求安装 CLI 或 MCP。</p>
 <p>支持将单份 Markdown 或多份同层文件通过同一文件集接口上传、准确回读和查看历史；
 请先核对目标服务的 <code>file-sets</code> 能力。旧 Archive 接口是兼容路径。
-真实搜索尚未提供；已安装的 CLI 或 MCP 可继续选用，但不是接入前提。</p>
+当前页面搜索使用 <code>POST /api/v1/search</code>，支持关键词、Tag、知识库和声明时间筛选。
+先检查服务的搜索能力；索引未就绪时返回 503。已安装的 CLI 或 MCP 可继续选用，
+但不是接入前提。</p>
 """,
             ),
             "mcp": (
@@ -1805,7 +1807,7 @@ Keep the master Token in a controlled local store; rotating it invalidates old s
 recovering an operator credential invalidates prior active operator credentials.</p>
 <p>Choose each Agent's home Library and explicit read/write grants for target Libraries.
 Record caller and credential IDs for later reveal, rotation or revocation.</p>
-<p>This console has no image update, rollback, Docker, backup restore, shell, or
+<p>This console has no image update or image rollback, Docker, backup restore, shell, or
 deployment controls. Those remain separate local operator procedures.</p>
 """,
             ),
@@ -1820,8 +1822,10 @@ The Agent first checks <code>/api/v1/auth/whoami</code> and
 digest manifest. Standard HTTP is preferred; no CLI or MCP installation is required.</p>
 <p>Single Markdown and multiple flat files use the same file-set upload, accurate
 readback and history APIs; check the target service's <code>file-sets</code> capability
-first. The old Archive API is a compatibility path. Real search is not yet
-available. Existing CLI and MCP clients remain optional.</p>
+first. The old Archive API is a compatibility path. Current Page search uses
+<code>POST /api/v1/search</code> with keyword, Tag, Library and declared-time filters.
+Check the service's search capability; an unready index returns 503.
+Existing CLI and MCP clients remain optional.</p>
 """,
             ),
             "mcp": (
@@ -2451,6 +2455,12 @@ def page_preview_page(
             else ""
         )
     )
+    if master_mode:
+        restore_label = "恢复此版本" if locale == "zh-CN" else "Restore this revision"
+        body += (
+            f'<p><a class="button" href="{base}/revisions/'
+            f'{view.selected_revision_number}/restore">{restore_label}</a></p>'
+        )
     if current and master_mode:
         body += (
             f'<p><a class="button" href="{base}/files/edit">'

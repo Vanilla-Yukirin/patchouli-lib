@@ -23,6 +23,14 @@ from patchouli_lib.admin.file_set_service import (
 )
 from patchouli_lib.admin.pages import AdminLocale, login_page
 from patchouli_lib.admin.read_model import AdminReadModel, BookView, PageView
+from patchouli_lib.admin.revision_restore_pages import (
+    REVISION_RESTORE_SCRIPT,
+    revision_restore_page,
+)
+from patchouli_lib.admin.revision_restore_service import (
+    MasterRevisionRestoreCommand,
+    MasterRevisionRestoreService,
+)
 from patchouli_lib.admin.session import AdminSession, MasterAdminSession
 from patchouli_lib.api.errors import ApplicationProblem
 from patchouli_lib.api.file_set_multipart import parse_file_set_multipart
@@ -41,7 +49,7 @@ from patchouli_lib.content.schemas import (
     StrongPageETag,
 )
 from patchouli_lib.idempotency import digest_idempotency_key
-from patchouli_lib.identifiers import parse_occurrence_time, validate_page_id
+from patchouli_lib.identifiers import MAX_REVISION_NUMBER, parse_occurrence_time, validate_page_id
 
 _BOOK_PATH: Final = "/libraries/{library_id}/sections/{section_id}/books/{book_id}"
 _PAGE_PATH: Final = _BOOK_PATH + "/pages/{page_id}"
@@ -184,6 +192,30 @@ def _metadata(raw: bytes) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
+def _revision_number(raw: str) -> int:
+    if (
+        not 1 <= len(raw) <= 19
+        or not raw.isascii()
+        or not raw.isdecimal()
+        or raw[0] == "0"
+        or int(raw) > MAX_REVISION_NUMBER
+    ):
+        raise _UploadFailure(422)
+    return int(raw)
+
+
+async def _restore_confirmation(request: Request) -> None:
+    if request.headers.get("content-type", "").split(";", 1)[0].strip() != "application/json":
+        raise _UploadFailure(415)
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > 512:
+            raise _UploadFailure(413)
+        body.extend(chunk)
+    if _metadata(bytes(body)) != {"confirm_restore": "yes"}:
+        raise _UploadFailure(422)
+
+
 def _create_time(metadata: dict[str, object]) -> int | None:
     if not {"title"} <= set(metadata) <= {"title", "occurred_at"}:
         raise _UploadFailure(422)
@@ -254,6 +286,7 @@ def create_master_file_set_router(
 
     router = APIRouter(include_in_schema=False)
     service = MasterFileSetService(engine)
+    restore_service = MasterRevisionRestoreService(engine)
     read_model = AdminReadModel(engine)
 
     def failure(request: Request, locale: AdminLocale, status_code: int) -> JSONResponse:
@@ -436,6 +469,121 @@ def create_master_file_set_router(
         request: Request, library_id: str, section_id: str, book_id: str, page_id: str
     ) -> Response:
         return await upload(request, library_id, section_id, book_id, page_id)
+
+    @router.get(_PAGE_PATH + "/revisions/{revision_number}/restore")
+    def restore_form(
+        request: Request,
+        library_id: str,
+        section_id: str,
+        book_id: str,
+        page_id: str,
+        revision_number: str,
+    ) -> Response:
+        locale: AdminLocale = "en"
+        try:
+            locale = locale_for(request)
+            session = current_session(request)
+            if session is None or type(session) is not MasterAdminSession:
+                status = 401 if session is None else 403
+                response = html_response(
+                    login_page(locale=locale, message=_message(status, locale)),
+                    locale,
+                    status,
+                    False,
+                )
+                if status == 401:
+                    clear_session(response, request)
+                return response
+            number = _revision_number(revision_number)
+            for scoped_id in (library_id, section_id, book_id):
+                _OPAQUE_ID_ADAPTER.validate_python(scoped_id, strict=True)
+            validate_page_id(page_id)
+            view = read_model.get_page(library_id, section_id, book_id, page_id, number)
+            # A protected unavailable shell permits an existing tab's original
+            # success to be replayed after deletion, without allowing a new write.
+            return html_response(
+                revision_restore_page(
+                    session.csrf_token,
+                    library_id=library_id,
+                    section_id=section_id,
+                    book_id=book_id,
+                    page_id=page_id,
+                    revision_number=number,
+                    view=view,
+                    locale=locale,
+                ),
+                locale,
+                200 if view is not None else 404,
+                True,
+            )
+        except (_UploadFailure, ValueError):
+            return html_response(
+                login_page(locale=locale, message=_message(422, locale)), locale, 422, False
+            )
+        except Exception:
+            return html_response(
+                login_page(locale=locale, message=_message(500, locale)), locale, 500, False
+            )
+
+    @router.post(_PAGE_PATH + "/revisions/{revision_number}/restore")
+    async def restore_revision(
+        request: Request,
+        library_id: str,
+        section_id: str,
+        book_id: str,
+        page_id: str,
+        revision_number: str,
+    ) -> Response:
+        locale: AdminLocale = "en"
+        try:
+            locale = locale_for(request)
+            if not same_origin(request):
+                raise _UploadFailure(403)
+            session = await run_in_threadpool(current_session, request)
+            if session is None:
+                raise _UploadFailure(401)
+            if type(session) is not MasterAdminSession:
+                raise _UploadFailure(403)
+            _require_csrf(request, session)
+            key, etag = _operation_headers(request, revise=True)
+            if etag is None:
+                raise _UploadFailure(428)
+            number = _revision_number(revision_number)
+            await _restore_confirmation(request)
+            command = MasterRevisionRestoreCommand(
+                library_id=library_id,
+                section_id=section_id,
+                book_id=book_id,
+                page_id=page_id,
+                source_revision_number=number,
+                expected_etag=etag,
+            )
+            result = await run_in_threadpool(
+                restore_service.restore_revision, command, key, master_session=session
+            )
+            return _success(
+                request, result, locale=locale, create=False, occurrence_defaulted=False
+            )
+        except _UploadFailure as error:
+            return failure(request, locale, error.status_code)
+        except (ValueError, TypeError):
+            return failure(request, locale, 422)
+        except AuthenticationError:
+            return failure(request, locale, 401)
+        except MasterFileSetConflictError:
+            return failure(request, locale, 409)
+        except MasterFileSetNotFoundError:
+            return failure(request, locale, 404)
+        except FileSetPreconditionFailedError:
+            return failure(request, locale, 412)
+        except Exception:
+            return failure(request, locale, 500)
+
+    @router.get("/revision-restore.js")
+    def restore_script() -> PlainTextResponse:
+        return PlainTextResponse(
+            REVISION_RESTORE_SCRIPT, media_type="application/javascript", headers=_SECURITY_HEADERS
+        )
 
     @router.get("/file-set-upload.js")
     def upload_script() -> PlainTextResponse:
