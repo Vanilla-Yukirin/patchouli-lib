@@ -39,6 +39,10 @@ patchouli-client = { path = "clients/python", editable = true }
 requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.sdist]
+exclude = [".tmp-*"]
+skip-excluded-dirs = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/patchouli_lib"]
 

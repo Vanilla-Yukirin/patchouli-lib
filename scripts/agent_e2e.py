@@ -536,9 +536,15 @@ def _exercise_agent(
     inputs = runtime / "client-inputs"
     state.mkdir(mode=0o700)
     inputs.mkdir(mode=0o700)
+    config = runtime / "client-config.toml"
+    _write_private(
+        config,
+        f'version = 1\n[profiles.default]\nendpoint = {json.dumps(endpoint)}\napi_version = "v1"\n',
+    )
     client_environment = _clean_environment(os.environ, loopback_only=True)
     client_environment.update(
         {
+            "PATCHOULI_CONFIG_FILE": str(config),
             "PATCHOULI_ENDPOINT": endpoint,
             "PATCHOULI_API_VERSION": "v1",
             "PATCHOULI_TOKEN": agent_token,
