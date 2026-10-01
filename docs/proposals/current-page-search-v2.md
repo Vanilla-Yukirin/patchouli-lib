@@ -325,6 +325,18 @@ FTS `MATCH`。开发分支把该路径的连接顺序固定为先扫 FTS 命中�
 uv run python scripts/bench_search_v2.py --pages 5000 --bytes-per-page 10240 --repeats 5 --keyword 技术 --keyword 报告 --include-no-hit
 ```
 
+开发分支另增[真实应用矩阵基准](../../scripts/bench_search_v2_matrix.py)，使用临时
+合成数据库、实际文件集创建核心、真实 Token 范围检查、索引重建与查询服务。
+一次三个 Library 合计 5,000 Page × 10 KiB 的测量中，凭据可读两库共 3,334 Page；
+九类查询的返回 Top 20 均与独立字面扫描给出的预期一致，另核验不可见目标拒绝与
+一次真实修订后的索引变化。新连接查询约 36～166 ms，三次重复查询最慢约
+204 ms，重建约 21.1 秒，修订约 24 ms，主数据库约 159 MiB。
+复现命令为 `uv run python scripts/bench_search_v2_matrix.py --scale --repeats 3`。
+本矩阵只有单 Markdown、单关键词、等分排序及一个修订样本；初始写入走创建核心，
+不是完整 HTTP 写入。它不测操作系统冷缓存、并发、所有写路径、真实相关性或生产
+硬件；也不证明返回列表之外的全部候选已由服务返回。它补充跨库、Tag 和时间的
+合成性能证据，不替代以下完整验收门槛，也不改变本提案状态。
+
 接受索引结构前，至少使用可再分发且词汇多样的约 5,000 Page × 10 KiB 中英混合
 语料，覆盖多个 Library／Section／Book、不同 Tag、单边和双边声明时间、历史
 Revision、软删除与多文件文本。测试单字／双字／三字、中英混合、罕见／常见／
