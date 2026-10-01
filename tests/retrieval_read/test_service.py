@@ -4,7 +4,7 @@ import dataclasses
 import hashlib
 
 import pytest
-from sqlalchemy import Connection, Engine, insert, select
+from sqlalchemy import Connection, Engine, delete, insert, select
 
 from patchouli_lib.auth.library_policy import LegacySectionPolicy
 from patchouli_lib.auth.models import CredentialLibraryGrant, CredentialLibraryPolicy
@@ -20,6 +20,9 @@ from patchouli_lib.content import page_current_etag
 from patchouli_lib.content.models import Page
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.identifiers import InvalidPageIdError, InvalidRevisionNumberError
+from patchouli_lib.library.repository import LibraryRepository
+from patchouli_lib.library.schemas import LibraryStructureSeed, NewBook
+from patchouli_lib.library.service import LibrarySeedService
 from patchouli_lib.retrieval.repository import RetrievalRepository
 from patchouli_lib.retrieval.schemas import ReadWindow
 from patchouli_lib.retrieval.service import (
@@ -185,6 +188,128 @@ def test_query_grant_lists_books_and_current_page_metadata_without_bodies(
         assert first.citation.revision_id == retrieval_scope.second_revision_id
         assert "content" not in first.model_dump()
         assert not hasattr(pages, "total")
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("actions", [(), ("write",), ("read",), ("read", "write")])
+def test_explicit_library_discovery_requires_exact_target_read(
+    retrieval_engine: Engine,
+    retrieval_scope: RetrievalScope,
+    actions: tuple[str, ...],
+) -> None:
+    scope = retrieval_scope
+    ids = iter(("01" * 16, "02" * 16, "03" * 16))
+    with immediate_transaction(retrieval_engine) as connection:
+        repository = LibraryRepository(connection)
+        target = LibrarySeedService(
+            repository, id_factory=lambda: next(ids), clock=lambda: 1_000_000
+        ).seed(
+            LibraryStructureSeed(
+                library_name="Synthetic Discovery Library",
+                section_name="Synthetic Discovery Section",
+                book_name="Synthetic First Book",
+            )
+        )
+        repository.add_book(
+            NewBook(
+                id="04" * 16,
+                library_id=target.library.id,
+                section_id=target.section.id,
+                name="Synthetic Second Book",
+                created_at=1_000_000,
+                updated_at=1_000_000,
+            )
+        )
+        connection.execute(
+            insert(CredentialLibraryPolicy),
+            {
+                "credential_id": scope.authenticated.credential.id,
+                "caller_id": scope.authenticated.caller.id,
+                "home_library_id": scope.library_id,
+                "mode": "library_grants",
+                "created_at": 1_000_000,
+            },
+        )
+        for action in actions:
+            connection.execute(
+                insert(CredentialLibraryGrant),
+                {
+                    "credential_id": scope.authenticated.credential.id,
+                    "caller_id": scope.authenticated.caller.id,
+                    "home_library_id": scope.library_id,
+                    "target_library_id": target.library.id,
+                    "action": action,
+                    "created_at": 1_000_000,
+                },
+            )
+
+    connection, service = _service(retrieval_engine, scope)
+    try:
+        # Existing home Section grants cannot rescue the opted-in credential.
+        with pytest.raises(RetrievalAuthorizationError):
+            service.list_sections()
+        if "read" not in actions:
+            with pytest.raises(RetrievalAuthorizationError):
+                service.list_sections(library_id=target.library.id)
+            with pytest.raises(RetrievalAuthorizationError):
+                service.list_books(target.section.id, library_id=target.library.id)
+            return
+        sections = service.list_sections(library_id=target.library.id)
+        assert [item.section_id for item in sections.items] == [target.section.id]
+        first = service.list_books(
+            target.section.id, ReadWindow(limit=1), library_id=target.library.id
+        )
+        assert [item.book_id for item in first.items] == [target.book.id]
+        assert first.next_key == target.book.id
+        second = service.list_books(
+            target.section.id,
+            ReadWindow(limit=1, after_key=first.next_key),
+            library_id=target.library.id,
+        )
+        assert [item.book_id for item in second.items] == ["04" * 16]
+        assert second.next_key is None
+        with pytest.raises(RetrievalNotFoundError):
+            service.list_books(scope.query_section_id, library_id=target.library.id)
+    finally:
+        connection.close()
+
+    with immediate_transaction(retrieval_engine) as connection:
+        connection.execute(
+            delete(CredentialLibraryGrant).where(
+                CredentialLibraryGrant.credential_id == scope.authenticated.credential.id,
+                CredentialLibraryGrant.target_library_id == target.library.id,
+                CredentialLibraryGrant.action == "read",
+            )
+        )
+    connection, service = _service(retrieval_engine, scope)
+    try:
+        with pytest.raises(RetrievalAuthorizationError):
+            service.list_books(
+                target.section.id,
+                ReadWindow(limit=1, after_key=first.next_key),
+                library_id=target.library.id,
+            )
+    finally:
+        connection.close()
+
+
+def test_legacy_discovery_allows_explicit_home_but_never_other_libraries(
+    retrieval_engine: Engine,
+    retrieval_scope: RetrievalScope,
+) -> None:
+    scope = retrieval_scope
+    connection, service = _service(retrieval_engine, scope)
+    try:
+        assert service.list_sections() == service.list_sections(library_id=scope.library_id)
+        assert service.list_books(scope.query_section_id) == service.list_books(
+            scope.query_section_id, library_id=scope.library_id
+        )
+        for target in ("01" * 16, "ff" * 16):
+            with pytest.raises(RetrievalAuthorizationError):
+                service.list_sections(library_id=target)
+            with pytest.raises(RetrievalAuthorizationError):
+                service.list_books(scope.query_section_id, library_id=target)
     finally:
         connection.close()
 

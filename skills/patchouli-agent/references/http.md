@@ -46,12 +46,36 @@ GET /api/v1/sections/{section_id}/pages/{page_id}
 GET /api/v1/sections/{section_id}/pages/{page_id}/revisions/{revision_number}
 ```
 
-列表可能分页，按返回的 `next_cursor` 继续，不自行编造游标。引用准确 Revision 时
-保留服务器返回的 `section_id`、`page_id`、`revision_id`、`revision_number` 和
-相对 `href`；不要用「当前版本」替代已选历史版本。这组旧发现列表只覆盖凭据归属
-Library，不能据此发现其他 Library 的 Section／Book。跨库文件集写入虽可按精确
-Library 授权执行，但目标 Library／Section／Book ID 仍需由管理员或其他已授权
-来源提供并核实，不可推测或扫描。
+Section 和 Book 列表可用可选的 `library_id` 选择目标知识库，复用同一 GET 路径：
+
+```text
+GET /api/v1/sections?library_id={library_id}&limit=20
+GET /api/v1/sections/{section_id}/books?library_id={library_id}&limit=20
+```
+
+省略 `library_id` 仍只访问凭据归属 Library，不会自动合并全部已授权库。显式传入
+归属 Library 与省略等价。`library_grants` 模式需要该精确凭据对目标 Library 的
+`read`；`write` 不隐含读取，原有 Section grant 也不能代替新版 Library 授权。
+`legacy_section` 模式只能访问归属库，Section 列表仍只显示有 `section:query` 的
+分区，Book 列表仍需该分区的 `section:query`。无目标读取权限或旧模式跨库返回
+`403 insufficient_scope`，已授权目标库中不存在的 Section 返回
+`404 resource_not_found`。这两列表仍只返回原有字段：Section 的 `section_id`、
+`name`，Book 的 `section_id`、`book_id`、`title`，不会返回内容正文。
+
+列表按 ID 升序，用 `limit`（默认 20，范围 1–100）和返回的 `next_cursor` 继续；
+`next_cursor: null` 表示末页，不自行编造游标。继续翻页必须保留相同目标 Library、
+凭据、路径、Section 和 `limit`；省略与显式归属库可互换。游标跨目标或凭据返回
+`400 invalid_cursor`，每页仍核对当前授权，旧游标不能绕过撤销。两列表加强了
+Library／精确凭据绑定，因此升级前取得的旧游标须重新从第一页开始。`library_id`
+必须是完整的 32 位小写十六进制 ID，空值、重复参数和未知列表参数返回
+`422 request_validation_failed`。此选择器不适用于 Page 列表或单 Page／Revision
+读取；跨库文件集准确读取请使用下方显式含 `/libraries/{library_id}` 的路径。
+
+先从 `whoami.library_grants` 确认有 `read` 的目标 Library，再发现其中的 Section／Book。
+仅有 `write` 时，目标 ID 仍须由管理员或其他已授权来源提供并核实，不能扫描或猜造。
+引用准确 Revision 时保留服务器返回的 `section_id`、`page_id`、`revision_id`、
+`revision_number` 和相对 `href`；不要用「当前版本」替代已选历史版本。开发分支
+接口不代表目标服务已部署；旧服务不支持此选择器时不得假定返回结果属于目标库。
 
 ## 当前 Page 搜索
 

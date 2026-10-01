@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from html import escape
 from typing import Literal
@@ -969,6 +970,32 @@ def dashboard_page(
     return _document(localize(locale, "Home"), content, locale)
 
 
+@dataclass(frozen=True)
+class SearchFormValues:
+    """POSTed search controls, kept separate from normalized search semantics."""
+
+    keywords: str = ""
+    library_ids: tuple[str, ...] = ()
+    tags: tuple[str, ...] = ()
+    occurred_from: str = ""
+    occurred_before: str = ""
+
+
+def _search_match_sources(item: SearchPageV2, locale: AdminLocale) -> str:
+    labels = (
+        {"title": "文档标题", "file_name": "文件名", "file_text": "文件正文"}
+        if locale == "zh-CN"
+        else {"title": "Page title", "file_name": "File name", "file_text": "File text"}
+    )
+    sources = "; ".join(
+        escape(labels.get(source.kind, source.kind))
+        + (f": <code>{escape(source.file_name)}</code>" if source.file_name is not None else "")
+        for source in item.match_sources
+    )
+    label = "命中来源" if locale == "zh-CN" else "Match sources"
+    return f'<p class="meta search-match-sources">{label}: {sources}</p>' if sources else ""
+
+
 def search_page(
     csrf_token: str,
     libraries: tuple[tuple[LibraryItem, tuple[TagItem, ...]], ...],
@@ -976,39 +1003,69 @@ def search_page(
     locale: AdminLocale = "en",
     results: tuple[SearchPageV2, ...] | None = None,
     message: str | None = None,
+    form_values: SearchFormValues | None = None,
 ) -> str:
     """Render a server-side search form without placing terms or credentials in URLs."""
 
+    if form_values is None:
+        form_values = SearchFormValues()
     csrf = escape(csrf_token, quote=True)
     keyword_help = localize(
         locale,
         "Separate multiple words with spaces. Without spaces, "
         "Chinese text is one literal search item.",
     )
-    tag_help = localize(
-        locale,
-        "Hold Ctrl or Command to select multiple Tags. No selection means no Tag filter. "
-        "When filtering one Library, select its Tags only.",
+    tag_help = (
+        "按 Ctrl 或 Command 可选择多个标签；不选择表示不限标签。"
+        "指定知识库时只能选择所选知识库的标签。"
+        if locale == "zh-CN"
+        else "Hold Ctrl or Command to select multiple Tags. No selection means no Tag filter. "
+        "When filtering Libraries, select their Tags only."
     )
+    library_help = (
+        "按 Ctrl 或 Command 可选择多个知识库；不选择表示搜索全部知识库。"
+        if locale == "zh-CN"
+        else "Hold Ctrl or Command to select multiple Libraries. "
+        "No selection searches all libraries."
+    )
+    known_libraries = {library.id for library, _ in libraries}
     time_help = localize(
         locale, "Time filters use the Page's declared occurrence time, not its upload time."
     )
     library_options = "".join(
-        f'<option value="{escape(library.id, quote=True)}">{escape(library.name)}</option>'
+        f'<option value="{escape(library.id, quote=True)}"'
+        + (" selected" if library.id in form_values.library_ids else "")
+        + f">{escape(library.name)}</option>"
         for library, _ in libraries
     )
+    unavailable_library = "不可用知识库" if locale == "zh-CN" else "Unavailable Library"
+    library_options += "".join(
+        f'<option value="{escape(identity, quote=True)}" selected>'
+        f"{unavailable_library}: {escape(identity)}</option>"
+        for identity in dict.fromkeys(form_values.library_ids)
+        if identity not in known_libraries
+    )
+    known_tags = {f"{library.id}:{tag.id}" for library, tags in libraries for tag in tags}
     tag_options = "".join(
         '<optgroup label="'
         + escape(library.name, quote=True)
         + '">'
         + "".join(
-            f'<option value="{escape(library.id, quote=True)}:{escape(tag.id, quote=True)}">'
-            f"{escape(tag.name)}</option>"
+            f'<option value="{escape(library.id, quote=True)}:{escape(tag.id, quote=True)}"'
+            + (" selected" if f"{library.id}:{tag.id}" in form_values.tags else "")
+            + f">{escape(tag.name)}</option>"
             for tag in tags
         )
         + "</optgroup>"
         for library, tags in libraries
         if tags
+    )
+    unavailable_tag = "不可用 Tag" if locale == "zh-CN" else "Unavailable Tag"
+    tag_options += "".join(
+        f'<option value="{escape(identity, quote=True)}" selected>'
+        f"{unavailable_tag}: {escape(identity)}</option>"
+        for identity in dict.fromkeys(form_values.tags)
+        if identity not in known_tags
     )
     result_html = ""
     if results is not None:
@@ -1019,7 +1076,9 @@ def search_page(
             f"{escape(item.book_id, quote=True)}/pages/"
             f'{escape(item.page_id, quote=True)}">{escape(item.title)}</a>'
             f'<p class="meta">{localize(locale, "Occurred")}: {_time(item.occurred_at)}'
-            f" · {localize(locale, 'Version')}: {item.revision_number}</p></li>"
+            f" · {localize(locale, 'Version')}: {item.revision_number}</p>"
+            + _search_match_sources(item, locale)
+            + "</li>"
             for item in results
         )
         result_html = (
@@ -1042,19 +1101,23 @@ def search_page(
   <form class="card" method="post" action="/admin/search" autocomplete="off">
     {_csrf(csrf)}
     <label for="keywords">{localize(locale, "Search words")}</label>
-    <input id="keywords" name="keywords" type="text" maxlength="32768">
+    <input id="keywords" name="keywords" type="text" maxlength="32768"
+      value="{escape(form_values.keywords, quote=True)}">
     <small class="field-help">{keyword_help}</small>
     <label for="library_id">{localize(locale, "Filter by Library")}</label>
-    <select id="library_id" name="library_id">
-      <option value="">{localize(locale, "All libraries")}</option>{library_options}
+    <select id="library_id" name="library_id" multiple size="4">
+      {library_options}
     </select>
+    <small class="field-help">{library_help}</small>
     <label for="tags">{localize(locale, "Any selected Tag")}</label>
     <select id="tags" name="tags" multiple size="6">{tag_options}</select>
     <small class="field-help">{tag_help}</small>
     <label for="occurred_from">{localize(locale, "Occurred from (UTC)")}</label>
-    <input id="occurred_from" name="occurred_from" type="datetime-local" step="1">
+    <input id="occurred_from" name="occurred_from" type="datetime-local" step="1"
+      value="{escape(form_values.occurred_from, quote=True)}">
     <label for="occurred_before">{localize(locale, "Occurred before (UTC)")}</label>
-    <input id="occurred_before" name="occurred_before" type="datetime-local" step="1">
+    <input id="occurred_before" name="occurred_before" type="datetime-local" step="1"
+      value="{escape(form_values.occurred_before, quote=True)}">
     <small class="field-help">{time_help}</small>
     <button type="submit">{localize(locale, "Run search")}</button>
   </form>

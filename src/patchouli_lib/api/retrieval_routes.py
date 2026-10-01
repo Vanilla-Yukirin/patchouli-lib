@@ -90,10 +90,15 @@ def _invalid_cursor_problem() -> ApplicationProblem:
     )
 
 
-def _pagination_parameters(request: Request) -> PaginationParameters:
+def _pagination_parameters(
+    request: Request,
+    *,
+    allow_library_id: bool = False,
+) -> PaginationParameters:
+    allowed_names = _PAGINATION_NAMES | {"library_id"} if allow_library_id else _PAGINATION_NAMES
     values: dict[str, list[str]] = {}
     for name, value in request.query_params.multi_items():
-        if name not in _PAGINATION_NAMES:
+        if name not in allowed_names:
             raise _validation_problem()
         values.setdefault(name, []).append(value)
     if any(len(items) != 1 for items in values.values()):
@@ -113,6 +118,16 @@ def _pagination_parameters(request: Request) -> PaginationParameters:
 def _validate_section_id(section_id: str) -> str:
     try:
         return _OPAQUE_ID_ADAPTER.validate_python(section_id, strict=True)
+    except ValidationError:
+        raise _validation_problem() from None
+
+
+def _target_library_id(request: Request, context: AuthenticatedRequestContext) -> str:
+    value = request.query_params.get("library_id")
+    if value is None:
+        return context.authenticated.caller.library_id
+    try:
+        return _OPAQUE_ID_ADAPTER.validate_python(value, strict=True)
     except ValidationError:
         raise _validation_problem() from None
 
@@ -151,15 +166,24 @@ def _binding(
     limit: int,
     filters_identity: bytes,
     sort_identity: bytes,
+    library_id: str | None = None,
 ) -> CursorBinding:
     caller = context.authenticated.caller
+    query_identity = _NO_QUERY
+    if library_id is not None:
+        # Canonical hex IDs bind the normalized target and exact credential.
+        # The opaque cursor's format and version remain unchanged.
+        query_identity = (
+            f"home:{caller.library_id};library:{library_id};"
+            f"credential:{context.authenticated.credential.id}"
+        ).encode("ascii")
     return CursorBinding(
         caller_id=caller.id,
         policy_version=caller.policy_version,
         section_id=section_id,
         route_identity=route_identity,
         limit=limit,
-        query_identity=_NO_QUERY,
+        query_identity=query_identity,
         filters_identity=filters_identity,
         sort_identity=sort_identity,
     )
@@ -310,7 +334,8 @@ def create_retrieval_router(
     @router.get("/sections")
     async def list_sections(request: Request) -> JSONResponse:
         context = await _authenticate(authenticate, request)
-        pagination = _pagination_parameters(request)
+        pagination = _pagination_parameters(request, allow_library_id=True)
+        library_id = _target_library_id(request, context)
         binding = _binding(
             context,
             section_id=None,
@@ -318,12 +343,13 @@ def create_retrieval_router(
             limit=pagination.limit,
             filters_identity=_SECTION_FILTERS,
             sort_identity=_SECTION_SORT,
+            library_id=library_id,
         )
         window = _read_window(pagination, cursor_codec=cursor_codec, binding=binding)
         page = await _read(
             engine,
             context,
-            lambda service: service.list_sections(window),
+            lambda service: service.list_sections(window, library_id=library_id),
             clock=clock,
         )
         response = _collection(page, cursor_codec=cursor_codec, binding=binding)
@@ -333,7 +359,8 @@ def create_retrieval_router(
     async def list_books(section_id: str, request: Request) -> JSONResponse:
         context = await _authenticate(authenticate, request)
         validated_section_id = _validate_section_id(section_id)
-        pagination = _pagination_parameters(request)
+        pagination = _pagination_parameters(request, allow_library_id=True)
+        library_id = _target_library_id(request, context)
         binding = _binding(
             context,
             section_id=validated_section_id,
@@ -341,12 +368,13 @@ def create_retrieval_router(
             limit=pagination.limit,
             filters_identity=_BOOK_FILTERS,
             sort_identity=_BOOK_SORT,
+            library_id=library_id,
         )
         window = _read_window(pagination, cursor_codec=cursor_codec, binding=binding)
         page = await _read(
             engine,
             context,
-            lambda service: service.list_books(validated_section_id, window),
+            lambda service: service.list_books(validated_section_id, window, library_id=library_id),
             clock=clock,
         )
         response = _collection(page, cursor_codec=cursor_codec, binding=binding)

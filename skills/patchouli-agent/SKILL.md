@@ -22,10 +22,12 @@ description: 通过标准 HTTP 接入 PatchouliLib，验证设备身份、下载
 
 ## 内容操作
 
-- 先从已授权列表确认本库 Section、Book 与现有 Page；这些 ID 和 Revision、ETag
-  都是不透明值，不从标题、路径或 ID 字面猜测身份。当前列表不能发现其他 Library
-  的 Section／Book；跨库写入时由管理员或已授权来源提供并核实目标 ID，绝不猜造。
-  新建 Page 前必须已有目标 Book。
+- 先从已授权列表确认 Section、Book 与现有 Page；这些 ID 和 Revision、ETag 都是
+  不透明值，不从标题、路径或 ID 字面猜测身份。Section／Book 列表可按 HTTP 参考
+  的可选 `library_id` 发现有 `read` 授权的目标库；省略仍限归属库，旧 Section 模式
+  不跨库。Page 列表仍限归属库，跨库准确读取使用显式 Library 的文件集路径。
+  仅有 `write` 时由管理员或其他已授权来源提供并核实目标 ID，绝不猜造。目标服务
+  未实现新选择器时不可把旧列表结果当作跨库发现。新建 Page 前必须已有目标 Book。
 - 用户要上传时，先把完整内容准备为本机文件，再按[统一文件集 HTTP 流程](references/http.md)
   提交：单份 Markdown 也是一个 `file`，多文件是同一请求中的多个 `file`。新建必须
   使用幂等键；修订还需当前 Page 的强 `If-Match`，提交的是整组文件快照而非补丁。

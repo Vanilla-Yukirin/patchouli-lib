@@ -81,8 +81,14 @@ class RetrievalService:
         self._authenticated = authenticated
         self._clock = clock
 
-    def list_sections(self, window: ReadWindow | None = None) -> KeysetPage[SectionView]:
-        caller, policy = self._require_current_agent()
+    def list_sections(
+        self,
+        window: ReadWindow | None = None,
+        *,
+        library_id: str | None = None,
+    ) -> KeysetPage[SectionView]:
+        caller, policy = self._require_current_agent(target_library_id=library_id)
+        target_library_id = caller.library_id if library_id is None else library_id
         resolved_window = window or ReadWindow()
         if isinstance(policy, LegacySectionPolicy):
             stored = self._repository.list_queryable_sections(
@@ -93,7 +99,7 @@ class RetrievalService:
         else:
             if not policy.read:
                 raise RetrievalAuthorizationError
-            stored = self._repository.list_sections(caller.library_id, resolved_window)
+            stored = self._repository.list_sections(target_library_id, resolved_window)
         return self._map_page(
             stored,
             lambda section: SectionView(section_id=section.id, name=section.name),
@@ -103,12 +109,15 @@ class RetrievalService:
         self,
         section_id: str,
         window: ReadWindow | None = None,
+        *,
+        library_id: str | None = None,
     ) -> KeysetPage[BookView]:
-        caller = self._require_action(section_id, SectionAction.QUERY)
-        if self._repository.get_section(caller.library_id, section_id) is None:
+        caller = self._require_action(section_id, SectionAction.QUERY, library_id=library_id)
+        target_library_id = caller.library_id if library_id is None else library_id
+        if self._repository.get_section(target_library_id, section_id) is None:
             raise RetrievalNotFoundError
         stored = self._repository.list_books(
-            caller.library_id,
+            target_library_id,
             section_id,
             window or ReadWindow(),
         )
@@ -285,7 +294,11 @@ class RetrievalService:
         except RuntimeError:
             raise RetrievalPersistenceError from None
 
-    def _require_current_agent(self) -> tuple[CallerRecord, LibraryPolicy]:
+    def _require_current_agent(
+        self,
+        *,
+        target_library_id: str | None = None,
+    ) -> tuple[CallerRecord, LibraryPolicy]:
         authenticated = self._authenticated
         identity = authenticated.caller
         credential = authenticated.credential
@@ -317,19 +330,29 @@ class RetrievalService:
             credential_id=credential.id,
             caller_id=identity.id,
             home_library_id=identity.library_id,
-            target_library_id=identity.library_id,
+            target_library_id=(
+                identity.library_id if target_library_id is None else target_library_id
+            ),
             active_at=now,
         )
         if policy is None:
             raise RetrievalAuthenticationError
+        if (
+            isinstance(policy, LegacySectionPolicy)
+            and target_library_id is not None
+            and target_library_id != current.library_id
+        ):
+            raise RetrievalAuthorizationError
         return current, policy
 
     def _require_action(
         self,
         section_id: str,
         action: SectionAction,
+        *,
+        library_id: str | None = None,
     ) -> CallerRecord:
-        caller, policy = self._require_current_agent()
+        caller, policy = self._require_current_agent(target_library_id=library_id)
         if isinstance(policy, LegacySectionPolicy):
             actions = self._repository.section_actions(
                 caller.library_id,

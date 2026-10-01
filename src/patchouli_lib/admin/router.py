@@ -57,6 +57,7 @@ from patchouli_lib.admin.pages import (
     REVEAL_SCRIPT,
     STYLESHEET,
     AdminLocale,
+    SearchFormValues,
     action_result_page,
     agent_grants_page,
     book_page,
@@ -939,6 +940,7 @@ def create_admin_router(
             return response
         if not isinstance(session, MasterAdminSession):
             return forbidden(request, "Only the Master Token session can search here.")
+        form_values = SearchFormValues()
         try:
             values = await _read_form(
                 request,
@@ -952,12 +954,13 @@ def create_admin_router(
                         "occurred_before",
                     }
                 ),
-                repeatable_fields=frozenset({"tags"}),
-                max_fields=261,
+                repeatable_fields=frozenset({"tags", "library_id"}),
+                max_fields=516,
                 max_bytes=MAX_QUERY_BODY_BYTES,
             )
             _require_csrf(values, session)
-            query = _search_query_from_form(values)
+            form_values = _search_form_values(values)
+            query = _search_query_from_form(form_values)
             result = await run_in_threadpool(
                 search_pages_for_master,
                 engine,
@@ -983,14 +986,26 @@ def create_admin_router(
         else:
             filters = await run_in_threadpool(search_filters)
             response = html(
-                search_page(session.csrf_token, filters, locale=locale, results=result.items),
+                search_page(
+                    session.csrf_token,
+                    filters,
+                    locale=locale,
+                    results=result.items,
+                    form_values=form_values,
+                ),
                 locale=locale,
             )
             remember_requested_locale(response, request)
             return response
         filters = await run_in_threadpool(search_filters)
         response = html(
-            search_page(session.csrf_token, filters, locale=locale, message=message),
+            search_page(
+                session.csrf_token,
+                filters,
+                locale=locale,
+                message=message,
+                form_values=form_values,
+            ),
             locale=locale,
             status_code=status,
         )
@@ -2805,28 +2820,40 @@ def _form_utc_microseconds(value: str) -> int | None:
     return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
 
 
-def _search_query_from_form(values: FormValues) -> SearchQueryV2:
+def _search_form_values(values: FormValues) -> SearchFormValues:
+    """Retain admitted POST controls without replacing them with normalized values."""
+
+    library_ids = values.get("library_id", [])
+    tags = values.get("tags", [])
+    if not isinstance(library_ids, list) or not isinstance(tags, list):
+        raise InvalidSearchQueryV2
+    return SearchFormValues(
+        keywords=_single(values, "keywords"),
+        library_ids=tuple(identity for identity in library_ids if identity),
+        tags=tuple(tags),
+        occurred_from=_single(values, "occurred_from"),
+        occurred_before=_single(values, "occurred_before"),
+    )
+
+
+def _search_query_from_form(values: SearchFormValues) -> SearchQueryV2:
     """Translate the bounded HTML form into the exact v2 API query contract."""
 
-    keywords = _single(values, "keywords").split()
-    library_id = _single(values, "library_id")
-    tags = values.get("tags", [])
-    if not isinstance(tags, list):
-        raise InvalidSearchQueryV2
+    keywords = values.keywords.split()
     tag_identities = []
-    for tag in tags:
+    for tag in values.tags:
         library, separator, identity = tag.partition(":")
         if separator != ":" or not library or not identity or ":" in identity:
             raise InvalidSearchQueryV2
         tag_identities.append({"library_id": library, "tag_id": identity})
     query: dict[str, object] = {"keywords": keywords, "tags_any": tag_identities}
-    if library_id:
-        query["libraries"] = [library_id]
-    for name, field in (
-        ("occurred_from", "occurred_from_us"),
-        ("occurred_before", "occurred_before_us"),
+    if values.library_ids:
+        query["libraries"] = list(values.library_ids)
+    for raw_time, field in (
+        (values.occurred_from, "occurred_from_us"),
+        (values.occurred_before, "occurred_before_us"),
     ):
-        value = _form_utc_microseconds(_single(values, name))
+        value = _form_utc_microseconds(raw_time)
         if value is not None:
             query[field] = value
     if (

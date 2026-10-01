@@ -24,7 +24,7 @@ from retrieval_read.conftest import (
 from retrieval_read.conftest import (
     retrieval_scope as retrieval_scope_fixture,
 )
-from sqlalchemy import Engine, insert, select
+from sqlalchemy import Engine, delete, insert, select
 from starlette.requests import Request
 from starlette.routing import Route
 
@@ -47,6 +47,9 @@ from patchouli_lib.auth.tokens import generate_token
 from patchouli_lib.content import page_current_etag
 from patchouli_lib.content.models import Page
 from patchouli_lib.database import immediate_transaction
+from patchouli_lib.library.repository import LibraryRepository
+from patchouli_lib.library.schemas import LibraryStructureSeed, NewBook, NewSection
+from patchouli_lib.library.service import LibrarySeedService
 from patchouli_lib.retrieval.cursor import CursorCodec
 from patchouli_lib.retrieval.repository import RetrievalRepository
 
@@ -226,6 +229,241 @@ def test_sections_use_deterministic_signed_pagination(retrieval_api: RetrievalAp
     )
     assert [item["section_id"] for item in second.json()["items"]] == [SECOND_QUERY_SECTION_ID]
     assert second.json()["next_cursor"] is None
+
+
+def _discovery_target(fixture: RetrievalApi) -> tuple[str, str]:
+    ids = iter(("01" * 16, "02" * 16, "03" * 16))
+    with immediate_transaction(fixture.engine) as connection:
+        repository = LibraryRepository(connection)
+        target = LibrarySeedService(
+            repository, id_factory=lambda: next(ids), clock=lambda: 1_000_000
+        ).seed(
+            LibraryStructureSeed(
+                library_name="Synthetic Discovery Library",
+                section_name="Synthetic First Section",
+                book_name="Synthetic First Book",
+            )
+        )
+        repository.add_section(
+            NewSection(
+                id="05" * 16,
+                library_id=target.library.id,
+                name="Synthetic Second Section",
+                created_at=1_000_000,
+                updated_at=1_000_000,
+            )
+        )
+        repository.add_book(
+            NewBook(
+                id="04" * 16,
+                library_id=target.library.id,
+                section_id=target.section.id,
+                name="Synthetic Second Book",
+                created_at=1_000_000,
+                updated_at=1_000_000,
+            )
+        )
+    return target.library.id, target.section.id
+
+
+def _discovery_policy(
+    fixture: RetrievalApi,
+    library_id: str,
+    actions: tuple[str, ...],
+    *,
+    credential_id: str = "d" * 32,
+) -> None:
+    with immediate_transaction(fixture.engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryPolicy),
+            {
+                "credential_id": credential_id,
+                "caller_id": CALLER_ID,
+                "home_library_id": fixture.scope.library_id,
+                "mode": "library_grants",
+                "created_at": 1_000_000,
+            },
+        )
+        for action in actions:
+            connection.execute(
+                insert(CredentialLibraryGrant),
+                {
+                    "credential_id": credential_id,
+                    "caller_id": CALLER_ID,
+                    "home_library_id": fixture.scope.library_id,
+                    "target_library_id": library_id,
+                    "action": action,
+                    "created_at": 1_000_000,
+                },
+            )
+
+
+@pytest.mark.parametrize("collection", ["sections", "books"])
+def test_explicit_home_library_normalizes_cursor_and_preserves_response(
+    retrieval_api: RetrievalApi, collection: str
+) -> None:
+    path = (
+        "/api/v1/sections"
+        if collection == "sections"
+        else f"/api/v1/sections/{retrieval_api.scope.query_section_id}/books"
+    )
+    first = _get(retrieval_api, path, params={"limit": 1})
+    explicit = _get(
+        retrieval_api, path, params={"limit": 1, "library_id": retrieval_api.scope.library_id}
+    )
+    assert first.status_code == explicit.status_code == 200
+    assert first.json() == explicit.json()
+    cursor = first.json()["next_cursor"]
+    omitted_next = _get(retrieval_api, path, params={"limit": 1, "cursor": cursor})
+    explicit_next = _get(
+        retrieval_api,
+        path,
+        params={"limit": 1, "cursor": cursor, "library_id": retrieval_api.scope.library_id},
+    )
+    assert omitted_next.status_code == explicit_next.status_code == 200
+    assert omitted_next.json() == explicit_next.json()
+
+
+@pytest.mark.parametrize("collection", ["sections", "books"])
+def test_cross_library_discovery_is_bounded_target_bound_and_reauthorizes(
+    retrieval_api: RetrievalApi, collection: str
+) -> None:
+    library_id, section_id = _discovery_target(retrieval_api)
+    _discovery_policy(retrieval_api, library_id, ("read",))
+    path = (
+        "/api/v1/sections" if collection == "sections" else f"/api/v1/sections/{section_id}/books"
+    )
+    first = _get(retrieval_api, path, params={"library_id": library_id, "limit": 1})
+    assert first.status_code == 200
+    assert first.json()["items"] == (
+        [{"section_id": section_id, "name": "Synthetic First Section"}]
+        if collection == "sections"
+        else [{"section_id": section_id, "book_id": "03" * 16, "title": "Synthetic First Book"}]
+    )
+    _assert_protected(first)
+    cursor = first.json()["next_cursor"]
+    second = _get(
+        retrieval_api, path, params={"library_id": library_id, "limit": 1, "cursor": cursor}
+    )
+    assert second.status_code == 200
+    assert len(second.json()["items"]) == 1
+    assert second.json()["next_cursor"] is None
+    assert second.json()["items"] != first.json()["items"]
+    for changed_target in (None, retrieval_api.scope.library_id, "ff" * 16):
+        params: dict[str, QueryValue] = {"limit": 1, "cursor": cursor}
+        if changed_target is not None:
+            params["library_id"] = changed_target
+        _assert_problem(_get(retrieval_api, path, params=params), 400, "invalid_cursor")
+    # Read on the target never grants read on the caller's home Library.
+    _assert_problem(_get(retrieval_api, "/api/v1/sections"), 403, "insufficient_scope")
+    if collection == "books":
+        _assert_problem(
+            _get(
+                retrieval_api,
+                f"/api/v1/sections/{retrieval_api.scope.query_section_id}/books",
+                params={"library_id": library_id},
+            ),
+            404,
+            "resource_not_found",
+        )
+    with immediate_transaction(retrieval_api.engine) as connection:
+        connection.execute(
+            delete(CredentialLibraryGrant).where(
+                CredentialLibraryGrant.credential_id == "d" * 32,
+                CredentialLibraryGrant.target_library_id == library_id,
+                CredentialLibraryGrant.action == "read",
+            )
+        )
+    _assert_problem(
+        _get(retrieval_api, path, params={"library_id": library_id, "limit": 1, "cursor": cursor}),
+        403,
+        "insufficient_scope",
+    )
+
+
+@pytest.mark.parametrize("policy", ["legacy", "none", "write"])
+def test_library_discovery_denies_legacy_missing_read_and_write_only(
+    retrieval_api: RetrievalApi, policy: str
+) -> None:
+    library_id, section_id = _discovery_target(retrieval_api)
+    if policy != "legacy":
+        _discovery_policy(retrieval_api, library_id, () if policy == "none" else ("write",))
+    for target in (library_id, "ff" * 16):
+        for path in ("/api/v1/sections", f"/api/v1/sections/{section_id}/books"):
+            response = _get(retrieval_api, path, params={"library_id": target})
+            _assert_problem(response, 403, "insufficient_scope")
+            assert "Synthetic First" not in response.text
+
+
+def test_discovery_cursor_cannot_cross_credentials_of_same_caller(
+    retrieval_api: RetrievalApi,
+) -> None:
+    library_id, _ = _discovery_target(retrieval_api)
+    _discovery_policy(retrieval_api, library_id, ("read",))
+    issued = generate_token()
+    with immediate_transaction(retrieval_api.engine) as connection:
+        AuthRepository(connection).add_credential(
+            NewCredential(
+                id="e" * 32,
+                library_id=retrieval_api.scope.library_id,
+                caller_id=CALLER_ID,
+                selector=issued.selector,
+                token_version=issued.version,
+                verifier=issued.verifier,
+                expires_at=10_000_000,
+                created_at=1_000_000,
+                updated_at=1_000_000,
+            )
+        )
+    _discovery_policy(retrieval_api, library_id, ("read",), credential_id="e" * 32)
+    first = _get(retrieval_api, "/api/v1/sections", params={"library_id": library_id, "limit": 1})
+    other = RetrievalApi(
+        retrieval_api.engine, retrieval_api.scope, issued.value, retrieval_api.cursor_codec
+    )
+    _assert_problem(
+        _get(
+            other,
+            "/api/v1/sections",
+            params={"library_id": library_id, "limit": 1, "cursor": first.json()["next_cursor"]},
+        ),
+        400,
+        "invalid_cursor",
+    )
+
+
+@pytest.mark.parametrize("collection", ["sections", "books"])
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"library_id": ""},
+        {"library_id": "A" * 32},
+        {"library_id": "invalid"},
+        {"library_id": "  " + "1" * 32},
+        [("library_id", "1" * 32), ("library_id", "1" * 32)],
+        {"library_id": "1" * 32, "extra": "value"},
+    ],
+)
+def test_discovery_library_parameter_is_strict_and_unambiguous(
+    retrieval_api: RetrievalApi, collection: str, params: QueryParams
+) -> None:
+    path = (
+        "/api/v1/sections"
+        if collection == "sections"
+        else f"/api/v1/sections/{retrieval_api.scope.query_section_id}/books"
+    )
+    _assert_problem(_get(retrieval_api, path, params=params), 422, "request_validation_failed")
+
+
+def test_library_selector_does_not_expand_page_list_parameters(retrieval_api: RetrievalApi) -> None:
+    _assert_problem(
+        _get(
+            retrieval_api,
+            f"/api/v1/sections/{retrieval_api.scope.query_section_id}/pages",
+            params={"library_id": retrieval_api.scope.library_id},
+        ),
+        422,
+        "request_validation_failed",
+    )
 
 
 def test_book_and_page_lists_are_current_only_and_have_exact_citations(

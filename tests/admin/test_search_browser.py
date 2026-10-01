@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
+from html import escape
 from pathlib import Path
 
 import pytest
@@ -15,11 +16,13 @@ from httpx2 import Response
 from sqlalchemy import Engine
 
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
+from patchouli_lib.admin.pages import search_page
 from patchouli_lib.admin.passwords import hash_password
 from patchouli_lib.app import create_app
 from patchouli_lib.config import Settings
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.search.index_v2 import rebuild_search_index
+from patchouli_lib.search.service_v2 import SearchMatchSourceV2, SearchPageV2
 from patchouli_lib.tags.repository import TagRepository
 
 _ORIGIN = "https://admin.example.invalid"
@@ -113,6 +116,29 @@ def _seed(engine: Engine) -> tuple[tuple[str, str, str, str], tuple[str, str, st
             library_id=second[0], page_uid=remote[0].page_uid, tag_id=_TAG_B, created_at=0
         )
     return (*first, local[0].page_id), (*second, remote[0].page_id)
+
+
+def _assert_search_controls(
+    response: Response,
+    *,
+    keywords: str,
+    libraries: list[str],
+    tags: list[str],
+    occurred_from: str,
+    occurred_before: str,
+) -> None:
+    for name, value in (
+        ("keywords", keywords),
+        ("occurred_from", occurred_from),
+        ("occurred_before", occurred_before),
+    ):
+        control = re.search(rf'<input id="{name}"[^>]*>', response.text)
+        assert control is not None
+        assert f'value="{escape(value, quote=True)}"' in control.group(0)
+    for identity in (*libraries, *tags):
+        assert f'<option value="{escape(identity, quote=True)}" selected>' in response.text
+    assert str(response.request.url) == f"{_ORIGIN}/admin/search"
+    assert response.headers["cache-control"] == "no-store, max-age=0"
 
 
 def test_search_requires_master_session_same_origin_and_csrf(
@@ -239,3 +265,128 @@ def test_search_invalid_inputs_and_master_rotation_fail_closed(
         )
         assert rotated is not None
     assert _post(client, csrf, keywords="needle").status_code == 401
+
+
+def test_search_partial_multi_library_selection_retains_all_controls(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    first, second = _seed(engine)
+    third = seed_library_structure(engine, prefix="7", label="Third")
+    excluded = page_graph_values(
+        library_id=third[0],
+        section_id=third[1],
+        book_id=third[2],
+        page_byte=0x31,
+        revision_hex="32",
+        title="needle excluded",
+        content_md=b"# needle excluded",
+        occurrence_wire="2026-08-14T10:00:00.123456Z",
+    )
+    with immediate_transaction(engine) as connection:
+        insert_page_graph(connection, excluded)
+    csrf = _master_login(client, engine)
+    fields: dict[str, str | list[str]] = {
+        "keywords": "  needle  ",
+        "library_id": [first[0], second[0]],
+        "tags": [f"{first[0]}:{_TAG_A}", f"{second[0]}:{_TAG_B}"],
+        "occurred_from": "2026-08-13T00:00:00",
+        "occurred_before": "2026-08-15T00:00:00",
+    }
+    unavailable = _post(client, csrf, **fields)
+    assert unavailable.status_code == 503
+    rebuild_search_index(engine, clock=lambda: 3_000_000)
+    success = _post(client, csrf, **fields)
+    assert success.status_code == 200
+    assert first[3] in success.text and second[3] in success.text
+    assert excluded[0].page_id not in success.text
+    assert f'<option value="{third[0]}" selected>' not in success.text
+    assert '<select id="library_id" name="library_id" multiple' in success.text
+    assert "Match sources: Page title" in success.text
+    library_subset = _post(client, csrf, keywords="needle", library_id=[first[0], second[0]])
+    assert library_subset.status_code == 200
+    assert first[3] in library_subset.text and second[3] in library_subset.text
+    assert excluded[0].page_id not in library_subset.text
+    for response in (unavailable, success):
+        _assert_search_controls(
+            response,
+            keywords="  needle  ",
+            libraries=[first[0], second[0]],
+            tags=[f"{first[0]}:{_TAG_A}", f"{second[0]}:{_TAG_B}"],
+            occurred_from="2026-08-13T00:00:00",
+            occurred_before="2026-08-15T00:00:00",
+        )
+    # No selection is all Libraries, not the most recently submitted subset.
+    all_libraries = _post(client, csrf, keywords="needle", library_id=[])
+    assert all_libraries.status_code == 200
+    assert excluded[0].page_id in all_libraries.text
+    fresh_form = client.get("/admin/search")
+    assert '<option value="' in fresh_form.text and " selected>" not in fresh_form.text
+    assert 'value="  needle  "' not in fresh_form.text
+
+
+def test_search_validation_errors_retain_and_escape_admitted_controls(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    first, second = _seed(engine)
+    csrf = _master_login(client, engine)
+    rebuild_search_index(engine, clock=lambda: 3_000_000)
+    keywords = '"><script>alert("echo")</script>& needle'
+    unknown = '"><script>alert("library")</script>&'
+    malformed_tag = '"><script>alert("tag")</script>&'
+    invalid_time = '"><script>alert("time")</script>&'
+    for libraries, tags, occurred_from in (
+        ([first[0], unknown], [f"{first[0]}:{_TAG_A}"], "2026-08-13T00:00:00"),
+        ([first[0]], [malformed_tag], "2026-08-13T00:00:00"),
+        ([first[0]], [f"{first[0]}:{_TAG_A}"], invalid_time),
+        ([first[0]], [f"{second[0]}:{_TAG_B}"], "2026-08-13T00:00:00"),
+    ):
+        response = _post(
+            client,
+            csrf,
+            keywords=keywords,
+            library_id=libraries,
+            tags=tags,
+            occurred_from=occurred_from,
+            occurred_before="2026-08-15T00:00:00",
+        )
+        assert response.status_code == 422
+        assert "<script>" not in response.text
+        _assert_search_controls(
+            response,
+            keywords=keywords,
+            libraries=libraries,
+            tags=tags,
+            occurred_from=occurred_from,
+            occurred_before="2026-08-15T00:00:00",
+        )
+    denied = _post(client, "wrong", keywords=keywords)
+    assert denied.status_code == 403
+    assert escape(keywords, quote=True) not in denied.text
+
+
+def test_search_match_source_labels_and_file_names_are_escaped() -> None:
+    filename = '"><script>alert("file")</script>&.md'
+    result = SearchPageV2(
+        library_id="1" * 32,
+        section_id="2" * 32,
+        book_id="3" * 32,
+        page_id="4" * 32,
+        revision_id="5" * 32,
+        revision_number=1,
+        title="Matching Page",
+        occurred_at=0,
+        match_sources=(
+            SearchMatchSourceV2("title", None),
+            SearchMatchSourceV2("file_name", filename),
+            SearchMatchSourceV2("file_text", filename),
+            SearchMatchSourceV2("<script>unknown</script>", None),
+        ),
+    )
+    rendered = search_page("synthetic csrf", (), results=(result,), locale="zh-CN")
+    assert "命中来源: 文档标题; 文件名:" in rendered
+    assert "文件正文:" in rendered
+    assert f"<code>{escape(filename)}</code>" in rendered
+    assert "&lt;script&gt;unknown&lt;/script&gt;" in rendered
+    assert "<script>" not in rendered
