@@ -29,6 +29,8 @@
   上传、修订和成功回执的待实施细节，不代表相关迁移或网页入口已上线。
 - [主会话网页历史文件组恢复](proposals/master-web-revision-restore.md)：复用现有
   修订和成功回执的开发切片；不是数据库恢复，也不改变历史或 Page 归属。
+- [同库 Page 移动](proposals/master-web-page-move.md)：稳定 Page 身份、历史路径证明、
+  原成功重试及备份兼容的下一切片；尚未实现移动。
 - [开发、验证与交付](development-and-delivery.md)
 - [网页管理面板](admin-web-console.md) / [简体中文兼容文件](admin-web-console.zh-CN.md)
 - [Agent 贡献工作流](agent-contribution-workflow.md)

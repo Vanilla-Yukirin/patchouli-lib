@@ -35,6 +35,7 @@ from patchouli_lib.backup.manifest import (
     MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
     MASTER_IDENTITY_SCHEMA_REVISION,
     MASTER_LIFECYCLE_SCHEMA_REVISION,
+    MASTER_OCCURRENCE_SCHEMA_REVISION,
     MASTER_PAGE_DELETE_SCHEMA_REVISION,
     OCCURRENCE_SCHEMA_REVISION,
     PAGE_TITLE_SCHEMA_REVISION,
@@ -729,7 +730,7 @@ _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     SEARCH_INDEX_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0024,
     MASTER_PAGE_DELETE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0025,
     MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0026,
-    SUPPORTED_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0027,
+    MASTER_OCCURRENCE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0027,
 }
 _FILE_SET_REVISIONS: Final = frozenset(
     {
@@ -747,7 +748,7 @@ _FILE_SET_REVISIONS: Final = frozenset(
         SEARCH_INDEX_SCHEMA_REVISION,
         MASTER_PAGE_DELETE_SCHEMA_REVISION,
         MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
-        SUPPORTED_SCHEMA_REVISION,
+        MASTER_OCCURRENCE_SCHEMA_REVISION,
     }
 )
 _MASTER_LIFECYCLE_REVISIONS: Final = frozenset(
@@ -760,11 +761,12 @@ _MASTER_LIFECYCLE_REVISIONS: Final = frozenset(
         SEARCH_INDEX_SCHEMA_REVISION,
         MASTER_PAGE_DELETE_SCHEMA_REVISION,
         MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
-        SUPPORTED_SCHEMA_REVISION,
+        MASTER_OCCURRENCE_SCHEMA_REVISION,
     }
 )
 _LIFECYCLE_REVISIONS: Final = _FILE_SET_REVISIONS | {LIFECYCLE_SCHEMA_REVISION}
 _OCCURRENCE_REVISIONS: Final = _LIFECYCLE_REVISIONS | {OCCURRENCE_SCHEMA_REVISION}
+_MASTER_OCCURRENCE_REVISIONS: Final = frozenset({MASTER_OCCURRENCE_SCHEMA_REVISION})
 
 
 @dataclass(frozen=True, slots=True)
@@ -1056,7 +1058,7 @@ def _require_occurrence_graph(
         )
     }
     master_column = (
-        "master_audit_event_id" if schema_revision == SUPPORTED_SCHEMA_REVISION else "NULL"
+        "master_audit_event_id" if schema_revision in _MASTER_OCCURRENCE_REVISIONS else "NULL"
     )
     chains: dict[tuple[str, bytes], list[tuple[int, int, int, int, int]]] = {}
     for (
@@ -1086,7 +1088,7 @@ def _require_occurrence_graph(
             raise BackupDatabaseError
         if master_audit_event_id is not None:
             if (
-                schema_revision != SUPPORTED_SCHEMA_REVISION
+                schema_revision not in _MASTER_OCCURRENCE_REVISIONS
                 or type(master_audit_event_id) is not str
                 or actor is not None
             ):
@@ -1253,7 +1255,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
         SEARCH_INDEX_SCHEMA_REVISION,
         MASTER_PAGE_DELETE_SCHEMA_REVISION,
         MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
-        SUPPORTED_SCHEMA_REVISION,
+        MASTER_OCCURRENCE_SCHEMA_REVISION,
     }:
         for row in connection.execute(
             "SELECT library_id, page_uid, sequence, old_title, new_title, "
@@ -1350,7 +1352,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
                     not in {
                         MASTER_PAGE_DELETE_SCHEMA_REVISION,
                         MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
-                        SUPPORTED_SCHEMA_REVISION,
+                        MASTER_OCCURRENCE_SCHEMA_REVISION,
                     }
                 )
             ):
@@ -1819,7 +1821,7 @@ def _require_master_audit(connection: sqlite3.Connection, schema_revision: str) 
         ):
             raise BackupDatabaseError
         if action == "content.page.occurrence.correct":
-            if schema_revision != SUPPORTED_SCHEMA_REVISION:
+            if schema_revision not in _MASTER_OCCURRENCE_REVISIONS:
                 raise BackupDatabaseError
             linked_events = connection.execute(
                 "SELECT library_id, page_uid, corrected_at FROM page_occurrence_corrections "
@@ -1845,7 +1847,7 @@ def _require_master_audit(connection: sqlite3.Connection, schema_revision: str) 
             if action == "content.archive.delete" and schema_revision not in {
                 MASTER_PAGE_DELETE_SCHEMA_REVISION,
                 MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
-                SUPPORTED_SCHEMA_REVISION,
+                MASTER_OCCURRENCE_SCHEMA_REVISION,
             }:
                 raise BackupDatabaseError
             linked_events = connection.execute(
@@ -1874,7 +1876,7 @@ def _require_master_audit(connection: sqlite3.Connection, schema_revision: str) 
                 SEARCH_INDEX_SCHEMA_REVISION,
                 MASTER_PAGE_DELETE_SCHEMA_REVISION,
                 MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
-                SUPPORTED_SCHEMA_REVISION,
+                MASTER_OCCURRENCE_SCHEMA_REVISION,
             }
             and action == "content.page.title.edit"
         ):
@@ -1917,7 +1919,7 @@ def _require_actor_home_graph(connection: sqlite3.Connection, schema_revision: s
             "page_lifecycle_events",
             "page_lifecycle_guards",
         }
-        master_occurrence = schema_revision == SUPPORTED_SCHEMA_REVISION and table in {
+        master_occurrence = schema_revision in _MASTER_OCCURRENCE_REVISIONS and table in {
             "page_occurrence_corrections",
             "page_occurrence_correction_guards",
         }
@@ -1991,7 +1993,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         SEARCH_INDEX_SCHEMA_REVISION,
         MASTER_PAGE_DELETE_SCHEMA_REVISION,
         MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
-        SUPPORTED_SCHEMA_REVISION,
+        MASTER_OCCURRENCE_SCHEMA_REVISION,
     }:
         invalid_library_policies = _one_integer(
             connection,
@@ -2018,7 +2020,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         SEARCH_INDEX_SCHEMA_REVISION,
         MASTER_PAGE_DELETE_SCHEMA_REVISION,
         MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
-        SUPPORTED_SCHEMA_REVISION,
+        MASTER_OCCURRENCE_SCHEMA_REVISION,
     }:
         _require_agent_token_values(connection)
 
@@ -2034,7 +2036,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         SEARCH_INDEX_SCHEMA_REVISION,
         MASTER_PAGE_DELETE_SCHEMA_REVISION,
         MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
-        SUPPORTED_SCHEMA_REVISION,
+        MASTER_OCCURRENCE_SCHEMA_REVISION,
     }:
         _require_master_identity(connection)
 
@@ -2049,7 +2051,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         SEARCH_INDEX_SCHEMA_REVISION,
         MASTER_PAGE_DELETE_SCHEMA_REVISION,
         MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
-        SUPPORTED_SCHEMA_REVISION,
+        MASTER_OCCURRENCE_SCHEMA_REVISION,
     }:
         _require_actor_home_graph(connection, schema_revision)
 
@@ -2063,7 +2065,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         SEARCH_INDEX_SCHEMA_REVISION,
         MASTER_PAGE_DELETE_SCHEMA_REVISION,
         MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
-        SUPPORTED_SCHEMA_REVISION,
+        MASTER_OCCURRENCE_SCHEMA_REVISION,
     }:
         _require_master_audit(connection, schema_revision)
 
@@ -2317,7 +2319,7 @@ def _file_set_valid_current_etags(
         SEARCH_INDEX_SCHEMA_REVISION,
         MASTER_PAGE_DELETE_SCHEMA_REVISION,
         MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
-        SUPPORTED_SCHEMA_REVISION,
+        MASTER_OCCURRENCE_SCHEMA_REVISION,
     }:
         for (changed_at,) in connection.execute(
             "SELECT changed_at FROM page_title_events "
@@ -2531,7 +2533,7 @@ def _page_title_at(
         SEARCH_INDEX_SCHEMA_REVISION,
         MASTER_PAGE_DELETE_SCHEMA_REVISION,
         MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
-        SUPPORTED_SCHEMA_REVISION,
+        MASTER_OCCURRENCE_SCHEMA_REVISION,
     }:
         return current_title
     row = connection.execute(
@@ -2979,7 +2981,7 @@ def _validate_connection(
         SEARCH_INDEX_SCHEMA_REVISION,
         MASTER_PAGE_DELETE_SCHEMA_REVISION,
         MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
-        SUPPORTED_SCHEMA_REVISION,
+        MASTER_OCCURRENCE_SCHEMA_REVISION,
     }:
         _require_library_descriptions(connection)
     if schema_revision in _LIFECYCLE_REVISIONS:
@@ -2992,21 +2994,24 @@ def _validate_connection(
         _require_tag_graph(connection)
     _require_auth_graph(connection, schema_revision)
     _require_idempotency_graph(connection, schema_revision)
-    if schema_revision in {MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION}:
+    if schema_revision in {
+        MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
+        MASTER_OCCURRENCE_SCHEMA_REVISION,
+    }:
         _require_master_file_set_receipts(connection)
     if schema_revision in {
         REQUEST_LOG_SCHEMA_REVISION,
         SEARCH_INDEX_SCHEMA_REVISION,
         MASTER_PAGE_DELETE_SCHEMA_REVISION,
         MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
-        SUPPORTED_SCHEMA_REVISION,
+        MASTER_OCCURRENCE_SCHEMA_REVISION,
     }:
         _require_request_log_graph(connection)
     if schema_revision in {
         SEARCH_INDEX_SCHEMA_REVISION,
         MASTER_PAGE_DELETE_SCHEMA_REVISION,
         MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
-        SUPPORTED_SCHEMA_REVISION,
+        MASTER_OCCURRENCE_SCHEMA_REVISION,
     }:
         _require_search_projection_reset(connection)
     return DatabaseValidationReport(
