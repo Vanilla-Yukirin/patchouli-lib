@@ -40,6 +40,7 @@ from patchouli_lib.admin.contracts import (
     TagFormInput,
 )
 from patchouli_lib.admin.file_download import AdminFileDownloadService
+from patchouli_lib.admin.file_set_routes import create_master_file_set_router
 from patchouli_lib.admin.master_audit import MasterAuditRepository
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.pages import (
@@ -2393,6 +2394,20 @@ def create_admin_router(
             headers=_SECURITY_HEADERS,
         )
 
+    router.include_router(
+        create_master_file_set_router(
+            engine,
+            current_session=current_session,
+            locale_for=locale_for,
+            same_origin=_same_origin_submission,
+            html_response=lambda content, locale, status, script: html(
+                content, locale=locale, status_code=status, allow_self_script=script
+            ),
+            clear_session=lambda response, request: _clear_cookie(
+                response, secure=secure_cookie(request)
+            ),
+        )
+    )
     return router
 
 

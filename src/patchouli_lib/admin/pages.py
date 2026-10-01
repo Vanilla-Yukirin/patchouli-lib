@@ -276,6 +276,8 @@ details summary { cursor: pointer; font-weight: 700; }
 
 
 _ZH_CN: dict[str, str] = {
+    "Create a document": "新建文档",
+    "Update files": "更新文件",
     "A required form field is missing.": "缺少必填字段。",
     "Administration": "管理面板",
     "Administration sections": "管理栏目",
@@ -2234,6 +2236,10 @@ def book_page(
             f'<p><a href="{escape(next_path, quote=True)}">{localize(locale, "Next page")}</a></p>'
         )
     if master_mode:
+        body = (
+            f'<p><a class="button" href="{base}/new-page">'
+            f"{localize(locale, 'Create a document')}</a></p>"
+        ) + body
         body += (
             f'<section class="card"><h2>{localize(locale, "Edit Book")}</h2>'
             f'<form method="post" action="{base}" autocomplete="off">'
@@ -2352,6 +2358,10 @@ def page_preview_page(
         )
     )
     if current and master_mode:
+        body += (
+            f'<p><a class="button" href="{base}/files/edit">'
+            f"{localize(locale, 'Update files')}</a></p>"
+        )
         body += (
             f'<section class="card"><h2>{localize(locale, "Edit Page title")}</h2>'
             f'<form method="post" action="{base}" autocomplete="off">'

@@ -13,6 +13,7 @@ from sqlalchemy import Connection, Engine, and_, func, or_, select
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.sql import Select
 
+from patchouli_lib.admin.file_set_receipts import MasterFileSetReceipt, MasterFileSetReceiptRow
 from patchouli_lib.admin.master_audit import grant_revisions_for_credentials
 from patchouli_lib.auth.models import (
     AgentTokenValue,
@@ -733,6 +734,7 @@ class AdminReadModel:
             if actor is None:
                 master_query = select(
                     MasterAuditEvent.id,
+                    MasterAuditEvent.identity_id,
                     MasterAuditEvent.action,
                     MasterAuditEvent.target_type,
                     MasterAuditEvent.target_id,
@@ -743,6 +745,8 @@ class AdminReadModel:
                             "content.archive.delete",
                             "content.archive.restore",
                             "content.page.title.edit",
+                            "content.page.file_set.create",
+                            "content.page.file_set.revise",
                             "tag.create",
                             "tag.page.attach",
                             "tag.page.detach",
@@ -766,10 +770,13 @@ class AdminReadModel:
                 )
             for event in master_events:
                 parts = event["target_id"].split(":")
+                revision_number = None
                 if event["action"] in (
                     "content.archive.delete",
                     "content.archive.restore",
                     "content.page.title.edit",
+                    "content.page.file_set.create",
+                    "content.page.file_set.revise",
                 ):
                     if event["target_type"] != "page" or len(parts) != 2:
                         raise RuntimeError("Invalid content activity audit target.")
@@ -793,6 +800,13 @@ class AdminReadModel:
                         .mappings()
                         .one_or_none()
                     )
+                    if event["action"] in (
+                        "content.page.file_set.create",
+                        "content.page.file_set.revise",
+                    ):
+                        revision_number = _master_file_set_activity_revision(
+                            connection, event, page
+                        )
                 elif event["action"] == "tag.create":
                     if event["target_type"] != "tag" or len(parts) != 2:
                         raise RuntimeError("Invalid content activity audit target.")
@@ -854,7 +868,7 @@ class AdminReadModel:
                             section_id=None if page is None else page["section_id"],
                             book_id=None if page is None else page["book_id"],
                             page_id=None if page is None else page["page_id"],
-                            revision_number=None,
+                            revision_number=revision_number,
                             page_deleted=page is not None and page["deleted_at"] is not None,
                             tag_id=None if tag is None else tag["id"],
                             tag_name=None if tag is None else tag["display_name"],
@@ -1362,6 +1376,51 @@ class AdminReadModel:
                     row["updated_at"],
                 ),
             )
+
+
+def _master_file_set_activity_revision(
+    connection: Connection, event: RowMapping, page: RowMapping | None
+) -> int:
+    """Link a successful master write without loading file bytes in the timeline.
+
+    The caller holds one read snapshot for audits, receipts and current metadata.
+    Missing associations must fail closed rather than silently truncate a page.
+    """
+    row = (
+        connection.execute(
+            select(MasterFileSetReceiptRow.__table__).where(
+                MasterFileSetReceiptRow.master_audit_event_id == event["id"]
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None or page is None:
+        raise RuntimeError("Invalid master file-set activity association.")
+    receipt = MasterFileSetReceipt.model_validate(dict(row))
+    if (
+        receipt.changed != 1
+        or event["action"] != f"content.page.file_set.{receipt.operation}"
+        or receipt.identity_id != event["identity_id"]
+        or event["target_type"] != "page"
+        or event["target_id"] != f"{receipt.library_id}:{receipt.page_uid.hex()}"
+        or receipt.operation_at != event["occurred_at"]
+        or receipt.page_id != page["page_id"]
+        or receipt.section_id != page["section_id"]
+        or receipt.book_id != page["book_id"]
+    ):
+        raise RuntimeError("Invalid master file-set activity association.")
+    revision = connection.execute(
+        select(Revision.revision_id).where(
+            Revision.library_id == receipt.library_id,
+            Revision.page_uid == receipt.page_uid,
+            Revision.revision_id == receipt.revision_id,
+            Revision.revision_number == receipt.revision_number,
+        )
+    ).one_or_none()
+    if revision is None:
+        raise RuntimeError("Invalid master file-set activity revision.")
+    return receipt.revision_number
 
 
 def _library_summary_query() -> Select[Any]:
