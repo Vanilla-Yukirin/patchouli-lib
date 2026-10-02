@@ -315,7 +315,6 @@ def _rows_for_scope(
     else:
         tag_count = "0"
     candidate_cte = ""
-    candidate_join = ""
     exact_document_join = ""
     candidate_parameters: tuple[object, ...] = ()
     exact_short_keyword = len(needles) == 1 and len(needles[0]) <= 3
@@ -339,22 +338,21 @@ def _rows_for_scope(
             exact_document_join = "JOIN candidate_documents AS cd ON cd.rowid = d.id "
             candidate_parameters = (scoped_expression, generation, scope.library_id)
         else:
-            # Evaluate FTS once per Library. A correlated MATCH under a Page
-            # scan reparses the same expression thousands of times.
+            # A full literal hit in one field necessarily contains that
+            # keyword's candidate prefix gram in the SAME document. Retain
+            # all matching document IDs, not Page IDs followed by every field
+            # on each Page. Mixed short/long OR still needs exact per-needle
+            # instr below: a prefix gram alone does not prove a long hit.
+            # Keep MATCH outermost and evaluate it once per Library, then
+            # check the precise Library/generation after each rowid lookup.
             candidate_cte = (
-                "WITH candidate_pages AS MATERIALIZED ("
-                "SELECT DISTINCT candidate.library_id, candidate.page_uid "
-                # SQLite may otherwise choose the Library index first and
-                # run MATCH once for every document. CROSS JOIN keeps the FTS
-                # posting scan outermost; the rowid lookup then narrows scope.
+                "WITH candidate_documents AS MATERIALIZED ("
+                "SELECT search_terms.rowid "
                 "FROM search_terms CROSS JOIN search_documents AS candidate "
                 "WHERE search_terms MATCH ? AND candidate.generation = ? "
                 "AND candidate.library_id = ? AND candidate.id = search_terms.rowid) "
             )
-            candidate_join = (
-                "JOIN candidate_pages AS cp ON cp.library_id = s.library_id "
-                "AND cp.page_uid = s.page_uid "
-            )
+            exact_document_join = "JOIN candidate_documents AS cd ON cd.rowid = d.id "
             candidate_parameters = (scoped_expression, generation, scope.library_id)
     # The count projection appears before WHERE placeholders in SQL.
     count_parameters: tuple[object, ...] = tag_ids if query.tags_any else ()
@@ -374,7 +372,6 @@ def _rows_for_scope(
         + exact_columns
         + " "
         "FROM search_page_state AS s "
-        + candidate_join
         + "JOIN pages AS p ON p.library_id = s.library_id AND p.page_uid = s.page_uid "
         "AND p.section_id = s.section_id AND p.book_id = s.book_id "
         "AND p.page_id = s.page_id AND p.current_revision_id = s.revision_id "
