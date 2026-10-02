@@ -19,6 +19,10 @@ from patchouli_lib.request_log.identity import (
     begin_request_identity,
     end_request_identity,
 )
+from patchouli_lib.request_log.writer import (
+    REQUEST_LOG_WRITER_STATE_ATTRIBUTE,
+    RequestLogWriter,
+)
 
 _LOGGER = logging.getLogger(__name__)
 _API_PREFIX = "/api"
@@ -79,14 +83,12 @@ class _BoundedWarning:
             _LOGGER.warning("%s", text)
 
 
-async def run_request_log_retention(engine: Engine) -> None:
+async def run_request_log_retention(engine: Engine, writer: RequestLogWriter) -> None:
     """Prune on startup and periodically, one short transaction at a time."""
     warning = _BoundedWarning()
     while True:
         try:
-            removed = await anyio.to_thread.run_sync(
-                partial(cleanup_request_logs_once, engine), abandon_on_cancel=False
-            )
+            removed = await writer.run(partial(cleanup_request_logs_once, engine))
         except Exception:
             warning.warn("API request retention cleanup unavailable; will retry.")
             await asyncio.sleep(_RETENTION_INTERVAL_SECONDS)
@@ -150,8 +152,11 @@ class RequestLogMiddleware:
                     credential_id=identity.credential_id if status_code != 401 else None,
                 )
                 with anyio.CancelScope(shield=True):
-                    await anyio.to_thread.run_sync(
-                        partial(_write_request, self.engine, entry), abandon_on_cancel=False
-                    )
+                    writer = scope.get("state", {}).get(REQUEST_LOG_WRITER_STATE_ATTRIBUTE)
+                    if not isinstance(writer, RequestLogWriter):
+                        # Preserve direct ASGI/no-lifespan use. Normal servers
+                        # receive the shared writer from lifespan state.
+                        writer = RequestLogWriter()
+                    await writer.run(partial(_write_request, self.engine, entry))
             except Exception:
                 self._warning.warn("API request metadata could not be persisted.")

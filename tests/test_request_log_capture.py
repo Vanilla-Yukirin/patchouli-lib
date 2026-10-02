@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import socket
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Event
-from time import time_ns
+from threading import Event, Thread
+from time import monotonic, sleep, time_ns
 from types import SimpleNamespace
 from typing import cast
+from urllib.request import ProxyHandler, Request, build_opener
 
 import anyio
 import pytest
+import uvicorn
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, func, select
+from sqlalchemy.exc import OperationalError
 
 from patchouli_lib.app import create_app
 from patchouli_lib.auth.repository import AuthRepository
@@ -33,6 +39,10 @@ from patchouli_lib.request_log.identity import (
 )
 from patchouli_lib.request_log.middleware import RequestLogMiddleware, cleanup_request_logs_once
 from patchouli_lib.request_log.models import RequestLogRecord
+from patchouli_lib.request_log.writer import (
+    REQUEST_LOG_WRITER_STATE_ATTRIBUTE,
+    RequestLogWriter,
+)
 
 
 def _app_with_schema(tmp_path: Path):  # type: ignore[no-untyped-def]
@@ -264,3 +274,229 @@ def test_lifespan_runs_retention_on_startup_and_again_periodically(
     monkeypatch.setattr("patchouli_lib.request_log.middleware._RETENTION_INTERVAL_SECONDS", 0.01)
     with TestClient(app):
         assert repeated.wait(timeout=2)
+
+
+@pytest.mark.parametrize("concurrency", [1, 4])
+def test_personal_concurrency_persists_every_request_id_across_reused_lifespans(
+    tmp_path: Path, concurrency: int
+) -> None:
+    app = _app_with_schema(tmp_path)
+    _, _, _, token = _seed_agent(app.state.engine)
+    writers: list[object] = []
+    request_ids: list[str] = []
+    for _ in range(2):
+        with TestClient(app) as client:
+            writers.append(client.app_state[REQUEST_LOG_WRITER_STATE_ATTRIBUTE])
+
+            def request(_index: int) -> str:
+                response = client.get(
+                    "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {token}"}
+                )
+                assert response.status_code == 200
+                request_id = response.headers["X-Request-ID"]
+                assert _record(app.state.engine, request_id).status_code == 200
+                return request_id
+
+            with ThreadPoolExecutor(max_workers=concurrency) as workers:
+                request_ids.extend(workers.map(request, range(12)))
+    assert writers[0] is not writers[1]
+    assert len(set(request_ids)) == 24
+    with app.state.engine.connect() as connection:
+        persisted = set(connection.scalars(select(RequestLogRecord.request_id)))
+    assert persisted == set(request_ids)
+
+
+@pytest.mark.parametrize("concurrency", [1, 4])
+def test_real_http_personal_concurrency_persists_every_request_id_after_shutdown(
+    tmp_path: Path, concurrency: int
+) -> None:
+    app = _app_with_schema(tmp_path)
+    _, _, _, token = _seed_agent(app.state.engine)
+    request_ids: list[str] = []
+    # Bind once to a random loopback port; do not touch any existing service.
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(128)
+        port = listener.getsockname()[1]
+        server = uvicorn.Server(
+            uvicorn.Config(app, log_level="error", access_log=False, lifespan="on")
+        )
+        thread = Thread(target=lambda: server.run(sockets=[listener]), daemon=True)
+        thread.start()
+        try:
+            deadline = monotonic() + 5
+            while not server.started and thread.is_alive() and monotonic() < deadline:
+                sleep(0.01)
+            assert server.started
+
+            def request(_index: int) -> str:
+                opener = build_opener(ProxyHandler({}))
+                http_request = Request(
+                    f"http://127.0.0.1:{port}/api/v1/auth/whoami",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                with opener.open(http_request, timeout=5) as response:
+                    assert response.status == 200
+                    response.read()
+                    request_id = response.headers["X-Request-ID"]
+                    assert isinstance(request_id, str)
+                    return request_id
+
+            with ThreadPoolExecutor(max_workers=concurrency) as workers:
+                request_ids.extend(workers.map(request, range(12)))
+        finally:
+            server.should_exit = True
+            thread.join(timeout=10)
+            assert not thread.is_alive()
+    # Persistence follows response completion: check after graceful shutdown,
+    # not at the instant the client receives the response headers/body.
+    assert len(set(request_ids)) == 12
+    with app.state.engine.connect() as connection:
+        rows = connection.execute(
+            select(RequestLogRecord.request_id, RequestLogRecord.status_code)
+        ).all()
+    assert {row.request_id for row in rows} == set(request_ids)
+    assert all(row.status_code == 200 for row in rows)
+
+
+def test_retention_and_capture_share_gate_before_worker_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from patchouli_lib.request_log import middleware
+
+    app = _app_with_schema(tmp_path)
+    cleanup_entered = Event()
+    cleanup_release = Event()
+    write_entered = Event()
+    original_cleanup = middleware.cleanup_request_logs_once
+    original_write = middleware._write_request
+
+    def cleanup(engine: Engine) -> int:
+        cleanup_entered.set()
+        assert cleanup_release.wait(timeout=2)
+        return original_cleanup(engine)
+
+    def write(engine: Engine, entry: RequestLogWrite) -> None:
+        write_entered.set()
+        original_write(engine, entry)
+
+    monkeypatch.setattr(middleware, "cleanup_request_logs_once", cleanup)
+    monkeypatch.setattr(middleware, "_write_request", write)
+    with TestClient(app) as client, ThreadPoolExecutor(max_workers=1) as workers:
+        assert cleanup_entered.wait(timeout=2)
+        response = workers.submit(client.get, "/api/v1/missing")
+        assert not write_entered.wait(timeout=0.05)
+        cleanup_release.set()
+        result = response.result(timeout=2)
+        assert result.status_code == 404
+        assert _record(app.state.engine, result.headers["X-Request-ID"]).status_code == 404
+    assert write_entered.is_set()
+
+
+def test_permanent_busy_failure_keeps_response_and_warning_private(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    app = _app_with_schema(tmp_path)
+    attempts = 0
+
+    def fail(_engine: Engine, _entry: RequestLogWrite) -> None:
+        nonlocal attempts
+        attempts += 1
+        original = sqlite3.OperationalError("private-token-body-value")
+        original.sqlite_errorcode = sqlite3.SQLITE_BUSY
+        raise OperationalError("private SQL", {"token": "private-token-body-value"}, original)
+
+    monkeypatch.setattr("patchouli_lib.request_log.middleware._write_request", fail)
+    with TestClient(app) as client:
+        response = client.get("/api/v1/missing?token=private-token-body-value")
+    assert response.status_code == 404
+    assert attempts == 3
+    assert "API request metadata could not be persisted." in caplog.text
+    assert "private-token-body-value" not in caplog.text
+    assert "private SQL" not in caplog.text
+
+
+def test_cancelled_retention_waits_for_its_transaction_before_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from patchouli_lib.request_log import middleware
+
+    app = _app_with_schema(tmp_path)
+    entered = Event()
+    release = Event()
+    finished = Event()
+
+    def cleanup(_engine: Engine) -> int:
+        entered.set()
+        assert release.wait(timeout=2)
+        finished.set()
+        return 0
+
+    monkeypatch.setattr(middleware, "cleanup_request_logs_once", cleanup)
+
+    async def run() -> None:
+        writer = RequestLogWriter()
+        retention = asyncio.create_task(
+            middleware.run_request_log_retention(app.state.engine, writer)
+        )
+        assert await anyio.to_thread.run_sync(entered.wait, 2)
+        retention.cancel()
+        await asyncio.sleep(0.02)
+        assert not retention.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await retention
+        await writer.close()
+        assert finished.is_set()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("code", "expected_attempts"), [(sqlite3.SQLITE_BUSY, 3), (sqlite3.SQLITE_LOCKED, 1)]
+)
+def test_cancelled_retention_exits_even_when_final_transaction_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int, expected_attempts: int
+) -> None:
+    from patchouli_lib.request_log import middleware
+
+    app = _app_with_schema(tmp_path)
+    entered = Event()
+    release = Event()
+    attempts = 0
+
+    def fail(_engine: Engine) -> int:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            entered.set()
+            assert release.wait(timeout=2)
+        error = sqlite3.OperationalError("private synthetic cleanup failure")
+        error.sqlite_errorcode = code
+        raise OperationalError("private SQL", {}, error)
+
+    monkeypatch.setattr(middleware, "cleanup_request_logs_once", fail)
+
+    async def run() -> None:
+        writer = RequestLogWriter()
+        retention = asyncio.create_task(
+            middleware.run_request_log_retention(app.state.engine, writer)
+        )
+        assert await anyio.to_thread.run_sync(entered.wait, 2)
+        retention.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        # Observe without issuing a second cancellation: wait_for would hide
+        # the old regression by cancelling retention's 900-second sleep again.
+        done, pending = await asyncio.wait({retention}, timeout=1)
+        if pending:
+            retention.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await retention
+        assert done == {retention}
+        with pytest.raises(asyncio.CancelledError):
+            await retention
+        assert attempts == expected_attempts
+        await writer.close()
+
+    asyncio.run(run())

@@ -23,6 +23,10 @@ from patchouli_lib.api.tag_routes import create_tag_router
 from patchouli_lib.config import Settings
 from patchouli_lib.database import DatabaseNotReadyError, build_engine, check_database
 from patchouli_lib.request_log.middleware import RequestLogMiddleware, run_request_log_retention
+from patchouli_lib.request_log.writer import (
+    REQUEST_LOG_WRITER_STATE_ATTRIBUTE,
+    RequestLogWriter,
+)
 from patchouli_lib.retrieval.cursor import CursorCodec
 from patchouli_lib.search.index_v2 import SearchIndexUnavailableError, require_ready_index
 
@@ -63,15 +67,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return True
 
     @asynccontextmanager
-    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(application: FastAPI) -> AsyncIterator[dict[str, object]]:
         application.state.engine = engine
-        retention = asyncio.create_task(run_request_log_retention(engine))
+        writer = RequestLogWriter()
+        retention = asyncio.create_task(run_request_log_retention(engine, writer))
         try:
-            yield
+            yield {REQUEST_LOG_WRITER_STATE_ATTRIBUTE: writer}
         finally:
             retention.cancel()
             with suppress(asyncio.CancelledError):
                 await retention
+            await writer.close()
             engine.dispose()
 
     application = FastAPI(
