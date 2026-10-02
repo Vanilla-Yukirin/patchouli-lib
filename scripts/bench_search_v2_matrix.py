@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 import unicodedata
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -59,6 +59,7 @@ from patchouli_lib.idempotency.schemas import digest_idempotency_key  # noqa: E4
 from patchouli_lib.library.repository import LibraryRepository  # noqa: E402
 from patchouli_lib.library.schemas import LibraryStructureSeed  # noqa: E402
 from patchouli_lib.library.service import LibrarySeedService  # noqa: E402
+from patchouli_lib.retrieval.cursor import CursorCodec, InvalidCursorError  # noqa: E402
 from patchouli_lib.search.index_v2 import rebuild_search_index  # noqa: E402
 from patchouli_lib.search.query_v2 import SearchQueryV2, parse_query_v2_json  # noqa: E402
 from patchouli_lib.search.service_v2 import SearchScopeError, search_pages_v2  # noqa: E402
@@ -79,6 +80,14 @@ RARE = "罕见信号"
 UPDATED = "更新信号"
 COMMON = "共同主题"
 NO_HIT = "永不存在的紫色引力井"
+OR_WORDS = tuple(f"矩阵专用长词{number:02d}尾" for number in range(16))
+MULTI_TEXT = "双文本重复命中哨兵"
+TEXT_ONLY = "附加文本独占哨兵"
+BINARY_BODY = "二进制正文隔离哨兵"
+SPLIT_LEFT = "不可跨字段拼接前段"
+SPLIT_RIGHT = "不可跨字段拼接后段"
+CURSOR_SECRET = "synthetic-search-matrix-cursor-secret-20261002"
+CURSOR_CODEC = CursorCodec(CURSOR_SECRET.encode("ascii"))
 _SERVER_TIMEOUT_SECONDS = 30
 _HTTP_TIMEOUT_SECONDS = 15
 _MAX_HTTP_RESPONSE_BYTES = 1_048_576
@@ -98,7 +107,8 @@ from patchouli_lib.app import create_app
 from patchouli_lib.config import Settings
 
 settings = Settings(_env_file=None, database_url=os.environ["PATCHOULI_DATABASE_URL"],
-                    environment="test")
+                    environment="test",
+                    retrieval_cursor_signing_secret=os.environ["PATCHOULI_RETRIEVAL_CURSOR_SIGNING_SECRET"])
 application = create_app(settings)
 listener = socket.socket()
 listener.bind(("127.0.0.1", 0))
@@ -124,6 +134,7 @@ class SyntheticPage:
     body: str
     occurred_at: int
     tags: tuple[str, ...]
+    files: tuple[tuple[str, bytes], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,17 +164,27 @@ def resolve_dimensions(
 
 
 def _body(number: int, size: int) -> str:
-    prefix = f"# {COMMON}\n合成资料 {number:05d} "
+    prefix = f"# {COMMON}\n合成资料 {number:05d} {OR_WORDS[number % len(OR_WORDS)]} {MULTI_TEXT} "
     if number in (1, 3, 8):
         prefix += f"{RARE} "
     words = ("知识库", "版本", "检索", "技术报告", "archive", "source", "安全", "研究")
     rotated = words[number % len(words) :] + words[: number % len(words)]
     pattern = (" ".join(rotated) + f" topic{number % 101:03d} ").encode("utf-8")
     start = prefix.encode("utf-8")
-    if len(start) > size:
+    suffix = f"\n{SPLIT_LEFT}".encode()
+    if len(start) + len(suffix) > size:
         raise ValueError("The synthetic prefix exceeds its body budget.")
-    repeats, remainder = divmod(size - len(start), len(pattern))
-    return (start + pattern * repeats + b"x" * remainder).decode("utf-8")
+    repeats, remainder = divmod(size - len(start) - len(suffix), len(pattern))
+    return (start + pattern * repeats + b"x" * remainder + suffix).decode("utf-8")
+
+
+def _files(number: int, total_bytes: int) -> tuple[tuple[str, bytes], ...]:
+    """Budget includes *all* bytes, not merely the main Markdown file."""
+
+    notes = f"{SPLIT_RIGHT}\n{MULTI_TEXT}\n{TEXT_ONLY}".encode()
+    opaque = b"\xff\x00" + BINARY_BODY.encode("utf-8")
+    body = _body(number, total_bytes - len(notes) - len(opaque)).encode("utf-8")
+    return (("content.md", body), ("notes.txt", notes), ("opaque-file.bin", opaque))
 
 
 def _seed(
@@ -259,7 +280,8 @@ def _seed(
         for number in range(page_count):
             book = structures[number % 3].book
             library_id, section_id = book.library_id, book.section_id
-            body = _body(number, body_bytes)
+            files = _files(number, body_bytes)
+            body = files[0][1].decode("utf-8")
             occurred_at = BASE_TIME + number * 1_000_000
             uid = (number + 1).to_bytes(16, "big")
             revision_id = f"rev_{number + 1:032x}"
@@ -283,7 +305,7 @@ def _seed(
                 title=f"合成资料 {number:05d}",
                 occurred_at=occurred_at,
                 operation_at=2_000_000,
-                manifest=build_file_manifest((("content.md", body.encode("utf-8")),)),
+                manifest=build_file_manifest(files),
                 source=ArchiveSourceInput(kind="synthetic"),
             )
             assigned = (
@@ -301,6 +323,7 @@ def _seed(
                     body,
                     occurred_at,
                     assigned,
+                    files,
                 )
             )
     context = AuthenticatedRequestContext(
@@ -322,12 +345,13 @@ def _oracle(
     """Literal full-corpus scan; fixture makes every hit equal-weight and uniquely dated.
 
     No index, service ranking helper, or SQL candidate implementation is used.
-    All current scenarios have at most one keyword, only in content.md, and at
-    most one attached Tag per Page. Thus eligible Pages order by occurred_at.
+    Each Page contains exactly one of the sixteen OR terms, in the same text
+    field. Other keyword scenarios contain one keyword and have identical hit
+    fields across Pages, even when both text files match. No score formula is
+    reproduced here; unequal-weight relevance is deliberately outside this
+    fixture. At most one Tag is attached per Page. Order is therefore time/ID.
     """
 
-    if len(query.keywords) > 1:
-        raise ValueError("The independent oracle needs an equal-weight fixture.")
     selected = readable if query.libraries is None else frozenset(query.libraries)
     wanted_tags = {(tag.library_id, tag.tag_id) for tag in query.tags_any}
     needles = tuple(_normalize(keyword) for keyword in query.keywords)
@@ -341,11 +365,23 @@ def _oracle(
             continue
         if wanted_tags and not any((page.library_id, tag) in wanted_tags for tag in page.tags):
             continue
-        if needles and not any(
-            needle in _normalize(field)
-            for needle in needles
-            for field in (page.title, page.body, "content.md")
-        ):
+        # The fixture explicitly declares md/txt as text and bin as opaque.
+        # Do not call the product extractor, candidate query or ranker.
+        fields = (
+            page.title,
+            *(name for name, _ in page.files),
+            *(
+                content.decode("utf-8")
+                for name, content in page.files
+                if name.endswith((".md", ".txt"))
+            ),
+        )
+        matched = {
+            needle for needle in needles if any(needle in _normalize(field) for field in fields)
+        }
+        if len(matched) > 1:
+            raise ValueError("The independent oracle needs an equal-weight fixture.")
+        if needles and not matched:
             continue
         matches.append(page)
     matches.sort(key=lambda page: (-page.occurred_at, page.library_id, page.page_id))
@@ -366,6 +402,12 @@ def _queries(libraries: tuple[str, str, str]) -> tuple[tuple[str, dict[str, obje
         ("common_one_library", {"keywords": [COMMON], "libraries": [readable]}),
         ("rare", {"keywords": [RARE]}),
         ("no_hit", {"keywords": [NO_HIT]}),
+        ("wide_keyword_or", {"keywords": list(OR_WORDS)}),
+        ("multi_file_duplicate", {"keywords": [MULTI_TEXT]}),
+        ("additional_text_file", {"keywords": [TEXT_ONLY]}),
+        ("binary_file_name", {"keywords": ["opaque-file"]}),
+        ("binary_body_not_indexed", {"keywords": [BINARY_BODY]}),
+        ("no_cross_field_join", {"keywords": [SPLIT_LEFT + SPLIT_RIGHT]}),
         ("tag_or_only", {"tags_any": tags}),
         (
             "tag_identity_scoped",
@@ -402,6 +444,77 @@ def _check_result(
 ) -> None:
     if actual != expected[:20] or len(actual) != len(set(actual)):
         raise RuntimeError(f"Synthetic search disagrees with the independent oracle: {name}.")
+
+
+def _check_pagination(
+    fetch: Callable[[dict[str, object]], tuple[tuple[tuple[str, str], ...], str | None]],
+    payload: dict[str, object],
+    expected: tuple[tuple[str, str], ...],
+    *,
+    limit: int = 100,
+) -> dict[str, object]:
+    """Check one complete signed chain outside latency sampling, with a bounded loop."""
+
+    cursor: str | None = None
+    cursors: set[str] = set()
+    collected: list[tuple[str, str]] = []
+    page_count = 0
+    while page_count <= len(expected) // limit:
+        request = payload | {"limit": limit}
+        if cursor is not None:
+            request["cursor"] = cursor
+        actual, next_cursor = fetch(request)
+        offset = len(collected)
+        if actual != expected[offset : offset + limit]:
+            raise RuntimeError("Synthetic cursor page disagrees with the full independent oracle.")
+        collected.extend(actual)
+        page_count += 1
+        if len(collected) == len(expected):
+            if next_cursor is not None:
+                raise RuntimeError("Synthetic cursor did not end at the complete oracle boundary.")
+            break
+        if not isinstance(next_cursor, str) or not next_cursor or next_cursor in cursors:
+            raise RuntimeError("Synthetic cursor chain ended early or repeated a cursor.")
+        cursors.add(next_cursor)
+        cursor = next_cursor
+    if tuple(collected) != expected or len(collected) != len(set(collected)):
+        raise RuntimeError("Synthetic cursor chain omitted or duplicated a Page.")
+    return {
+        "limit": limit,
+        "page_count": page_count,
+        "returned": len(collected),
+        "complete_order_matches_independent_oracle": True,
+        "hidden_library_excluded": True,
+        "terminal_next_cursor_is_null": True,
+    }
+
+
+def _pagination_queries() -> tuple[tuple[str, dict[str, object]], ...]:
+    return (
+        ("common", {"keywords": [COMMON]}),
+        ("wide_keyword_or", {"keywords": list(OR_WORDS)}),
+        ("multi_file_duplicate", {"keywords": [MULTI_TEXT]}),
+    )
+
+
+def _service_pagination(engine: Engine, seed: SeededMatrix) -> list[dict[str, object]]:
+    def fetch(payload: dict[str, object]) -> tuple[tuple[tuple[str, str], ...], str | None]:
+        result = search_pages_v2(
+            engine,
+            seed.context,
+            _parsed(payload),
+            clock=lambda: AUTH_CLOCK,
+            cursor_codec=CURSOR_CODEC,
+        )
+        return tuple((item.library_id, item.page_id) for item in result.items), result.next_cursor
+
+    return [
+        {"name": name}
+        | _check_pagination(
+            fetch, payload, _oracle(seed.pages, frozenset(seed.libraries[:2]), _parsed(payload))
+        )
+        for name, payload in _pagination_queries()
+    ]
 
 
 def _measure_queries(
@@ -475,7 +588,10 @@ def _update_one(engine: Engine, seed: SeededMatrix) -> tuple[float, tuple[Synthe
                 section_id=target.section_id,
                 page_id=target.page_id,
                 expected_etag=etag,
-                files=(("content.md", changed.encode("utf-8")),),
+                files=tuple(
+                    (name, changed.encode("utf-8") if name == "content.md" else content)
+                    for name, content in target.files
+                ),
                 source=ArchiveSourceInput(kind="synthetic"),
                 request_id=f"req_{'e' * 32}",
             ),
@@ -485,13 +601,50 @@ def _update_one(engine: Engine, seed: SeededMatrix) -> tuple[float, tuple[Synthe
             raise RuntimeError("The synthetic update did not create a new Revision.")
     elapsed_ms = (time.perf_counter_ns() - began) / 1_000_000
     pages = tuple(
-        replace(page, body=changed) if page.number == target.number else page for page in seed.pages
+        replace(
+            page,
+            body=changed,
+            files=tuple(
+                (name, changed.encode("utf-8") if name == "content.md" else content)
+                for name, content in page.files
+            ),
+        )
+        if page.number == target.number
+        else page
+        for page in seed.pages
     )
+    with engine.connect() as connection:
+        repository = ContentRepository(connection)
+        current = repository.get_page(target.library_id, target.page_id)
+        if current is None:
+            raise RuntimeError("The updated Page is missing.")
+        saved = repository.get_current_file_manifest(current)
+        expected_files = dict(pages[target.number].files)
+        if {entry.name: entry.content for entry in saved.files} != expected_files:
+            raise RuntimeError("The Revision update did not preserve the complete file snapshot.")
     for name, keyword in (("old_rare_after_update", RARE), ("new_term_after_update", UPDATED)):
         query = _parsed({"keywords": [keyword], "limit": 20})
         expected = _oracle(pages, frozenset(seed.libraries[:2]), query)
         _check_result(_identities(engine, seed.context, query), expected, name)
     return elapsed_ms, pages
+
+
+def _require_update_invalidates_cursor(
+    engine: Engine, seed: SeededMatrix, cursor: str | None
+) -> None:
+    if cursor is None:
+        raise RuntimeError("The synthetic invalidation check needs a nonterminal cursor.")
+    try:
+        search_pages_v2(
+            engine,
+            seed.context,
+            _parsed({"keywords": [COMMON], "limit": 1, "cursor": cursor}),
+            clock=lambda: AUTH_CLOCK,
+            cursor_codec=CURSOR_CODEC,
+        )
+    except InvalidCursorError:
+        return
+    raise RuntimeError("A visible Revision update did not invalidate the old cursor.")
 
 
 def validate_http_parameters(repeats: int, concurrency: int, fresh_process_runs: int) -> None:
@@ -535,6 +688,7 @@ def _server_environment(database_url: str) -> dict[str, str]:
         PATCHOULI_ENVIRONMENT="test",
         PYTHONPATH=str(ROOT / "src"),
         PYTHONDONTWRITEBYTECODE="1",
+        PATCHOULI_RETRIEVAL_CURSOR_SIGNING_SECRET=CURSOR_SECRET,
     )
     return environment
 
@@ -612,7 +766,8 @@ def _http_search(
     payload: dict[str, object],
     *,
     expected_status: int = 200,
-) -> tuple[float, tuple[tuple[str, str], ...]]:
+    expected_code: str = "resource_not_found",
+) -> tuple[float, tuple[tuple[str, str], ...], str | None]:
     # HTTPConnection goes directly to loopback, ignoring all HTTP proxy variables.
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     connection = HTTPConnection("127.0.0.1", port, timeout=_HTTP_TIMEOUT_SECONDS)
@@ -634,16 +789,19 @@ def _http_search(
             )
         document = json.loads(raw)
         if expected_status != 200:
-            if document.get("code") != "resource_not_found":
+            if document.get("code") != expected_code:
                 raise RuntimeError("Synthetic HTTP scope rejection was not explicit.")
-            return elapsed_ms, ()
+            return elapsed_ms, (), None
         items = document["items"]
         identities = tuple((item["library_id"], item["page_id"]) for item in items)
         if not all(
             isinstance(library, str) and isinstance(page, str) for library, page in identities
         ):
             raise RuntimeError("Synthetic HTTP search returned invalid identities.")
-        return elapsed_ms, identities
+        cursor = document["next_cursor"]
+        if cursor is not None and (not isinstance(cursor, str) or not cursor):
+            raise RuntimeError("Synthetic HTTP search returned an invalid cursor.")
+        return elapsed_ms, identities, cursor
     finally:
         connection.close()
 
@@ -656,7 +814,7 @@ def _measure_http_queries(
     repeats: int,
     concurrency: int,
     fresh_process_runs: int,
-) -> tuple[list[dict[str, object]], float]:
+) -> tuple[list[dict[str, object]], float, list[dict[str, object]]]:
     measurements: list[dict[str, object]] = []
     readable = frozenset(seed.libraries[:2])
     for name, base_payload in _queries(seed.libraries):
@@ -666,7 +824,7 @@ def _measure_http_queries(
         began = time.perf_counter()
         for _ in range(fresh_process_runs):
             with _http_server(database_url, directory) as port:
-                latency, actual = _http_search(port, seed.token, payload)
+                latency, actual, _cursor = _http_search(port, seed.token, payload)
                 _check_result(actual, expected, name)
                 first_samples.append(latency)
         measurements.append(
@@ -693,7 +851,7 @@ def _measure_http_queries(
                 expected: tuple[tuple[str, str], ...] = expected,
                 name: str = name,
             ) -> float:
-                latency, actual = _http_search(port, seed.token, payload)
+                latency, actual, _cursor = _http_search(port, seed.token, payload)
                 _check_result(actual, expected, name)
                 return latency
 
@@ -713,13 +871,35 @@ def _measure_http_queries(
         )
         for payload in negative_payloads:
             _http_search(port, seed.token, payload, expected_status=404)
+
+        def fetch(payload: dict[str, object]) -> tuple[tuple[tuple[str, str], ...], str | None]:
+            _latency, actual, cursor = _http_search(port, seed.token, payload)
+            return actual, cursor
+
+        pagination = [
+            {"name": name}
+            | _check_pagination(fetch, payload, _oracle(seed.pages, readable, _parsed(payload)))
+            for name, payload in _pagination_queries()
+        ]
+        _latency, _actual, stale_cursor = _http_search(
+            port, seed.token, {"keywords": [COMMON], "limit": 1}
+        )
+        if stale_cursor is None:
+            raise RuntimeError("The HTTP invalidation check needs a nonterminal cursor.")
         update_ms, updated = _update_one(engine, seed)
+        _http_search(
+            port,
+            seed.token,
+            {"keywords": [COMMON], "limit": 1, "cursor": stale_cursor},
+            expected_status=400,
+            expected_code="invalid_cursor",
+        )
         for name, keyword in (("old_rare_after_update", RARE), ("new_term_after_update", UPDATED)):
             payload = {"keywords": [keyword], "limit": 20}
             expected = _oracle(updated, readable, _parsed(payload))
-            _, actual = _http_search(port, seed.token, payload)
+            _, actual, _cursor = _http_search(port, seed.token, payload)
             _check_result(actual, expected, name)
-    return measurements, update_ms
+    return measurements, update_ms, pagination
 
 
 def run_http_matrix(
@@ -755,7 +935,7 @@ def run_http_matrix(
             began = time.perf_counter()
             rebuild_search_index(engine, clock=lambda: AUTH_CLOCK)
             rebuild_ms = (time.perf_counter() - began) * 1_000
-            queries, update_ms = _measure_http_queries(
+            queries, update_ms, pagination = _measure_http_queries(
                 engine, database_url, temporary, seed, repeats, concurrency, fresh_process_runs
             )
             database_mib = database.stat().st_size / 1_048_576
@@ -775,6 +955,10 @@ def run_http_matrix(
         "concurrent_requests_per_query": repeats * concurrency,
         "fresh_process_runs": fresh_process_runs,
         "queries": queries,
+        "pagination": pagination,
+        "visible_update_invalidates_cursor": True,
+        "oracle_note": "Equal-weight literal scan: each Page has exactly one of 16 OR terms "
+        "in content.md. Field-specific scenarios are separate, not an unequal-score oracle.",
         "seed_ms": round(seed_ms, 3),
         "rebuild_ms": round(rebuild_ms, 3),
         "update_ms": round(update_ms, 3),
@@ -792,7 +976,7 @@ def run_http_matrix(
         "Seeding/rebuilding and health checks may warm caches; no system cache is evicted.",
         "percentile_note": "Nearest-rank descriptive samples; "
         "small-n p95/p99 are not robust tail estimates.",
-        "limitations": "Equal-weight single-Markdown/single-keyword synthetic fixture; no human "
+        "limitations": "Equal-weight synthetic md/txt/bin fixture and 16-term OR; no human "
         "relevance, OS-cold measurement, TLS/proxy latency, resource peaks, concurrent content "
         "writers, production hardware or full acceptance. Initial writes/update use application "
         "cores; this is HTTP search, not HTTP upload performance. Request logging remains enabled.",
@@ -821,7 +1005,16 @@ def run_matrix(pages: int, bytes_per_page: int, repeats: int) -> dict[str, Any]:
                 rebuild_search_index(engine, clock=lambda: AUTH_CLOCK)
                 rebuild_ms = (time.perf_counter_ns() - started) / 1_000_000
                 queries = _measure_queries(engine, database_url, seed, repeats)
+                pagination = _service_pagination(engine, seed)
+                stale_cursor = search_pages_v2(
+                    engine,
+                    seed.context,
+                    _parsed({"keywords": [COMMON], "limit": 1}),
+                    clock=lambda: AUTH_CLOCK,
+                    cursor_codec=CURSOR_CODEC,
+                ).next_cursor
                 update_ms, _updated_pages = _update_one(engine, seed)
+                _require_update_invalidates_cursor(engine, seed, stale_cursor)
                 database_mib = database.stat().st_size / 1_048_576
             finally:
                 engine.dispose()
@@ -843,16 +1036,20 @@ def run_matrix(pages: int, bytes_per_page: int, repeats: int) -> dict[str, Any]:
         "library_count": 3,
         "readable_library_count": 2,
         "queries": queries,
+        "pagination": pagination,
+        "visible_update_invalidates_cursor": True,
+        "oracle_note": "Equal-weight literal scan: each Page has exactly one of 16 OR terms "
+        "in content.md. Field-specific scenarios are separate, not an unequal-score oracle.",
         "seed_ms": round(seed_ms, 3),
         "rebuild_ms": round(rebuild_ms, 3),
         "update_ms": round(update_ms, 3),
         "database_mib": round(database_mib, 3),
         "new_connection_note": "Fresh DBAPI connection; operating-system file cache may be warm.",
         "limitations": (
-            "Only deterministic synthetic Pages initially holding one file-set Markdown file, "
+            "Only deterministic synthetic Pages holding md/txt/bin file sets and 16-term OR, "
             "one real file-set Revision update, and one Agent credential. "
-            "The oracle checks exact Top 20 order for this equal-weight fixture, not all matches "
-            "beyond Top 20, human relevance, HTTP overhead, concurrency, OS-cold latency, "
+            "The oracle checks Top 20 plus three complete signed cursor chains, not human "
+            "relevance, HTTP overhead, concurrency, OS-cold latency, "
             "real diverse content, backups, or production performance."
         ),
     }

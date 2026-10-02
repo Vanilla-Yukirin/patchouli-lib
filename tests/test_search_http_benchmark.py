@@ -10,7 +10,11 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from bench_search_v2_matrix import latency_summary, validate_http_parameters  # noqa: E402
+from bench_search_v2_matrix import (  # noqa: E402
+    latency_summary,
+    run_http_matrix,
+    validate_http_parameters,
+)
 
 
 @pytest.mark.parametrize("values", [(1, 1, 1), (100, 4, 5)])
@@ -66,3 +70,32 @@ def test_statistics_reject_missing_or_invalid_evidence(
 ) -> None:
     with pytest.raises(ValueError):
         latency_summary(samples, wall_seconds)
+
+
+def test_small_real_http_matrix_checks_or_multifile_and_signed_pagination() -> None:
+    report = run_http_matrix(156, 512, 1, 1, 1)
+    assert report["mode"] == "synthetic_real_http_search_v2_matrix"
+    queries = {entry["name"]: entry for entry in report["queries"]}
+    for name in (
+        "wide_keyword_or",
+        "multi_file_duplicate",
+        "additional_text_file",
+        "binary_file_name",
+    ):
+        assert queries[name]["oracle_match_count"] == 104
+        assert queries[name]["returned"] == 20
+        assert queries[name]["every_response_matches_independent_oracle"] is True
+        assert queries[name]["warm_serial"]["sample_count"] == 1
+    for name in ("binary_body_not_indexed", "no_cross_field_join"):
+        assert queries[name]["oracle_match_count"] == queries[name]["returned"] == 0
+    assert len(report["pagination"]) == 3
+    for chain in report["pagination"]:
+        assert chain["limit"] == 100
+        assert chain["page_count"] == 2
+        assert chain["returned"] == 104
+        assert chain["complete_order_matches_independent_oracle"] is True
+        assert chain["hidden_library_excluded"] is True
+        assert chain["terminal_next_cursor_is_null"] is True
+    assert report["visible_update_invalidates_cursor"] is True  # Actual HTTP 400 invalid_cursor.
+    assert report["scope_rejections_checked"] == 2
+    assert "NOT OS-cold" in report["cold_cache_note"]
