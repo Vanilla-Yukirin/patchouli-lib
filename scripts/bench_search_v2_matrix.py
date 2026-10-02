@@ -8,13 +8,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import queue
 import statistics
+import subprocess
 import sys
+import threading
 import time
 import unicodedata
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from http.client import HTTPConnection
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -72,6 +79,39 @@ RARE = "罕见信号"
 UPDATED = "更新信号"
 COMMON = "共同主题"
 NO_HIT = "永不存在的紫色引力井"
+_SERVER_TIMEOUT_SECONDS = 30
+_HTTP_TIMEOUT_SECONDS = 15
+_MAX_HTTP_RESPONSE_BYTES = 1_048_576
+_HTTP_MIGRATE = """
+import sys
+from alembic import command
+from alembic.config import Config
+command.upgrade(Config(sys.argv[1]), "head")
+"""
+_HTTP_SERVER = """
+import os
+import socket
+import sys
+import threading
+import uvicorn
+from patchouli_lib.app import create_app
+from patchouli_lib.config import Settings
+
+settings = Settings(_env_file=None, database_url=os.environ["PATCHOULI_DATABASE_URL"],
+                    environment="test")
+application = create_app(settings)
+listener = socket.socket()
+listener.bind(("127.0.0.1", 0))
+listener.listen()
+print(listener.getsockname()[1], flush=True)
+server = uvicorn.Server(uvicorn.Config(application, log_level="critical", access_log=False,
+                                      lifespan="on", timeout_graceful_shutdown=10))
+worker = threading.Thread(target=lambda: server.run(sockets=[listener]), daemon=True)
+worker.start()
+sys.stdin.read()
+server.should_exit = True
+worker.join(timeout=15)
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +166,9 @@ def _body(number: int, size: int) -> str:
     return (start + pattern * repeats + b"x" * remainder).decode("utf-8")
 
 
-def _seed(engine: Engine, page_count: int, body_bytes: int) -> SeededMatrix:
+def _seed(
+    engine: Engine, page_count: int, body_bytes: int, *, expires_at: int = 10_000_000
+) -> SeededMatrix:
     issued = generate_token()
     recorded: list[SyntheticPage] = []
     with immediate_transaction(engine) as connection:
@@ -175,7 +217,7 @@ def _seed(engine: Engine, page_count: int, body_bytes: int) -> SeededMatrix:
                 selector=issued.selector,
                 token_version=issued.version,
                 verifier=issued.verifier,
-                expires_at=10_000_000,
+                expires_at=expires_at,
                 created_at=1_000_000,
                 updated_at=1_000_000,
             )
@@ -452,6 +494,311 @@ def _update_one(engine: Engine, seed: SeededMatrix) -> tuple[float, tuple[Synthe
     return elapsed_ms, pages
 
 
+def validate_http_parameters(repeats: int, concurrency: int, fresh_process_runs: int) -> None:
+    if not 1 <= repeats <= 100:
+        raise ValueError("HTTP repeat count must be between 1 and 100.")
+    if not 1 <= concurrency <= 4:
+        raise ValueError("HTTP concurrency must be between 1 and 4.")
+    if not 1 <= fresh_process_runs <= 5:
+        raise ValueError("Fresh-process count must be between 1 and 5.")
+
+
+def latency_summary(samples: list[float], wall_seconds: float) -> dict[str, int | float]:
+    """Nearest-rank descriptive percentiles, including sample count and every sample."""
+
+    if (
+        not samples
+        or any(not math.isfinite(value) or value < 0 for value in samples)
+        or not math.isfinite(wall_seconds)
+        or wall_seconds <= 0
+    ):
+        raise ValueError("Latency statistics require finite samples and positive elapsed time.")
+    ordered = sorted(samples)
+    return {
+        "sample_count": len(ordered),
+        "p50_ms": round(ordered[math.ceil(len(ordered) * 0.50) - 1], 3),
+        "p95_ms": round(ordered[math.ceil(len(ordered) * 0.95) - 1], 3),
+        "p99_ms": round(ordered[math.ceil(len(ordered) * 0.99) - 1], 3),
+        "max_ms": round(ordered[-1], 3),
+        "batch_wall_seconds": round(wall_seconds, 6),
+        "throughput_rps": round(len(ordered) / wall_seconds, 3),
+    }
+
+
+def _server_environment(database_url: str) -> dict[str, str]:
+    # No user Patchouli configuration, .env, credentials or service endpoints.
+    environment = {
+        key: value for key, value in os.environ.items() if not key.upper().startswith("PATCHOULI_")
+    }
+    environment.update(
+        PATCHOULI_DATABASE_URL=database_url,
+        PATCHOULI_ENVIRONMENT="test",
+        PYTHONPATH=str(ROOT / "src"),
+        PYTHONDONTWRITEBYTECODE="1",
+    )
+    return environment
+
+
+@contextmanager
+def _http_server(database_url: str, directory: Path) -> Iterator[int]:
+    """Own one ephemeral-loopback server; never probe or terminate an existing listener."""
+
+    process = subprocess.Popen(
+        (sys.executable, "-c", _HTTP_SERVER),
+        cwd=directory,
+        env=_server_environment(database_url),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    assert process.stdout is not None
+    announcements: queue.Queue[str] = queue.Queue()
+
+    def read_port() -> None:
+        assert process.stdout is not None
+        announcements.put(process.stdout.readline())
+
+    reader = threading.Thread(target=read_port, daemon=True)
+    reader.start()
+    try:
+        try:
+            announced = announcements.get(timeout=_SERVER_TIMEOUT_SECONDS).strip()
+        except queue.Empty:
+            raise RuntimeError("Synthetic HTTP server startup timed out.") from None
+        if not announced.isascii() or not announced.isdecimal() or not 1 <= int(announced) <= 65535:
+            raise RuntimeError("Synthetic HTTP server did not announce a loopback port.")
+        port = int(announced)
+        deadline = time.monotonic() + _SERVER_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError("Synthetic HTTP server stopped before readiness.")
+            connection = HTTPConnection("127.0.0.1", port, timeout=1)
+            try:
+                connection.request("GET", "/health/ready")
+                response = connection.getresponse()
+                response.read(_MAX_HTTP_RESPONSE_BYTES + 1)
+                if response.status == 200:
+                    break
+            except OSError:
+                pass
+            finally:
+                connection.close()
+            time.sleep(0.05)
+        else:
+            raise RuntimeError("Synthetic HTTP server was not ready before the deadline.")
+        yield port
+    finally:
+        if process.poll() is None:
+            assert process.stdin is not None
+            # EOF asks this owned server to stop gracefully, including on Windows.
+            process.stdin.close()
+            try:
+                process.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        reader.join(timeout=1)
+        process.stdout.close()
+
+
+def _http_search(
+    port: int,
+    token: str,
+    payload: dict[str, object],
+    *,
+    expected_status: int = 200,
+) -> tuple[float, tuple[tuple[str, str], ...]]:
+    # HTTPConnection goes directly to loopback, ignoring all HTTP proxy variables.
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    connection = HTTPConnection("127.0.0.1", port, timeout=_HTTP_TIMEOUT_SECONDS)
+    started = time.perf_counter_ns()
+    try:
+        connection.request(
+            "POST",
+            "/api/v1/search",
+            body=body,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        raw = response.read(_MAX_HTTP_RESPONSE_BYTES + 1)
+        elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
+        if response.status != expected_status or len(raw) > _MAX_HTTP_RESPONSE_BYTES:
+            raise RuntimeError(
+                f"Synthetic HTTP search status={response.status}, expected={expected_status}, "
+                f"oversize={len(raw) > _MAX_HTTP_RESPONSE_BYTES}."
+            )
+        document = json.loads(raw)
+        if expected_status != 200:
+            if document.get("code") != "resource_not_found":
+                raise RuntimeError("Synthetic HTTP scope rejection was not explicit.")
+            return elapsed_ms, ()
+        items = document["items"]
+        identities = tuple((item["library_id"], item["page_id"]) for item in items)
+        if not all(
+            isinstance(library, str) and isinstance(page, str) for library, page in identities
+        ):
+            raise RuntimeError("Synthetic HTTP search returned invalid identities.")
+        return elapsed_ms, identities
+    finally:
+        connection.close()
+
+
+def _measure_http_queries(
+    engine: Engine,
+    database_url: str,
+    directory: Path,
+    seed: SeededMatrix,
+    repeats: int,
+    concurrency: int,
+    fresh_process_runs: int,
+) -> tuple[list[dict[str, object]], float]:
+    measurements: list[dict[str, object]] = []
+    readable = frozenset(seed.libraries[:2])
+    for name, base_payload in _queries(seed.libraries):
+        payload = base_payload | {"limit": 20}
+        expected = _oracle(seed.pages, readable, _parsed(payload))
+        first_samples: list[float] = []
+        began = time.perf_counter()
+        for _ in range(fresh_process_runs):
+            with _http_server(database_url, directory) as port:
+                latency, actual = _http_search(port, seed.token, payload)
+                _check_result(actual, expected, name)
+                first_samples.append(latency)
+        measurements.append(
+            {
+                "name": name,
+                "oracle_match_count": len(expected),
+                "returned": min(20, len(expected)),
+                "every_response_matches_independent_oracle": True,
+                "fresh_process_first_request": latency_summary(
+                    first_samples, time.perf_counter() - began
+                ),
+            }
+        )
+    with _http_server(database_url, directory) as port:
+        for measurement, (name, base_payload) in zip(
+            measurements, _queries(seed.libraries), strict=True
+        ):
+            payload = base_payload | {"limit": 20}
+            expected = _oracle(seed.pages, readable, _parsed(payload))
+
+            def sample(
+                _number: int,
+                payload: dict[str, object] = payload,
+                expected: tuple[tuple[str, str], ...] = expected,
+                name: str = name,
+            ) -> float:
+                latency, actual = _http_search(port, seed.token, payload)
+                _check_result(actual, expected, name)
+                return latency
+
+            sample(0)  # Explicit unmeasured warm-up; its result is still checked.
+            began = time.perf_counter()
+            warm = [sample(number) for number in range(repeats)]
+            measurement["warm_serial"] = latency_summary(warm, time.perf_counter() - began)
+            began = time.perf_counter()
+            with ThreadPoolExecutor(max_workers=concurrency) as workers:
+                concurrent = list(workers.map(sample, range(repeats * concurrency)))
+            measurement["warm_concurrent"] = latency_summary(
+                concurrent, time.perf_counter() - began
+            )
+        negative_payloads: tuple[dict[str, object], ...] = (
+            {"keywords": [COMMON], "libraries": [seed.libraries[2]]},
+            {"tags_any": [{"library_id": seed.libraries[2], "tag_id": SHARED_TAG}]},
+        )
+        for payload in negative_payloads:
+            _http_search(port, seed.token, payload, expected_status=404)
+        update_ms, updated = _update_one(engine, seed)
+        for name, keyword in (("old_rare_after_update", RARE), ("new_term_after_update", UPDATED)):
+            payload = {"keywords": [keyword], "limit": 20}
+            expected = _oracle(updated, readable, _parsed(payload))
+            _, actual = _http_search(port, seed.token, payload)
+            _check_result(actual, expected, name)
+    return measurements, update_ms
+
+
+def run_http_matrix(
+    pages: int,
+    bytes_per_page: int,
+    repeats: int,
+    concurrency: int,
+    fresh_process_runs: int,
+) -> dict[str, Any]:
+    resolve_dimensions(scale=False, pages=pages, bytes_per_page=bytes_per_page)
+    validate_http_parameters(repeats, concurrency, fresh_process_runs)
+    with TemporaryDirectory(prefix="patchouli-search-http-matrix-") as directory:
+        temporary = Path(directory)
+        database = temporary / "synthetic.sqlite"
+        database_url = f"sqlite:///{database.as_posix()}"
+        subprocess.run(
+            (sys.executable, "-c", _HTTP_MIGRATE, str(ROOT / "alembic.ini")),
+            cwd=temporary,
+            env=_server_environment(database_url),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+            timeout=_SERVER_TIMEOUT_SECONDS,
+        )
+        engine = build_engine(database_url)
+        try:
+            began = time.perf_counter()
+            seed = _seed(
+                engine, pages, bytes_per_page, expires_at=time.time_ns() // 1_000 + 3_600_000_000
+            )
+            seed_ms = (time.perf_counter() - began) * 1_000
+            began = time.perf_counter()
+            rebuild_search_index(engine, clock=lambda: AUTH_CLOCK)
+            rebuild_ms = (time.perf_counter() - began) * 1_000
+            queries, update_ms = _measure_http_queries(
+                engine, database_url, temporary, seed, repeats, concurrency, fresh_process_runs
+            )
+            database_mib = database.stat().st_size / 1_048_576
+        finally:
+            engine.dispose()
+    return {
+        "mode": "synthetic_real_http_search_v2_matrix",
+        "status": "Experimental loopback HTTP measurement; not production acceptance",
+        "provenance": "Deterministic synthetic content only; no private source or server",
+        "pages": pages,
+        "bytes_per_page": bytes_per_page,
+        "library_count": 3,
+        "readable_library_count": 2,
+        "workers": 1,
+        "concurrency": concurrency,
+        "serial_requests_per_query": repeats,
+        "concurrent_requests_per_query": repeats * concurrency,
+        "fresh_process_runs": fresh_process_runs,
+        "queries": queries,
+        "seed_ms": round(seed_ms, 3),
+        "rebuild_ms": round(rebuild_ms, 3),
+        "update_ms": round(update_ms, 3),
+        "database_mib": round(database_mib, 3),
+        "scope_rejections_checked": 2,
+        "updated_terms_checked_over_http": 2,
+        "latency_note": "Client time from connect/request through complete response body; "
+        "includes real authentication, middleware and JSON response, not oracle verification. "
+        "Post-response log persistence may finish after the client receives the body. "
+        "Each request uses a fresh TCP connection; server and OS caches may remain warm.",
+        "throughput_note": "Warm batch wall time includes client scheduling and result checks. "
+        "Fresh-process batch wall time additionally includes server startup/readiness/shutdown; "
+        "its throughput is whole process cycles, not steady-state HTTP throughput.",
+        "cold_cache_note": "Fresh-process first search after readiness is NOT OS-cold cache. "
+        "Seeding/rebuilding and health checks may warm caches; no system cache is evicted.",
+        "percentile_note": "Nearest-rank descriptive samples; "
+        "small-n p95/p99 are not robust tail estimates.",
+        "limitations": "Equal-weight single-Markdown/single-keyword synthetic fixture; no human "
+        "relevance, OS-cold measurement, TLS/proxy latency, resource peaks, concurrent content "
+        "writers, production hardware or full acceptance. Initial writes/update use application "
+        "cores; this is HTTP search, not HTTP upload performance. Request logging remains enabled.",
+    }
+
+
 def run_matrix(pages: int, bytes_per_page: int, repeats: int) -> dict[str, Any]:
     resolve_dimensions(scale=False, pages=pages, bytes_per_page=bytes_per_page)
     if not 1 <= repeats <= 20:
@@ -517,14 +864,41 @@ def main() -> int:
     parser.add_argument("--pages", type=int, default=None)
     parser.add_argument("--bytes-per-page", type=int, default=None)
     parser.add_argument("--repeats", type=int, default=2)
+    parser.add_argument(
+        "--http", action="store_true", help="Measure actual ephemeral-loopback HTTP search."
+    )
+    parser.add_argument(
+        "--concurrency", type=int, default=None, help="HTTP clients: 1 to 4 (default 4)."
+    )
+    parser.add_argument(
+        "--fresh-process-runs",
+        type=int,
+        default=None,
+        help="First requests per query: 1 to 5 (default 3).",
+    )
     args = parser.parse_args()
     try:
         count, size = resolve_dimensions(
             scale=args.scale, pages=args.pages, bytes_per_page=args.bytes_per_page
         )
-        report = run_matrix(count, size, args.repeats)
+        if args.http:
+            report = run_http_matrix(
+                count,
+                size,
+                args.repeats,
+                4 if args.concurrency is None else args.concurrency,
+                3 if args.fresh_process_runs is None else args.fresh_process_runs,
+            )
+        else:
+            if args.concurrency is not None or args.fresh_process_runs is not None:
+                raise ValueError("HTTP-specific options require --http.")
+            report = run_matrix(count, size, args.repeats)
     except ValueError as error:
         parser.error(str(error))
+    except Exception as error:
+        # Do not publish child logs, response bodies or exceptions with SQL-bound values.
+        print(f"Synthetic matrix failed safely ({type(error).__name__}).", file=sys.stderr)
+        return 1
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
