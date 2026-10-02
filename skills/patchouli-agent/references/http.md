@@ -193,6 +193,11 @@ GET /api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/revisio
 清单与文件，须由具有读取权限的身份或管理侧另行核验，不能越权尝试。旧 Section
 凭据不能借新路径取得其他知识库权限。用户原始文件不得因上传成功而自动删除。
 
+只有 Agent 为本次上传专门新建的临时副本，才可在上述准确 Revision 清单及全部
+文件字节摘要核验成功后清理；确认目标是该临时副本，不扩大到它的父目录或其他文件。
+响应不确定、校验失败或只有写权限且尚未获得独立回读结果时，保留原文件与重试信息。
+全库存在同哈希文件、单独收到成功状态码，都不能代替本次准确上传的验证。
+
 ## 旧 Markdown Archive 写入（仅兼容旧客户端）
 
 下述 `metadata`＋`content` 单 Markdown 接口不是新客户端的另一种文件集格式。
@@ -363,8 +368,11 @@ PUT    /api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/tags
 DELETE /api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/tags/{tag_id}
 ```
 
-创建请求是 `application/json` 的 `{"name":"示例标签"}`，目前只允许本地管理员凭据。
-已存在的规范化名称返回原 Tag。列表可用 `limit`、`offset` 分页，Tag 名称可用 `q`
+创建请求是 `application/json` 的 `{"name":"示例标签"}`。`library_grants` 模式的
+Agent 在目标 Library 有 `write` 时可创建新 Tag，成功返回 201；若规范化名称已存在，
+还必须有该 Library 的 `read` 才能返回原 Tag（200）。只有写权限而同名已存在时返回
+403，不应改用管理员凭据绕过。旧 Section 模式的 Agent 不能创建 Tag；兼容的
+operator 仍按原有权限使用此入口。列表可用 `limit`、`offset` 分页，Tag 名称可用 `q`
 过滤；按 Tag 列 Page、列 Page 的 Tag 也支持同样的分页参数。响应中的
 `next_offset` 为 `null` 表示没有下一页。关联和解除关联没有请求体，返回
 `{"changed":true}` 或 `{"changed":false}`；重复操作不会产生第二条关联。
