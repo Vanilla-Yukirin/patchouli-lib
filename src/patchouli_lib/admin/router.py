@@ -82,6 +82,7 @@ from patchouli_lib.admin.pages import (
     operations_page,
     page_delete_error_page,
     page_preview_page,
+    request_log_filter_error_page,
     request_log_page,
     restore_error_page,
     search_page,
@@ -94,6 +95,12 @@ from patchouli_lib.admin.pages import (
 from patchouli_lib.admin.passwords import password_matches
 from patchouli_lib.admin.raster_preview import RasterPreviewUnavailableError, build_raster_preview
 from patchouli_lib.admin.read_model import AdminReadModel, LibraryItem, TagItem
+from patchouli_lib.admin.request_log_filters import (
+    InvalidRequestLogCursor,
+    InvalidRequestLogFilter,
+    RequestLogCursorCodec,
+    parse_request_log_filters,
+)
 from patchouli_lib.admin.service import (
     AdminActionService,
     AgentMetadataVersionConflictError,
@@ -685,25 +692,46 @@ def create_admin_router(
             return response
         if not isinstance(session, MasterAdminSession):
             return forbidden(request, "A master session is required.")
-        try:
-            before = activity_before(request)
-            if actor is not None and read_model.get_caller(*actor) is None:
-                raise ValueError("Unknown identity")
-            result = read_model.request_log_page(before=before, actor=actor)
-        except ValueError:
+        if actor is not None and read_model.get_caller(*actor) is None:
             return html(
                 browser_not_found_page(session.csrf_token, locale=locale),
                 locale=locale,
                 status_code=404,
             )
+        try:
+            filters = parse_request_log_filters(request.query_params)
+            before_values = request.query_params.getlist("before")
+            if len(before_values) > 1:
+                raise InvalidRequestLogCursor
+            cursor_codec = RequestLogCursorCodec(
+                signing_secret=signing_secret.encode("utf-8"),
+                session=session,
+                filters=filters,
+                actor=actor,
+                page_size=20,
+            )
+            before = cursor_codec.decode(before_values[0]) if before_values else None
+        except (InvalidRequestLogFilter, InvalidRequestLogCursor):
+            return html(
+                request_log_filter_error_page(session.csrf_token, locale=locale, actor=actor),
+                locale=locale,
+                status_code=400,
+            )
+        result = read_model.request_log_page(filters=filters, before=before, actor=actor)
+        route_options = read_model.request_log_routes(actor=actor)
+        next_cursor = (
+            cursor_codec.encode(result.next_position) if result.next_position is not None else None
+        )
         page_response = html(
             request_log_page(
                 session.csrf_token,
                 result.items,
                 locale=locale,
-                next_cursor=result.next_cursor,
-                before_cursor=before,
+                next_cursor=next_cursor,
+                before_cursor=before_values[0] if before_values else None,
                 actor=actor,
+                filters=filters,
+                route_options=route_options,
             ),
             locale=locale,
         )

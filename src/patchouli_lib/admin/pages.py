@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from html import escape
 from typing import Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from patchouli_lib.admin.interface_guide import api_guide, mcp_guide, skill_guide
 from patchouli_lib.admin.read_model import (
@@ -24,6 +24,7 @@ from patchouli_lib.admin.read_model import (
     TrashDirectoryView,
     TrashPageView,
 )
+from patchouli_lib.admin.request_log_filters import RequestLogFilters
 from patchouli_lib.admin.service import DeliveredCredential
 from patchouli_lib.api.agent_skill_routes import SkillBundle
 from patchouli_lib.auth.library_policy import LibraryAction, target_library_grants_digest
@@ -413,6 +414,17 @@ _ZH_CN: dict[str, str] = {
     "API requests by this identity": "此身份的接口请求",
     "Older requests": "更早的请求",
     "No API requests in the retained period.": "保留期内暂无接口请求记录。",
+    "Filter requests": "筛选请求",
+    "All routes": "全部路由",
+    "All methods": "全部方法",
+    "HTTP method": "HTTP 方法",
+    "Status code or interrupted": "状态码或 interrupted",
+    "From (inclusive, RFC 3339)": "开始时间（含，RFC 3339）",
+    "Until (exclusive, RFC 3339)": "结束时间（不含，RFC 3339）",
+    "Apply filters": "应用筛选",
+    "Clear filters": "清除筛选",
+    "Invalid request-log filters or cursor.": "请求记录筛选条件或续页游标无效。",
+    "Start a new request-log search": "重新查询请求记录",
     "Request ID": "请求 ID",
     "Endpoint": "接口",
     "HTTP status": "HTTP 状态",
@@ -1172,10 +1184,12 @@ def request_log_page(
     csrf_token: str,
     items: tuple[RequestLogItem, ...],
     *,
+    filters: RequestLogFilters,
     locale: AdminLocale = "en",
     next_cursor: str | None = None,
     before_cursor: str | None = None,
     actor: tuple[str, str] | None = None,
+    route_options: tuple[tuple[str, str], ...] = (),
 ) -> str:
     base_path = (
         "/admin/requests"
@@ -1183,10 +1197,45 @@ def request_log_page(
         else f"/admin/libraries/{quote(actor[0], safe='')}/callers/"
         f"{quote(actor[1], safe='')}/requests"
     )
-    switch_path = (
-        base_path
-        if before_cursor is None
-        else f"{base_path}?before={quote(before_cursor, safe='')}"
+    filter_items = filters.query_items()
+    switch_items = filter_items + (("before", before_cursor),) if before_cursor else filter_items
+    switch_path = base_path + (f"?{urlencode(switch_items)}" if switch_items else "")
+    available_routes = sorted(
+        {route for _, route in route_options} | ({filters.route} if filters.route else set())
+    )
+    route_choices = [f'<option value="">{localize(locale, "All routes")}</option>']
+    route_choices.extend(
+        f'<option value="{escape(route, quote=True)}"'
+        + (" selected" if route == filters.route else "")
+        + f">{escape(route)}</option>"
+        for route in available_routes
+    )
+    method_choices = [f'<option value="">{localize(locale, "All methods")}</option>']
+    method_choices.extend(
+        f'<option value="{method}"'
+        + (" selected" if method == filters.method else "")
+        + f">{method}</option>"
+        for method in ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "OTHER")
+    )
+    form = (
+        f'<form method="get" action="{escape(base_path, quote=True)}" class="card">'
+        f"<h2>{localize(locale, 'Filter requests')}</h2>"
+        f'<label>{localize(locale, "Endpoint")} <select name="route">'
+        f"{''.join(route_choices)}</select></label>"
+        f"<label>{localize(locale, 'HTTP method')} "
+        f'<select name="method">{"".join(method_choices)}</select></label>'
+        f"<label>{localize(locale, 'Status code or interrupted')} "
+        f'<input name="status" maxlength="11" value="{escape(filters.status or "", quote=True)}" '
+        'placeholder="200 / interrupted"></label>'
+        f"<label>{localize(locale, 'From (inclusive, RFC 3339)')} "
+        f'<input name="since" maxlength="35" value="{escape(filters.since or "", quote=True)}" '
+        'placeholder="2026-01-01T00:00:00Z"></label>'
+        f"<label>{localize(locale, 'Until (exclusive, RFC 3339)')} "
+        f'<input name="until" maxlength="35" value="{escape(filters.until or "", quote=True)}" '
+        'placeholder="2026-02-01T00:00:00Z"></label>'
+        f'<button type="submit">{localize(locale, "Apply filters")}</button> '
+        f'<a href="{escape(base_path, quote=True)}">{localize(locale, "Clear filters")}</a>'
+        "</form>"
     )
     rows: list[str] = []
     for item in items:
@@ -1223,9 +1272,10 @@ def request_log_page(
         else f"<p>{localize(locale, 'No API requests in the retained period.')}</p>"
     )
     if next_cursor is not None:
+        next_items = (*filter_items, ("before", next_cursor))
         body += (
             f'<nav aria-label="{localize(locale, "API requests")}">'
-            f'<a href="{escape(base_path, quote=True)}?before={escape(next_cursor, quote=True)}">'
+            f'<a href="{escape(base_path + "?" + urlencode(next_items), quote=True)}">'
             f"{localize(locale, 'Older requests')}</a></nav>"
         )
     title = "API requests" if actor is None else "API requests by this identity"
@@ -1236,7 +1286,32 @@ def request_log_page(
         switch_path,
         f'<p class="section-help">'
         f"{localize(locale, _REQUEST_LOG_HELP)}"
-        f'</p><section class="card">{body}</section>',
+        f'</p>{form}<section class="card">{body}</section>',
+        current_section="requests",
+    )
+
+
+def request_log_filter_error_page(
+    csrf_token: str,
+    *,
+    locale: AdminLocale = "en",
+    actor: tuple[str, str] | None = None,
+) -> str:
+    base_path = (
+        "/admin/requests"
+        if actor is None
+        else f"/admin/libraries/{quote(actor[0], safe='')}/callers/"
+        f"{quote(actor[1], safe='')}/requests"
+    )
+    return _browser_document(
+        csrf_token,
+        locale,
+        localize(locale, "API requests"),
+        base_path,
+        '<section class="card"><p role="alert">'
+        f"{localize(locale, 'Invalid request-log filters or cursor.')}</p>"
+        f'<p><a href="{escape(base_path, quote=True)}">'
+        f"{localize(locale, 'Start a new request-log search')}</a></p></section>",
         current_section="requests",
     )
 

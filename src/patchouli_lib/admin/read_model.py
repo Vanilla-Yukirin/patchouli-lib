@@ -21,6 +21,7 @@ from patchouli_lib.admin.move_receipts import (
     MasterMoveReceiptRow,
     validate_master_move_receipt,
 )
+from patchouli_lib.admin.request_log_filters import RequestLogFilters
 from patchouli_lib.auth.models import (
     AgentTokenValue,
     AuditEvent,
@@ -59,25 +60,6 @@ _PAGE_HISTORY_SIZE = 20
 _ACTIVITY_PAGE_SIZE = 20
 _BOOK_PAGE_SIZE = 20
 _REQUEST_LOG_PAGE_SIZE = 20
-
-
-def _parse_request_log_cursor(value: str | None) -> tuple[int, int] | None:
-    if value is None:
-        return None
-    if len(value) > 39:
-        raise ValueError("Invalid request log cursor.")
-    timestamp, separator, row_id = value.partition(":")
-    if separator != ":" or not timestamp or not row_id:
-        raise ValueError("Invalid request log cursor.")
-    if any(
-        not item.isascii() or not item.isdecimal() or (len(item) > 1 and item[0] == "0")
-        for item in (timestamp, row_id)
-    ):
-        raise ValueError("Invalid request log cursor.")
-    parsed_timestamp, parsed_id = int(timestamp), int(row_id)
-    if parsed_timestamp > (1 << 63) - 1 or not 1 <= parsed_id <= (1 << 63) - 1:
-        raise ValueError("Invalid request log cursor.")
-    return parsed_timestamp, parsed_id
 
 
 def _lower_hex_id(value: str) -> bool:
@@ -353,7 +335,7 @@ class RequestLogItem:
 @dataclass(frozen=True)
 class RequestLogPage:
     items: tuple[RequestLogItem, ...]
-    next_cursor: str | None
+    next_position: tuple[int, int] | None
 
 
 @dataclass(frozen=True)
@@ -415,11 +397,14 @@ class AdminReadModel:
         self._engine = engine
 
     def request_log_page(
-        self, *, before: str | None = None, actor: tuple[str, str] | None = None
+        self,
+        *,
+        filters: RequestLogFilters,
+        before: tuple[int, int] | None = None,
+        actor: tuple[str, str] | None = None,
     ) -> RequestLogPage:
         """Read a bounded keyset page; authentication is enforced by the router."""
 
-        cursor = _parse_request_log_cursor(before)
         retained_from = max(0, time_ns() // 1_000 - 30 * 86_400_000_000)
         statement = select(
             RequestLogRecord.id,
@@ -439,13 +424,28 @@ class AdminReadModel:
                 RequestLogRecord.home_library_id == actor[0],
                 RequestLogRecord.caller_id == actor[1],
             )
-        if cursor is not None:
+        if filters.route is not None:
+            statement = statement.where(RequestLogRecord.route_template == filters.route)
+        if filters.method is not None:
+            statement = statement.where(RequestLogRecord.method == filters.method)
+        if filters.status == "interrupted":
+            statement = statement.where(RequestLogRecord.completion == "interrupted")
+        elif filters.status is not None:
+            statement = statement.where(
+                RequestLogRecord.completion == "completed",
+                RequestLogRecord.status_code == int(filters.status),
+            )
+        if filters.since_us is not None:
+            statement = statement.where(RequestLogRecord.occurred_at >= filters.since_us)
+        if filters.until_us is not None:
+            statement = statement.where(RequestLogRecord.occurred_at < filters.until_us)
+        if before is not None:
             statement = statement.where(
                 or_(
-                    RequestLogRecord.occurred_at < cursor[0],
+                    RequestLogRecord.occurred_at < before[0],
                     and_(
-                        RequestLogRecord.occurred_at == cursor[0],
-                        RequestLogRecord.id < cursor[1],
+                        RequestLogRecord.occurred_at == before[0],
+                        RequestLogRecord.id < before[1],
                     ),
                 )
             )
@@ -457,10 +457,30 @@ class AdminReadModel:
         visible = rows[:_REQUEST_LOG_PAGE_SIZE]
         return RequestLogPage(
             tuple(RequestLogItem(**row) for row in visible),
-            f"{visible[-1]['occurred_at']}:{visible[-1]['id']}"
+            (visible[-1]["occurred_at"], visible[-1]["id"])
             if len(rows) > _REQUEST_LOG_PAGE_SIZE
             else None,
         )
+
+    def request_log_routes(
+        self, *, actor: tuple[str, str] | None = None
+    ) -> tuple[tuple[str, str], ...]:
+        """List only retained, actually recorded method/template combinations."""
+
+        retained_from = max(0, time_ns() // 1_000 - 30 * 86_400_000_000)
+        statement = (
+            select(RequestLogRecord.method, RequestLogRecord.route_template)
+            .distinct()
+            .where(RequestLogRecord.occurred_at >= retained_from)
+        )
+        if actor is not None:
+            statement = statement.where(
+                RequestLogRecord.home_library_id == actor[0],
+                RequestLogRecord.caller_id == actor[1],
+            )
+        statement = statement.order_by(RequestLogRecord.method, RequestLogRecord.route_template)
+        with self._engine.connect() as connection:
+            return tuple((method, route) for method, route in connection.execute(statement))
 
     def list_libraries(self) -> tuple[LibraryItem, ...]:
         with self._engine.connect() as connection:
