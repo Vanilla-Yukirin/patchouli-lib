@@ -377,6 +377,26 @@ operator 仍按原有权限使用此入口。列表可用 `limit`、`offset` 分
 `next_offset` 为 `null` 表示没有下一页。关联和解除关联没有请求体，返回
 `{"changed":true}` 或 `{"changed":false}`；重复操作不会产生第二条关联。
 
+### 上传后给 Page 添加多个标签
+
+文件上传与打标签是独立请求，不必为了标签重新上传文件。使用同时拥有目标 Library
+`read` 与 `write` 的设备 Token，先保存上传响应的 `page_id`，再按以下顺序操作：
+
+1. 对每个所需名称调用 `POST /api/v1/libraries/{library_id}/tags`，例如
+   `{"name":"开发"}`、`{"name":"归档"}`；保存响应 `tag_id`。新名称返回 201，
+   同一规范化名称返回已有 Tag 和 200，不创建同名副本。
+2. 对每个 Tag 调用上表的 Page Tag `PUT`，不带请求体。这是追加关联，不会覆盖
+   Page 已有的其他标签；一个 Page 可以关联多个 Tag。
+3. 用 Page Tag `GET` 核对结果。若中途失败，保留已上传的 Page，只重试未完成的
+   标签请求；重复创建／关联不会产生同名标签或重复关联，不要重新创建 Page。
+4. 搜索时向 `POST /api/v1/search` 传
+   `{"tags_any":[{"library_id":"目标库 ID","tag_id":"标签 ID"}]}`，多个标签
+   放在同一数组中表示命中任意一个。解除关联用 `DELETE`；不会删除 Tag 定义、
+   Page 文件或历史版本。标签变化不生成文件内容的新 Revision。
+
+以上请求不构成一次整体事务：上传成功但标签失败时，应分别报告状态。暂不自动推断
+或推荐标签；使用用户指定、任务明确要求或已确认分类中的标签。
+
 旧 Section 模式下，Agent 列 Tag 与列 Tag 下 Page 只会看到同时获
 `section:query`、`page:read` 授权的 Section 中仍有效的 Page；列指定 Page 的 Tag
 需要 `page:read`，修改关联还需要 `archive:write`。Library 模式下按目标知识库的

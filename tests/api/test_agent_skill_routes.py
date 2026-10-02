@@ -10,9 +10,11 @@ from unittest.mock import patch
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
+from sqlalchemy import insert
 
 from patchouli_lib import __version__
 from patchouli_lib.app import create_app
+from patchouli_lib.auth.models import CredentialLibraryGrant, CredentialLibraryPolicy
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import CallerKind, NewCaller, NewSectionGrant, SectionAction
 from patchouli_lib.auth.service import CredentialIssuer
@@ -21,9 +23,12 @@ from patchouli_lib.database import immediate_transaction
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import LibraryStructureSeed
 from patchouli_lib.library.service import LibrarySeedService
+from patchouli_lib.search.index_v2 import rebuild_search_index
 
 
-def _client_and_token(tmp_path: Path) -> tuple[TestClient, str, str, str, str]:
+def _client_and_token(
+    tmp_path: Path, *, library_grants: bool = False
+) -> tuple[TestClient, str, str, str, str]:
     database_url = f"sqlite:///{(tmp_path / 'skill.db').as_posix()}"
     settings = Settings.model_validate(
         {
@@ -79,6 +84,23 @@ def _client_and_token(tmp_path: Path) -> tuple[TestClient, str, str, str, str]:
                     created_at=now,
                 )
             )
+        if library_grants:
+            identity = {
+                "credential_id": "5" * 32,
+                "caller_id": caller.id,
+                "home_library_id": library.library.id,
+                "created_at": now,
+            }
+            connection.execute(
+                insert(CredentialLibraryPolicy), {**identity, "mode": "library_grants"}
+            )
+            for permission in ("read", "write"):
+                connection.execute(
+                    insert(CredentialLibraryGrant),
+                    {**identity, "target_library_id": library.library.id, "action": permission},
+                )
+    if library_grants:
+        rebuild_search_index(engine)
     return TestClient(app), token, library.library.id, library.section.id, library.book.id
 
 
@@ -147,7 +169,9 @@ def test_skill_file_allowlist_rejects_unlisted_paths(tmp_path: Path) -> None:
 def test_ai_native_http_path_reaches_multi_file_create_and_exact_revision_readback(
     tmp_path: Path,
 ) -> None:
-    client, token, library_id, section_id, book_id = _client_and_token(tmp_path)
+    client, token, library_id, section_id, book_id = _client_and_token(
+        tmp_path, library_grants=True
+    )
     headers = {"Authorization": f"Bearer {token}"}
     identity = client.get("/api/v1/auth/whoami", headers=headers)
     capabilities = client.get("/api/v1/capabilities", headers=headers)
@@ -208,3 +232,44 @@ def test_ai_native_http_path_reaches_multi_file_create_and_exact_revision_readba
     assert replay.status_code == 201
     assert replay.headers["Idempotency-Replayed"] == "true"
     assert replay.json()["page_id"] == body["page_id"]
+
+    # The index was ready before upload: Tag changes must be searchable without
+    # rebuilding, re-uploading files, or creating another content Revision.
+    directory = f"/api/v1/libraries/{library_id}/tags"
+    page_tags = f"/api/v1/libraries/{library_id}/sections/{section_id}/pages/{body['page_id']}/tags"
+    tag_ids = []
+    for name in ("开发", "Archive", "未关联"):
+        tag = client.post(directory, headers=headers, json={"name": name})
+        assert tag.status_code == 201, tag.text
+        tag_ids.append(tag.json()["tag_id"])
+    reused = client.post(directory, headers=headers, json={"name": "ARCHIVE"})
+    assert reused.status_code == 200
+    assert reused.json()["tag_id"] == tag_ids[1]
+    for tag_id in tag_ids[:2]:
+        attached = client.put(f"{page_tags}/{tag_id}", headers=headers)
+        assert attached.status_code == 200 and attached.json() == {"changed": True}
+        repeated = client.put(f"{page_tags}/{tag_id}", headers=headers)
+        assert repeated.status_code == 200 and repeated.json() == {"changed": False}
+    listed = client.get(page_tags, headers=headers)
+    assert listed.status_code == 200
+    assert {item["tag_id"] for item in listed.json()["items"]} == set(tag_ids[:2])
+    assert len(listed.json()["items"]) == 2
+
+    def tagged_search(ids: list[str]) -> list[str]:
+        found = client.post(
+            "/api/v1/search",
+            headers=headers,
+            json={"tags_any": [{"library_id": library_id, "tag_id": tag_id} for tag_id in ids]},
+        )
+        assert found.status_code == 200, found.text
+        return [item["page_id"] for item in found.json()["items"]]
+
+    assert tagged_search(tag_ids[1:]) == [body["page_id"]]  # OR, not all Tags required.
+    detached = client.delete(f"{page_tags}/{tag_ids[1]}", headers=headers)
+    assert detached.status_code == 200 and detached.json() == {"changed": True}
+    assert tagged_search(tag_ids[1:]) == []
+    assert tagged_search(tag_ids[:1]) == [body["page_id"]]
+    current = client.get(exact_path.split("/revisions/", 1)[0], headers=headers)
+    assert current.status_code == 200
+    assert current.json()["revision_id"] == body["revision_id"]
+    assert current.json()["snapshot_sha256"] == body["snapshot_sha256"]
