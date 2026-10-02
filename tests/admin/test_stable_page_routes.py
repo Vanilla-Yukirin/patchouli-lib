@@ -56,7 +56,7 @@ def test_stable_current_and_exact_history_keep_deep_writes_and_receipt_urls(
     before = _counts(browser.engine)
     current = browser.client.get(stable)
     assert current.status_code == 200 and "location" not in current.headers
-    assert "# Later stable version" in current.text
+    assert "<h1>Later stable version</h1>" in current.text
     assert f'href="{stable}/revisions/1"' in current.text
     assert f'action="{deep}"' in current.text
     assert f'action="{deep}/occurrence"' in current.text
@@ -66,11 +66,14 @@ def test_stable_current_and_exact_history_keep_deep_writes_and_receipt_urls(
     assert f'href="{deep}/revisions/2/files/content.md"' in current.text
     historical = browser.client.get(stable + "/revisions/1?before_revision_number=2")
     assert historical.status_code == 200 and "location" not in historical.headers
-    assert "# Synthetic content" in historical.text
-    assert "# Later stable version" not in historical.text
+    assert "<h1>Synthetic content</h1>" in historical.text
+    assert "Later stable version" not in historical.text
     assert f'href="{stable}"' in historical.text
     assert f'href="{stable}/revisions/1?before_revision_number=2"' in historical.text
-    assert f'href="{stable}/revisions/1?before_revision_number=3"' in historical.text
+    assert (
+        f'href="{stable}/revisions/1?before_revision_number=3&amp;preview_file=content.md"'
+        in historical.text
+    )
     assert f'href="{deep}/revisions/1/files/content.md"' in historical.text
     assert historical.headers["cache-control"] == "no-store, max-age=0"
     assert _counts(browser.engine) == before
@@ -103,7 +106,7 @@ def test_stable_invalid_versions_scope_and_deleted_pages_do_not_expose_content(
     for path in paths:
         response = browser.client.get(path)
         assert response.status_code == 404
-        assert "# Synthetic content" not in response.text
+        assert "Synthetic content" not in response.text
         assert "Synthetic Library" not in response.text
     AdminActionService(browser.engine).delete_page_as_master(
         browser.library_id,
@@ -119,7 +122,7 @@ def test_stable_invalid_versions_scope_and_deleted_pages_do_not_expose_content(
     for path in (stable, stable + "/revisions/1"):
         response = browser.client.get(path)
         assert response.status_code == 404
-        assert "# Synthetic content" not in response.text and "payload.bin" not in response.text
+        assert "Synthetic content" not in response.text and "payload.bin" not in response.text
 
 
 def test_stable_navigation_rejects_anonymous_and_current_legacy_sessions(
@@ -226,7 +229,7 @@ def test_stable_read_keeps_one_snapshot_across_concurrent_title_change_and_rotat
         response = browser.client.get(stable)
     assert response.status_code == 200 and len(projected) == 1
     assert "Concurrent new title" not in response.text
-    assert "# Synthetic content" in response.text
+    assert "<h1>Synthetic content</h1>" in response.text
     rejected = browser.client.get(stable)
     assert rejected.status_code == 303 and rejected.headers["location"] == "/admin/login"
     login = browser.client.post(

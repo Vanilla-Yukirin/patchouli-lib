@@ -75,6 +75,47 @@ class AdminFileDownloadService:
             finally:
                 connection.rollback()
 
+    def get_file_by_id(
+        self,
+        library_id: str,
+        page_id: str,
+        revision_number: int,
+        filename: str,
+        *,
+        authorize: Callable[[Connection], bool],
+    ) -> RevisionFileRead | None:
+        """Resolve a live Page's current location for a master preview read.
+
+        The exact Revision remains fixed across same-Library moves. Like the
+        original download, admission and complete verification share one BEGIN.
+        The router must require a current master session in ``authorize``.
+        """
+        with self._engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN")
+            try:
+                if not authorize(connection):
+                    raise AuthenticationError
+                if type(library_id) is not str or _OPAQUE_ID.fullmatch(library_id) is None:
+                    return None
+                try:
+                    validate_page_id(page_id)
+                except (InvalidPageIdError, TypeError, ValueError):
+                    return None
+                page = RetrievalRepository(connection).get_page_by_id(library_id, page_id)
+                if page is None:
+                    return None
+                return self._get_file(
+                    connection,
+                    library_id,
+                    page.section_id,
+                    page.book_id,
+                    page_id,
+                    revision_number,
+                    filename,
+                )
+            finally:
+                connection.rollback()
+
     @staticmethod
     def _get_file(
         connection: Connection,

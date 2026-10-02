@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from html import escape
 from typing import Literal
@@ -32,6 +32,15 @@ from patchouli_lib.identifiers import canonical_utc_wire
 from patchouli_lib.search.service_v2 import SearchPageV2
 
 AdminLocale = Literal["en", "zh-CN"]
+
+
+@dataclass(frozen=True, slots=True)
+class MarkdownPreview:
+    filenames: tuple[str, ...]
+    selected_filename: str | None
+    html: str | None = field(repr=False)
+
+
 _TAG_TOKEN_HELP = (
     "Enter this Library's Operator token for each Tag change. "
     "It is not saved in the browser session."
@@ -247,6 +256,9 @@ small { color: #526259; }
 .meta { color: #526259; font-size: .9rem; }
 .markdown-preview { white-space: pre-wrap; overflow-wrap: anywhere; }
 .revision-files code { overflow-wrap: anywhere; }
+.rendered-markdown { white-space: normal; overflow-wrap: anywhere; }
+.rendered-markdown img { max-width: 100%; height: auto; }
+.rendered-markdown pre { overflow-x: auto; }
 .revision-history [aria-current="true"] { border-color: #2f6845; }
 .revision-history .selected-marker { color: #355f43; font-weight: 700; }
 .interface-list code { overflow-wrap: anywhere; }
@@ -2469,6 +2481,7 @@ def page_preview_page(
     error: bool = False,
     master_mode: bool = False,
     navigation_base: str | None = None,
+    markdown_preview: MarkdownPreview | None = None,
 ) -> str:
     library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
     section_path = f"{library_path}/sections/{escape(view.section.id, quote=True)}"
@@ -2506,23 +2519,88 @@ def page_preview_page(
     selected_path = (
         navigation if current else f"{navigation}/revisions/{view.selected_revision_number}"
     )
+    if markdown_preview is not None:
+        selected_path = f"{navigation}/revisions/{view.selected_revision_number}"
     latest_path = (
         navigation
         if current
         else f"{selected_path}?before_revision_number={view.page.revision_number + 1}"
     )
+    if markdown_preview is not None:
+        latest_path = f"{selected_path}?before_revision_number={view.page.revision_number + 1}"
+    if markdown_preview is not None and markdown_preview.selected_filename is not None:
+        file_query = "preview_file=" + quote(markdown_preview.selected_filename, safe="")
+        latest_path += ("&" if "?" in latest_path else "?") + file_query
+        older_path = (
+            f"{selected_path}?before_revision_number={view.older_revisions_before}&{file_query}"
+        )
+    else:
+        older_path = f"{selected_path}?before_revision_number={view.older_revisions_before}"
     history_navigation = (
-        f'<a href="{selected_path}?before_revision_number={view.older_revisions_before}">'
-        f"{localize(locale, 'Older revisions')}</a>"
+        f'<a href="{escape(older_path, quote=True)}">{localize(locale, "Older revisions")}</a>'
         if view.older_revisions_before is not None
         else ""
     ) + (
-        f' <a href="{latest_path}">{localize(locale, "Latest revisions")}</a>'
+        f' <a href="{escape(latest_path, quote=True)}">{localize(locale, "Latest revisions")}</a>'
         if not view.history_is_latest
         else ""
     )
     heading = "Current Markdown" if current else "Markdown body"
     no_preview = localize(locale, "No safe Markdown preview is available for this version.")
+    preview_body = ""
+    if markdown_preview is None:
+        preview_body = (
+            f"<h2>{localize(locale, heading)}</h2>"
+            f'<pre class="markdown-preview">{escape(view.markdown)}</pre>'
+            if view.markdown is not None
+            else f"<p>{no_preview}</p>"
+        )
+    browser_path = selected_path + history_query
+    if markdown_preview is not None:
+        options = "".join(
+            f'<option value="{escape(name, quote=True)}"'
+            + (" selected" if name == markdown_preview.selected_filename else "")
+            + f">{escape(name)}</option>"
+            for name in markdown_preview.filenames
+        )
+        label = "选择 Markdown 文件" if locale == "zh-CN" else "Choose Markdown file"
+        button = "预览" if locale == "zh-CN" else "Preview"
+        selector = (
+            f'<form method="get" action="{selected_path}">'
+            f'<label for="preview-file">{label}</label>'
+            f'<select id="preview-file" name="preview_file">{options}</select>'
+            f'<input type="hidden" name="lang" value="{locale}">'
+            + (
+                f'<input type="hidden" name="before_revision_number" '
+                f'value="{view.history_before_revision_number}">'
+                if not view.history_is_latest
+                else ""
+            )
+            + f'<button type="submit">{button}</button></form>'
+            if options
+            else ""
+        )
+        selected_label = (
+            f"<p><code>{escape(markdown_preview.selected_filename)}</code></p>"
+            if markdown_preview.selected_filename is not None
+            else ""
+        )
+        preview_body = (
+            f"<h2>{localize(locale, heading)}</h2>"
+            + selector
+            + selected_label
+            + (
+                '<div class="markdown-preview rendered-markdown">'
+                + markdown_preview.html
+                + "</div>"
+                if markdown_preview.html is not None
+                else f"<p>{no_preview}</p>"
+            )
+        )
+        if markdown_preview.selected_filename is not None:
+            browser_path += ("&" if "?" in browser_path else "?") + (
+                "preview_file=" + quote(markdown_preview.selected_filename, safe="")
+            )
     body = (
         f'<p class="meta">{localize(locale, "Page type")}: {escape(view.page.page_type)} · '
         f"{localize(locale, 'Occurred')}: {_time(view.page.occurred_at)} · "
@@ -2535,12 +2613,7 @@ def page_preview_page(
             if current
             else f'<p><a href="{navigation}">{localize(locale, "Back to current version")}</a></p>'
         )
-        + (
-            f"<h2>{localize(locale, heading)}</h2>"
-            f'<pre class="markdown-preview">{escape(view.markdown)}</pre>'
-            if view.markdown is not None
-            else f"<p>{no_preview}</p>"
-        )
+        + preview_body
         + f"<h2>{localize(locale, 'Files in this version')}</h2>"
         f'<ul class="item-list revision-files">{files}</ul>'
         f"<h2>{localize(locale, 'Version history')}</h2>"
@@ -2552,6 +2625,13 @@ def page_preview_page(
         )
     )
     if master_mode:
+        if markdown_preview is None:
+            preview_label = "安全 Markdown 预览" if locale == "zh-CN" else "Safe Markdown preview"
+            body += (
+                f'<p><a class="button" href="{library_path}/pages/'
+                f'{escape(view.page.id, quote=True)}/revisions/{view.selected_revision_number}">'
+                f"{preview_label}</a></p>"
+            )
         restore_label = "恢复此版本" if locale == "zh-CN" else "Restore this revision"
         body += (
             f'<p><a class="button" href="{base}/revisions/'
@@ -2649,7 +2729,7 @@ def page_preview_page(
         csrf_token,
         locale,
         view.page.title,
-        selected_path + history_query,
+        browser_path,
         body,
         crumbs=(
             (localize(locale, "Libraries"), "/admin/libraries"),

@@ -42,6 +42,10 @@ from patchouli_lib.admin.contracts import (
 )
 from patchouli_lib.admin.file_download import AdminFileDownloadService
 from patchouli_lib.admin.file_set_routes import create_master_file_set_router
+from patchouli_lib.admin.markdown_preview import (
+    MarkdownPreviewUnavailableError,
+    render_markdown_preview,
+)
 from patchouli_lib.admin.master_audit import MasterAuditRepository
 from patchouli_lib.admin.master_setup import (
     MasterSetupAuthorizationError,
@@ -58,6 +62,7 @@ from patchouli_lib.admin.pages import (
     REVEAL_SCRIPT,
     STYLESHEET,
     AdminLocale,
+    MarkdownPreview,
     SearchFormValues,
     action_result_page,
     agent_grants_page,
@@ -87,6 +92,7 @@ from patchouli_lib.admin.pages import (
     trash_directory_page,
 )
 from patchouli_lib.admin.passwords import password_matches
+from patchouli_lib.admin.raster_preview import RasterPreviewUnavailableError, build_raster_preview
 from patchouli_lib.admin.read_model import AdminReadModel, LibraryItem, TagItem
 from patchouli_lib.admin.service import (
     AdminActionService,
@@ -297,10 +303,13 @@ def create_admin_router(
         locale: AdminLocale,
         status_code: int = 200,
         allow_self_script: bool = False,
+        allow_self_images: bool = False,
     ) -> HTMLResponse:
         headers = {**_SECURITY_HEADERS, "Content-Language": locale}
         if allow_self_script:
             headers["Content-Security-Policy"] += "; script-src 'self'; connect-src 'self'"
+        if allow_self_images:
+            headers["Content-Security-Policy"] += "; img-src 'self'"
         return HTMLResponse(
             content,
             status_code=status_code,
@@ -2116,7 +2125,7 @@ def create_admin_router(
         except ValueError:
             before = 0
         try:
-            view = read_model.get_page_by_id(
+            preview_read = read_model.get_page_preview_by_id(
                 library_id,
                 page_id,
                 number,
@@ -2130,7 +2139,74 @@ def create_admin_router(
             _clear_cookie(redirect_response, secure=secure_cookie(request))
             remember_requested_locale(redirect_response, request)
             return redirect_response
+        except Exception:
+            return PlainTextResponse(
+                "无法预览此版本。" if locale == "zh-CN" else "The version could not be previewed.",
+                status_code=500,
+                headers={**_SECURITY_HEADERS, "Content-Language": locale},
+            )
         assert isinstance(session, MasterAdminSession)
+        view = None if preview_read is None else preview_read.view
+        markdown_preview: MarkdownPreview | None = None
+        if preview_read is not None:
+            manifest = preview_read.snapshot.manifest
+            choices = tuple(
+                entry.name
+                for entry in manifest.files
+                if entry.name.casefold().endswith((".md", ".markdown"))
+            )
+            values = request.query_params.getlist("preview_file")
+            if len(values) > 1 or (values and values[0] not in choices):
+                return html(
+                    browser_not_found_page(session.csrf_token, locale=locale),
+                    locale=locale,
+                    status_code=404,
+                )
+            selected = (
+                values[0]
+                if values
+                else "content.md"
+                if "content.md" in choices
+                else choices[0]
+                if choices
+                else None
+            )
+            rendered: str | None = None
+            if selected is not None:
+                source = next(entry.content for entry in manifest.files if entry.name == selected)
+                assert view is not None
+                # These resolvers are bound to one already verified immutable
+                # Revision. Neither rendering nor raster decoding holds its BEGIN.
+                stable = (
+                    f"/admin/libraries/{quote(view.library.id, safe='')}"
+                    f"/pages/{quote(view.page.id, safe='')}"
+                    f"/revisions/{preview_read.snapshot.revision_number}"
+                )
+                deep = (
+                    f"/admin/libraries/{quote(view.library.id, safe='')}"
+                    f"/sections/{quote(view.section.id, safe='')}"
+                    f"/books/{quote(view.book.id, safe='')}"
+                    f"/pages/{quote(view.page.id, safe='')}"
+                    f"/revisions/{preview_read.snapshot.revision_number}/files"
+                )
+                try:
+                    rendered = render_markdown_preview(
+                        source,
+                        filenames=tuple(entry.name for entry in manifest.files),
+                        image_url=lambda name: stable + "/preview-images/" + quote(name, safe=""),
+                        download_url=lambda name: deep + "/" + quote(name, safe=""),
+                    )
+                except MarkdownPreviewUnavailableError:
+                    pass  # A preview budget/encoding rejection does not block download.
+                except Exception:
+                    return PlainTextResponse(
+                        "无法预览此版本。"
+                        if locale == "zh-CN"
+                        else "The version could not be previewed.",
+                        status_code=500,
+                        headers={**_SECURITY_HEADERS, "Content-Language": locale},
+                    )
+            markdown_preview = MarkdownPreview(choices, selected, rendered)
         response = html(
             browser_not_found_page(session.csrf_token, locale=locale)
             if view is None
@@ -2140,9 +2216,11 @@ def create_admin_router(
                 locale=locale,
                 master_mode=True,
                 navigation_base=f"/admin/libraries/{library_id}/pages/{page_id}",
+                markdown_preview=markdown_preview,
             ),
             locale=locale,
             status_code=404 if view is None else 200,
+            allow_self_images=view is not None,
         )
         remember_requested_locale(response, request)
         return response
@@ -2156,6 +2234,75 @@ def create_admin_router(
         request: Request, library_id: str, page_id: str, revision_number: str
     ) -> Response:
         return stable_page_response(request, library_id, page_id, revision_number)
+
+    @router.get(
+        "/libraries/{library_id}/pages/{page_id}/revisions/{revision_number}"
+        "/preview-images/{filename:path}"
+    )
+    async def stable_page_image(
+        request: Request, library_id: str, page_id: str, revision_number: str, filename: str
+    ) -> Response:
+        locale = locale_for(request)
+        session: AdminSession | None = None
+        media_headers = {
+            **_SECURITY_HEADERS,
+            "Content-Language": locale,
+            "Cross-Origin-Resource-Policy": "same-origin",
+        }
+
+        def authorize(connection: Connection) -> bool:
+            nonlocal session
+            session = session_for_connection(request, connection)
+            return isinstance(session, MasterAdminSession)
+
+        number = (
+            int(revision_number)
+            if 1 <= len(revision_number) <= 19
+            and revision_number.isascii()
+            and revision_number.isdecimal()
+            and revision_number[0] != "0"
+            else 0
+        )
+        try:
+            file = await run_in_threadpool(
+                file_download.get_file_by_id,
+                library_id,
+                page_id,
+                number,
+                filename,
+                authorize=authorize,
+            )
+        except AuthenticationError:
+            if session is not None:
+                response: Response = forbidden(request, "A master session is required.")
+            else:
+                response = redirect("/admin/login")
+                _clear_cookie(response, secure=secure_cookie(request))
+                remember_requested_locale(response, request)
+            response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+            return response
+        except Exception:
+            return PlainTextResponse(
+                "无法预览此图片。" if locale == "zh-CN" else "The image could not be previewed.",
+                status_code=500,
+                headers=media_headers,
+            )
+        unavailable = "此图片无法预览。" if locale == "zh-CN" else "Image preview is unavailable."
+        if file is None:
+            return PlainTextResponse(unavailable, status_code=404, headers=media_headers)
+        try:
+            # get_file_by_id has already closed its complete authorization/read
+            # snapshot. Only immutable verified bytes reach the bounded decoder.
+            raster = await run_in_threadpool(build_raster_preview, file.content)
+        except RasterPreviewUnavailableError:
+            return PlainTextResponse(unavailable, status_code=404, headers=media_headers)
+        except Exception:
+            return PlainTextResponse(unavailable, status_code=500, headers=media_headers)
+        return Response(
+            raster.content,
+            media_type=raster.media_type,
+            headers={**media_headers, "Content-Disposition": "inline"},
+        )
 
     @router.get("/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages/{page_id}")
     def page_detail(

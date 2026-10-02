@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from time import time_ns
 from typing import Any
@@ -45,6 +45,13 @@ from patchouli_lib.content.service import page_current_etag
 from patchouli_lib.identifiers.page_ids import InvalidPageIdError, validate_page_id
 from patchouli_lib.library.models import Book, Library, Section
 from patchouli_lib.request_log.models import RequestLogRecord
+from patchouli_lib.retrieval.file_set_read import (
+    FileSetReadNotFoundError,
+    FileSetReadPersistenceError,
+    VerifiedRevisionSnapshot,
+    read_verified_revision_snapshot,
+)
+from patchouli_lib.retrieval.repository import RetrievalRepository
 from patchouli_lib.tags.models import PageTag, Tag
 
 _MAX_FILE_SET_PREVIEW_BYTES = 64 * 1024
@@ -277,6 +284,18 @@ class PageView:
     history_is_latest: bool
     tag_choices: tuple[PageTagChoice, ...]
     current_etag: str
+
+
+@dataclass(frozen=True, slots=True)
+class PagePreviewRead:
+    """An authorized exact-version projection, ready for transaction-free rendering."""
+
+    view: PageView
+    snapshot: VerifiedRevisionSnapshot = field(repr=False)
+
+
+class AdminPagePreviewPersistenceError(RuntimeError):
+    """A complete stored Revision failed verification; no partial preview is safe."""
 
 
 @dataclass(frozen=True)
@@ -1280,6 +1299,65 @@ class AdminReadModel:
                     revision_number,
                     before_revision_number,
                 )
+            finally:
+                connection.rollback()
+
+    def get_page_preview_by_id(
+        self,
+        library_id: str,
+        page_id: str,
+        revision_number: int | None = None,
+        before_revision_number: int | None = None,
+        *,
+        authorize: Callable[[Connection], bool],
+    ) -> PagePreviewRead | None:
+        """Admit a master session and verify all selected-version bytes in one view.
+
+        The callback must use this connection without ending its transaction.
+        Rendering and raster decoding belong after this method returns.
+        The older metadata/plain-preview methods intentionally remain unchanged.
+        """
+        with self._engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN")
+            try:
+                if not authorize(connection):
+                    raise AuthenticationError
+                if not _lower_hex_id(library_id):
+                    return None
+                try:
+                    validate_page_id(page_id)
+                except (InvalidPageIdError, TypeError, ValueError):
+                    return None
+                page = RetrievalRepository(connection).get_page_by_id(library_id, page_id)
+                if page is None:
+                    return None
+                view = self._get_page(
+                    connection,
+                    library_id,
+                    page.section_id,
+                    page.book_id,
+                    page_id,
+                    revision_number,
+                    before_revision_number,
+                )
+                if view is None:
+                    return None
+                selected_id = connection.scalar(
+                    select(Revision.revision_id).where(
+                        Revision.library_id == library_id,
+                        Revision.page_uid == page.page_uid,
+                        Revision.revision_number == view.selected_revision_number,
+                    )
+                )
+                if selected_id is None:
+                    raise AdminPagePreviewPersistenceError
+                try:
+                    snapshot = read_verified_revision_snapshot(connection, page, selected_id)
+                except (FileSetReadNotFoundError, FileSetReadPersistenceError):
+                    raise AdminPagePreviewPersistenceError from None
+                if snapshot.revision_number != view.selected_revision_number:
+                    raise AdminPagePreviewPersistenceError
+                return PagePreviewRead(view, snapshot)
             finally:
                 connection.rollback()
 
