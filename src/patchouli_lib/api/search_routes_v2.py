@@ -16,6 +16,7 @@ from patchouli_lib.api.authentication import BearerAuthentication
 from patchouli_lib.api.contracts import (
     API_V1_PREFIX,
     PROTECTED_CACHE_CONTROL,
+    OpaqueCursor,
     WireModel,
     build_api_v1_path,
 )
@@ -26,6 +27,7 @@ from patchouli_lib.api.errors import (
 )
 from patchouli_lib.api.request_ids import REQUEST_ID_HEADER, get_request_id
 from patchouli_lib.auth.service import AuthenticationError, Clock, utc_microseconds
+from patchouli_lib.retrieval.cursor import CursorCodec, InvalidCursorError
 from patchouli_lib.search.index_v2 import SearchIndexUnavailableError
 from patchouli_lib.search.query_v2 import (
     MAX_QUERY_BODY_BYTES,
@@ -40,6 +42,12 @@ class SearchMatchSourceView(WireModel):
     file_name: str | None
 
 
+class SearchSnippetView(WireModel):
+    file_name: str
+    text: str
+    matched: bool
+
+
 class SearchPageView(WireModel):
     library_id: str
     section_id: str
@@ -51,10 +59,12 @@ class SearchPageView(WireModel):
     title: str
     occurred_at: int
     match_sources: list[SearchMatchSourceView]
+    snippet: SearchSnippetView | None = None
 
 
 class SearchResponse(WireModel):
     items: Annotated[list[SearchPageView], Field(max_length=100)]
+    next_cursor: OpaqueCursor | None = None
 
 
 def _invalid_query() -> ApplicationProblem:
@@ -72,6 +82,15 @@ def _unavailable() -> ApplicationProblem:
         code="search_unavailable",
         title="Service unavailable",
         detail="Search is temporarily unavailable while its index is rebuilt.",
+    )
+
+
+def _invalid_cursor() -> ApplicationProblem:
+    return ApplicationProblem(
+        status_code=400,
+        code="invalid_cursor",
+        title="Invalid cursor",
+        detail="The pagination cursor is invalid or no longer applicable.",
     )
 
 
@@ -101,7 +120,12 @@ async def _read_query(request: Request) -> bytes:
     return bytes(body)
 
 
-def create_search_v2_router(engine: Engine, *, clock: Clock = utc_microseconds) -> APIRouter:
+def create_search_v2_router(
+    engine: Engine,
+    *,
+    clock: Clock = utc_microseconds,
+    cursor_codec: CursorCodec | None = None,
+) -> APIRouter:
     """Create the protected current-Page search endpoint."""
 
     router = APIRouter(prefix=API_V1_PREFIX)
@@ -116,9 +140,18 @@ def create_search_v2_router(engine: Engine, *, clock: Clock = utc_microseconds) 
             query = parse_query_v2_json(await _read_query(request))
         except InvalidSearchQueryV2:
             raise _invalid_query() from None
+        if query.cursor is not None and cursor_codec is None:
+            raise _invalid_cursor()
         try:
             found = await anyio.to_thread.run_sync(
-                partial(search_pages_v2, engine, context, query, clock=clock),
+                partial(
+                    search_pages_v2,
+                    engine,
+                    context,
+                    query,
+                    clock=clock,
+                    cursor_codec=cursor_codec,
+                ),
                 abandon_on_cancel=False,
             )
         except AuthenticationError:
@@ -127,7 +160,12 @@ def create_search_v2_router(engine: Engine, *, clock: Clock = utc_microseconds) 
             raise resource_not_found() from None
         except SearchIndexUnavailableError:
             raise _unavailable() from None
-        response = SearchResponse(items=[_search_page_view(item) for item in found.items])
+        except InvalidCursorError:
+            raise _invalid_cursor() from None
+        response = SearchResponse(
+            items=[_search_page_view(item) for item in found.items],
+            next_cursor=found.next_cursor,
+        )
         return JSONResponse(
             content=response.model_dump(mode="json"),
             headers={

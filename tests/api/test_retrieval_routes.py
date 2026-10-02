@@ -175,7 +175,7 @@ def _assert_problem(response: Any, status: int, code: str) -> None:
     _assert_protected(response)
 
 
-def test_router_exposes_exactly_the_seven_non_search_get_routes(
+def test_router_exposes_exactly_the_non_search_get_routes(
     retrieval_api: RetrievalApi,
 ) -> None:
     router = create_retrieval_router(
@@ -190,6 +190,8 @@ def test_router_exposes_exactly_the_seven_non_search_get_routes(
     }
 
     assert inventory == {
+        ("/api/v1/libraries/{library_id}/sections/{section_id}/pages", ("GET",)),
+        ("/api/v1/libraries/{library_id}/pages/{page_id}", ("GET",)),
         ("/api/v1/sections", ("GET",)),
         ("/api/v1/sections/{section_id}/books", ("GET",)),
         ("/api/v1/sections/{section_id}/pages", ("GET",)),

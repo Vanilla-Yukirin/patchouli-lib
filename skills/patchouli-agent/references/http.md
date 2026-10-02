@@ -68,8 +68,30 @@ GET /api/v1/sections/{section_id}/books?library_id={library_id}&limit=20
 `400 invalid_cursor`，每页仍核对当前授权，旧游标不能绕过撤销。两列表加强了
 Library／精确凭据绑定，因此升级前取得的旧游标须重新从第一页开始。`library_id`
 必须是完整的 32 位小写十六进制 ID，空值、重复参数和未知列表参数返回
-`422 request_validation_failed`。此选择器不适用于 Page 列表或单 Page／Revision
-读取；跨库文件集准确读取请使用下方显式含 `/libraries/{library_id}` 的路径。
+`422 request_validation_failed`。此查询参数不适用于旧 Page 列表或单 Page／Revision
+读取；跨库 Page 发现使用以下显式 Library 路径，准确文件读取仍使用下方文件集路径。
+
+```text
+GET /api/v1/libraries/{library_id}/sections/{section_id}/pages?limit=20
+GET /api/v1/libraries/{library_id}/pages/{page_id}
+```
+
+调用这两个入口前，确认 `capabilities.features` 包含 `retrieval`；它们仅在服务配置
+检索游标签名密钥时注册。只有 `search` 或 `file-sets` 能力不代表这两个入口可用；
+缺少 `retrieval` 时的 404 不能据此判定 Page 不存在或没有读取权限。
+
+新列表按 Page ID 升序，默认 20 项、最多 100 项；以 `next_cursor` 在相同 Library、
+Section、凭据和 `limit` 下继续，末页为 `null`。稳定 Page ID 查询不要求事先知道
+当前 Section；Page 移动后可查得新 Section／Book。两者返回的是当前 Page 元数据，
+包含当前归属及 `current_files_href`、`revision_files_href`，不包含文件字节，也不
+是写入所需的当前强 ETag。下载前继续按返回的准确路径读取清单，并重新核对授权；
+移动、删除或撤销权限可能让旧链接失效。Library 模式需要目标库 `read`（仅有
+`write` 不够）；旧 Section 模式不跨归属库，列表需目标 Section 的
+`section:query`，稳定 Page 查询需其**当前位置**的 `page:read`，不会因为持有旧
+位置授权而扩权。旧模式跨库、明确仅写或目标 Page 不存在时，新发现路径返回 404；
+已撤销凭据返回 401，目标库没有可用凭据也不能据错误码推断其是否存在。旧
+Section／Book 查询参数跨库的 403 行为保持不变。新列表游标不能与旧 Page 列表
+或其他目标、凭据、`limit` 互换；不匹配时返回 `400 invalid_cursor`。
 
 先从 `whoami.library_grants` 确认有 `read` 的目标 Library，再发现其中的 Section／Book。
 仅有 `write` 时，目标 ID 仍须由管理员或其他已授权来源提供并核实，不能扫描或猜造。
@@ -88,7 +110,8 @@ Library／精确凭据绑定，因此升级前取得的旧游标须重新从第�
   "libraries": null,
   "occurred_from_us": null,
   "occurred_before_us": null,
-  "limit": 20
+  "limit": 20,
+  "cursor": null
 }
 ```
 
@@ -99,12 +122,22 @@ Library／精确凭据绑定，因此升级前取得的旧游标须重新从第�
 时间为文档声明时间的 UTC Unix 微秒，范围是左闭右开，任一端可为 `null`。
 关键词、Tag、时间条件不能全部为空；不填条件时改用浏览列表。返回按 Page 排序
 的 `items`，每项携带 Library、Section、Book、Page、准确 Revision ID／序号、
-标题、声明时间与命中字段；首版只返回前 `limit` 项，不提供游标或片段摘要。
+标题、声明时间、命中字段、准确 `revision_files_href` 与可用时的 `snippet`。
+`snippet` 为 `{file_name, text, matched}` 或 `null`：`text` 至多 240 个 Unicode
+字符，是已授权当前版本的**规范化索引文本**，不等同于文件原始字节；二进制独占
+Page 可没有摘录。`matched: false` 表示摘录文本本身未命中（例如标题命中）；
+不要把摘录当完整正文或渲染为可信 HTML／Markdown。启用续页时，页级 `next_cursor`
+为 `null` 表示末页；未配置游标签名密钥时，`null` 只表示不提供续页，不证明结果已穷尽。
+返回非空游标时，保持同一查询、凭据及 `limit`，把返回值放进下一次 POST JSON 的
+`cursor` 字段，不能修改或放进 URL。查询、权限、可见结果或索引世代变化以及游标
+篡改均可能返回 `400 invalid_cursor`；此时不带 `cursor` 从第一页重新搜索，不能
+把两次不一致的页拼起来。
 能力响应的 `limits.search` 给出 JSON 正文字节、关键词合计字节及数组项数上限；
 旧字段 `max_query_bytes` 不代表结构化搜索的正文上限。显式 `libraries: []`
 是无效范围，不等同于 `null`。
 索引未就绪时返回 `search_unavailable`，不得当作无结果。搜索词只放请求正文，
-不要放 URL、普通诊断或日志中。
+不要放 URL、普通诊断或日志中。生产配置要求检索游标签名密钥；本仓库开发／测试
+配置未启用该密钥时可能仅返回首批结果，目标服务行为须按实际能力和响应核对。
 
 ## 统一文件集：单 Markdown 与多文件使用同一接口
 

@@ -245,6 +245,28 @@ class RetrievalRepository:
         row = self._connection.execute(statement).mappings().one_or_none()
         return None if row is None else PageRecord.model_validate(dict(row))
 
+    def get_page_by_id(self, library_id: str, identifier_text: str) -> PageRecord | None:
+        """Resolve a scoped registry key without guessing its current Section."""
+        statement = (
+            select(Page.__table__)
+            .join(
+                PageIdentifier,
+                and_(
+                    PageIdentifier.library_id == Page.library_id,
+                    PageIdentifier.page_uid == Page.page_uid,
+                ),
+            )
+            .where(
+                Page.library_id == library_id,
+                Page.deleted_at.is_(None),
+                PageIdentifier.library_id == library_id,
+                PageIdentifier.identifier_digest == page_id_registry_digest(identifier_text),
+                PageIdentifier.identifier_text == identifier_text,
+            )
+        )
+        row = self._connection.execute(statement).mappings().one_or_none()
+        return None if row is None else PageRecord.model_validate(dict(row))
+
     def get_revision(
         self,
         library_id: str,

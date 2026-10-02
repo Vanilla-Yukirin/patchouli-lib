@@ -1,12 +1,16 @@
 """Transaction-consistent current-Page search reader for the v1 HTTP endpoint.
 
-The current response has no cursor and does not expose scores or query literals.
+Cursor support is opt-in until HTTP and browser adapters pass a shared codec.
+Scores and query literals are never exposed.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import cast
 
 from sqlalchemy import Connection, Engine
@@ -18,7 +22,12 @@ from patchouli_lib.auth.library_policy import LibraryAction
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import CallerKind, SectionAction
 from patchouli_lib.auth.service import AuthenticationError, utc_microseconds
-from patchouli_lib.search.index_v2 import SearchIndexUnavailableError, require_ready_index
+from patchouli_lib.retrieval.cursor import CursorBinding, CursorCodec, InvalidCursorError
+from patchouli_lib.search.index_v2 import (
+    INDEX_VERSION,
+    SearchIndexUnavailableError,
+    require_ready_index,
+)
 from patchouli_lib.search.literal_v2 import (
     candidate_match_expression,
     encoded_library_token,
@@ -28,6 +37,9 @@ from patchouli_lib.search.query_v2 import InvalidSearchQueryV2, SearchQueryV2
 
 _FIELD_WEIGHT = {"title": 100, "file_name": 30, "file_text": 10}
 _MAX_MATCH_SOURCES = 8
+_SORT_VERSION = "fixed-field-v1"
+_SNIPPET_CODEPOINTS = 240
+_SNIPPET_LEADING_CODEPOINTS = 80
 
 
 class SearchScopeError(RuntimeError):
@@ -44,6 +56,15 @@ class SearchMatchSourceV2:
 
 
 @dataclass(frozen=True, slots=True)
+class SearchSnippetV2:
+    """Plain, bounded text from one authorized current UTF-8 file projection."""
+
+    file_name: str
+    text: str
+    matched: bool
+
+
+@dataclass(frozen=True, slots=True)
 class SearchPageV2:
     library_id: str
     section_id: str
@@ -54,11 +75,13 @@ class SearchPageV2:
     title: str
     occurred_at: int
     match_sources: tuple[SearchMatchSourceV2, ...]
+    snippet: SearchSnippetV2 | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class SearchResultV2:
     items: tuple[SearchPageV2, ...]
+    next_cursor: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,12 +90,28 @@ class _Scope:
     legacy_sections: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _ResolvedScope:
+    scopes: tuple[_Scope, ...]
+    caller_id: str
+    principal_identity: bytes
+    policy_version: int
+    grants_identity: bytes
+
+
+def _digest_json(domain: bytes, value: object) -> bytes:
+    payload = json.dumps(
+        value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8", errors="strict")
+    return hashlib.sha256(domain + payload).digest()
+
+
 def _current_scope(
     connection: Connection,
     context: AuthenticatedRequestContext,
     query: SearchQueryV2,
     now: int,
-) -> tuple[_Scope, ...]:
+) -> _ResolvedScope:
     repository = AuthRepository(connection)
     supplied = context.authenticated
     identity = supplied.caller
@@ -94,23 +133,42 @@ def _current_scope(
         raise AuthenticationError
 
     if repository.has_library_grant_policy(identity.library_id, identity.id, credential.id):
+        library_grants = repository.list_credential_library_grants(
+            home_library_id=identity.library_id,
+            caller_id=identity.id,
+            credential_id=credential.id,
+        )
         readable = {
             grant.library_id: _Scope(grant.library_id, False)
-            for grant in repository.list_credential_library_grants(
-                home_library_id=identity.library_id,
-                caller_id=identity.id,
-                credential_id=credential.id,
-            )
+            for grant in library_grants
             if LibraryAction.READ in grant.actions and repository.library_exists(grant.library_id)
         }
-    else:
-        has_read = any(
-            grant.action is SectionAction.PAGE_READ
-            for grant in repository.list_grants(identity.library_id, identity.id)
+        grants_identity = _digest_json(
+            b"patchouli-search-grants-v1\0",
+            [
+                (grant.library_id, sorted(action.value for action in grant.actions))
+                for grant in library_grants
+            ],
         )
+    else:
+        section_grants = repository.list_grants(identity.library_id, identity.id)
+        has_read = any(grant.action is SectionAction.PAGE_READ for grant in section_grants)
         readable = {identity.library_id: _Scope(identity.library_id, True)} if has_read else {}
+        grants_identity = _digest_json(
+            b"patchouli-search-grants-v1\0",
+            [(grant.section_id, grant.action.value, grant.created_at) for grant in section_grants],
+        )
 
-    return _select_scopes(connection, readable, query)
+    return _ResolvedScope(
+        scopes=_select_scopes(connection, readable, query),
+        caller_id=identity.id,
+        principal_identity=_digest_json(
+            b"patchouli-search-principal-v1\0",
+            (identity.library_id, identity.id, credential.id, credential.token_version),
+        ),
+        policy_version=caller.policy_version,
+        grants_identity=grants_identity,
+    )
 
 
 def _master_scope(
@@ -118,7 +176,7 @@ def _master_scope(
     identity_id: str,
     session_generation: int,
     query: SearchQueryV2,
-) -> tuple[_Scope, ...]:
+) -> _ResolvedScope:
     if not MasterTokenRepository(connection).is_session_generation_current(
         identity_id, session_generation
     ):
@@ -127,7 +185,17 @@ def _master_scope(
         str(row[0]): _Scope(str(row[0]), False)
         for row in connection.exec_driver_sql("SELECT id FROM libraries ORDER BY id")
     }
-    return _select_scopes(connection, readable, query)
+    return _ResolvedScope(
+        scopes=_select_scopes(connection, readable, query),
+        caller_id="",
+        principal_identity=_digest_json(
+            b"patchouli-search-master-v1\0", (identity_id, session_generation)
+        ),
+        policy_version=session_generation,
+        grants_identity=_digest_json(
+            b"patchouli-search-master-scope-v1\0", tuple(sorted(readable))
+        ),
+    )
 
 
 def _select_scopes(
@@ -135,7 +203,6 @@ def _select_scopes(
     readable: dict[str, _Scope],
     query: SearchQueryV2,
 ) -> tuple[_Scope, ...]:
-
     if query.libraries is not None:
         if any(library_id not in readable for library_id in query.libraries):
             raise SearchScopeError
@@ -335,22 +402,166 @@ def _rows_for_scope(
     ]
 
 
+def _query_identity(query: SearchQueryV2, needles: tuple[str, ...]) -> bytes:
+    return _digest_json(
+        b"patchouli-search-query-v1\0",
+        {
+            "keywords": needles,
+            "tags_any": sorted((tag.library_id, tag.tag_id) for tag in query.tags_any),
+            "occurred_from_us": query.occurred_from_us,
+            "occurred_before_us": query.occurred_before_us,
+            "libraries": None if query.libraries is None else sorted(query.libraries),
+        },
+    )
+
+
+def _ranked_fingerprint(
+    generation: int, ranked: list[tuple[tuple[object, ...], SearchPageV2, str | None, str | None]]
+) -> bytes:
+    digest = hashlib.sha256(
+        b"patchouli-search-visible-ranking-v1\0"
+        + f"{INDEX_VERSION}:{generation}:{_SORT_VERSION}\0".encode("ascii")
+    )
+    for key, item, _file_name, _needle in ranked:
+        payload = json.dumps(
+            (
+                key,
+                item.library_id,
+                item.section_id,
+                item.book_id,
+                item.page_id,
+                item.revision_id,
+                item.revision_number,
+                item.title,
+                item.occurred_at,
+                [(source.kind, source.file_name) for source in item.match_sources],
+            ),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8", errors="strict")
+        digest.update(len(payload).to_bytes(4, "big"))
+        digest.update(payload)
+    return digest.digest()
+
+
+def _cursor_binding(
+    actor: _ResolvedScope,
+    query: SearchQueryV2,
+    needles: tuple[str, ...],
+    generation: int,
+    ranked: list[tuple[tuple[object, ...], SearchPageV2, str | None, str | None]],
+) -> CursorBinding:
+    return CursorBinding(
+        caller_id=actor.principal_identity.hex(),
+        policy_version=actor.policy_version,
+        section_id=None,
+        route_identity="search-v2",
+        limit=query.limit,
+        query_identity=_query_identity(query, needles),
+        filters_identity=_digest_json(
+            b"patchouli-search-scope-v1\0",
+            (
+                sorted((scope.library_id, scope.legacy_sections) for scope in actor.scopes),
+                actor.grants_identity.hex(),
+            ),
+        ),
+        sort_identity=_ranked_fingerprint(generation, ranked),
+    )
+
+
+_CURSOR_KEY_PATTERN = re.compile(r"^(0|[1-9][0-9]{0,19}):[0-9a-f]{64}$", re.ASCII)
+
+
+def _cursor_key(index: int, key: tuple[object, ...]) -> str:
+    digest = _digest_json(b"patchouli-search-last-key-v1\0", key)
+    return f"{index}:{digest.hex()}"
+
+
+def _cursor_start(
+    cursor: str | None,
+    codec: CursorCodec | None,
+    binding: CursorBinding | None,
+    ranked: list[tuple[tuple[object, ...], SearchPageV2, str | None, str | None]],
+) -> int:
+    if cursor is None:
+        return 0
+    if codec is None or binding is None:
+        raise InvalidSearchQueryV2
+    key = codec.decode(cursor, binding=binding)
+    if _CURSOR_KEY_PATTERN.fullmatch(key) is None:
+        raise InvalidCursorError
+    index = int(key.split(":", 1)[0])
+    if index >= len(ranked) or key != _cursor_key(index, ranked[index][0]):
+        raise InvalidCursorError
+    return index + 1
+
+
+def _snippet_for_page(
+    connection: Connection,
+    generation: int,
+    page: SearchPageV2,
+    matched_name: str | None,
+    matched_needle: str | None,
+) -> SearchSnippetV2 | None:
+    # search_documents contains only complete, strictly decoded UTF-8 text
+    # from the exact current Revision. SQL substr bounds output before it is
+    # transferred to Python; opaque files have no file_text document.
+    conditions = (
+        "d.generation = ? AND d.library_id = ? AND p.page_id = ? "
+        "AND p.section_id = ? AND p.book_id = ? "
+        "AND p.current_revision_id = ? AND p.current_revision_number = ? "
+        "AND p.deleted_at IS NULL AND d.revision_id = p.current_revision_id "
+        "AND d.revision_number = p.current_revision_number AND d.source_kind = 'file_text'"
+    )
+    parameters: tuple[object, ...] = (
+        generation,
+        page.library_id,
+        page.page_id,
+        page.section_id,
+        page.book_id,
+        page.revision_id,
+        page.revision_number,
+    )
+    if matched_name is not None and matched_needle is not None:
+        excerpt = (
+            "substr(d.normalized_text, "
+            f"max(1, instr(d.normalized_text, ?) - {_SNIPPET_LEADING_CODEPOINTS}), "
+            f"{_SNIPPET_CODEPOINTS})"
+        )
+        extra = " AND d.file_name = ? AND instr(d.normalized_text, ?) > 0"
+        values = (matched_needle, *parameters, matched_name, matched_needle)
+    else:
+        excerpt = f"substr(d.normalized_text, 1, {_SNIPPET_CODEPOINTS})"
+        extra = ""
+        values = parameters
+    row = connection.exec_driver_sql(
+        "SELECT d.file_name, " + excerpt + " FROM search_documents AS d "
+        "JOIN pages AS p ON p.library_id = d.library_id AND p.page_uid = d.page_uid "
+        "WHERE " + conditions + extra + " ORDER BY d.file_name LIMIT 1",
+        values,
+    ).one_or_none()
+    if row is None:
+        if matched_name is not None:
+            raise SearchIndexUnavailableError("A matched search text projection is missing.")
+        return None
+    return SearchSnippetV2(str(row[0]), str(row[1]), matched_name is not None)
+
+
 def search_pages_v2(
     engine: Engine,
     context: AuthenticatedRequestContext,
     query: SearchQueryV2,
     *,
     clock: Callable[[], int] = utc_microseconds,
+    cursor_codec: CursorCodec | None = None,
 ) -> SearchResultV2:
     """Search one concrete SQLite snapshot; never return a partial candidate Top K."""
 
-    def resolve(connection: Connection) -> tuple[tuple[_Scope, ...], str]:
-        return (
-            _current_scope(connection, context, query, clock()),
-            context.authenticated.caller.id,
-        )
+    def resolve(connection: Connection) -> _ResolvedScope:
+        return _current_scope(connection, context, query, clock())
 
-    return _search_pages(engine, query, resolve)
+    return _search_pages(engine, query, resolve, cursor_codec=cursor_codec)
 
 
 def search_pages_for_master(
@@ -358,6 +569,8 @@ def search_pages_for_master(
     encoded_session: str,
     codec: AdminSessionCodec,
     query: SearchQueryV2,
+    *,
+    cursor_codec: CursorCodec | None = None,
 ) -> SearchResultV2:
     """Search as the verified single administrator, without an Agent token.
 
@@ -369,21 +582,19 @@ def search_pages_for_master(
     if session is None:
         raise AuthenticationError
 
-    def resolve(connection: Connection) -> tuple[tuple[_Scope, ...], str]:
-        return (
-            _master_scope(connection, session.identity_id, session.session_generation, query),
-            "",
-        )
+    def resolve(connection: Connection) -> _ResolvedScope:
+        return _master_scope(connection, session.identity_id, session.session_generation, query)
 
-    return _search_pages(engine, query, resolve)
+    return _search_pages(engine, query, resolve, cursor_codec=cursor_codec)
 
 
 def _search_pages(
     engine: Engine,
     query: SearchQueryV2,
-    resolve: Callable[[Connection], tuple[tuple[_Scope, ...], str]],
+    resolve: Callable[[Connection], _ResolvedScope],
+    *,
+    cursor_codec: CursorCodec | None,
 ) -> SearchResultV2:
-
     if not isinstance(query, SearchQueryV2):
         raise TypeError("Expected a parsed search-v2 query.")
     needles = normalize_keywords(query.keywords)
@@ -399,17 +610,17 @@ def _search_pages(
         # SQLite's legacy driver does not start a read transaction on SELECT.
         connection.exec_driver_sql("BEGIN")
         try:
-            scopes, caller_id = resolve(connection)
+            actor = resolve(connection)
             generation = require_ready_index(connection).generation
-            for scope in scopes:
-                _check_scope_integrity(connection, generation, scope, caller_id)
-            ranked: list[tuple[tuple[object, ...], SearchPageV2]] = []
-            for scope in scopes:
+            for scope in actor.scopes:
+                _check_scope_integrity(connection, generation, scope, actor.caller_id)
+            ranked: list[tuple[tuple[object, ...], SearchPageV2, str | None, str | None]] = []
+            for scope in actor.scopes:
                 rows = _rows_for_scope(
                     connection,
                     generation,
                     scope,
-                    caller_id,
+                    actor.caller_id,
                     query,
                     needles,
                     expression,
@@ -421,6 +632,7 @@ def _search_pages(
                     first = page_rows[0]
                     best: dict[str, int] = {}
                     sources: set[SearchMatchSourceV2] = set()
+                    matched_text: list[tuple[str, str]] = []
                     for row in page_rows:
                         kind, file_name = row[9:11]
                         for keyword, matched in zip(needles, row[11:], strict=True):
@@ -429,6 +641,8 @@ def _search_pages(
                                 sources.add(
                                     SearchMatchSourceV2(str(kind), cast("str | None", file_name))
                                 )
+                                if kind == "file_text" and file_name is not None:
+                                    matched_text.append((str(file_name), keyword))
                     if needles and not best:
                         continue
                     ordered_sources = tuple(
@@ -462,9 +676,35 @@ def _search_pages(
                         )
                     else:
                         key = (-item.occurred_at, item.library_id, item.page_id)
-                    ranked.append((key, item))
+                    matched_name, matched_needle = (
+                        min(matched_text) if matched_text else (None, None)
+                    )
+                    ranked.append((key, item, matched_name, matched_needle))
             ranked.sort(key=lambda pair: pair[0])
-            return SearchResultV2(tuple(item for _, item in ranked[: query.limit]))
+            binding = (
+                _cursor_binding(actor, query, needles, generation, ranked)
+                if cursor_codec is not None
+                else None
+            )
+            start = _cursor_start(query.cursor, cursor_codec, binding, ranked)
+            end = min(start + query.limit, len(ranked))
+            items = tuple(
+                replace(
+                    item,
+                    snippet=_snippet_for_page(
+                        connection, generation, item, matched_name, matched_needle
+                    ),
+                )
+                for _, item, matched_name, matched_needle in ranked[start:end]
+            )
+            next_cursor = (
+                cursor_codec.encode(
+                    binding=binding, last_key=_cursor_key(end - 1, ranked[end - 1][0])
+                )
+                if cursor_codec is not None and binding is not None and end < len(ranked)
+                else None
+            )
+            return SearchResultV2(items, next_cursor)
         finally:
             connection.rollback()
 
@@ -473,6 +713,7 @@ __all__ = [
     "SearchMatchSourceV2",
     "SearchPageV2",
     "SearchResultV2",
+    "SearchSnippetV2",
     "SearchScopeError",
     "search_pages_for_master",
     "search_pages_v2",

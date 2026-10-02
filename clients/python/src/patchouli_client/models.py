@@ -868,6 +868,7 @@ class CurrentPageSearchRequest:
     occurred_before_us: int | None = None
     libraries: tuple[str, ...] | None = None
     limit: int = DEFAULT_PAGE_LIMIT
+    cursor: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> CurrentPageSearchRequest:
@@ -878,6 +879,7 @@ class CurrentPageSearchRequest:
             "occurred_before_us",
             "libraries",
             "limit",
+            "cursor",
         }
         if set(data) - allowed:
             raise ValueError("search request has unsupported fields")
@@ -900,6 +902,7 @@ class CurrentPageSearchRequest:
             occurred_before_us=cast("int | None", data.get("occurred_before_us")),
             libraries=None if libraries is None else tuple(cast("list[str]", libraries)),
             limit=cast("int", data.get("limit", DEFAULT_PAGE_LIMIT)),
+            cursor=cast("str | None", data.get("cursor")),
         )
 
     def __post_init__(self) -> None:
@@ -947,6 +950,12 @@ class CurrentPageSearchRequest:
             or not 1 <= self.limit <= MAX_PAGE_LIMIT
         ):
             raise ValueError("search limit must be within the supported page range")
+        if self.cursor is not None and (
+            not isinstance(self.cursor, str)
+            or not self.cursor
+            or len(self.cursor) > MAX_CURSOR_LENGTH
+        ):
+            raise ValueError("search cursor must be a non-empty bounded string or null")
         try:
             request_bytes = len(
                 json.dumps(
@@ -959,7 +968,7 @@ class CurrentPageSearchRequest:
             raise ValueError("search request exceeds the supported byte limit")
 
     def to_wire(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "keywords": list(self.keywords),
             "tags_any": [tag.to_wire() for tag in self.tags_any],
             "occurred_from_us": self.occurred_from_us,
@@ -967,6 +976,10 @@ class CurrentPageSearchRequest:
             "libraries": None if self.libraries is None else list(self.libraries),
             "limit": self.limit,
         }
+        # An omitted cursor preserves the original request shape for older servers.
+        if self.cursor is not None:
+            result["cursor"] = self.cursor
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -983,6 +996,31 @@ class SearchMatchSource:
 
 
 @dataclass(frozen=True, slots=True)
+class SearchSnippet:
+    """Plain server-provided text, never rendered or interpreted as markup."""
+
+    file_name: str
+    text: str = field(repr=False)
+    matched: bool
+
+    def __post_init__(self) -> None:
+        try:
+            if require_file_set_name(self.file_name) != self.file_name:
+                raise ValueError("snippet file name is not canonical")
+            if not isinstance(self.text, str) or len(self.text) > 240 or "\x00" in self.text:
+                raise ValueError("snippet text exceeds its plain-text bounds")
+            self.text.encode("utf-8", errors="strict")
+        except (TypeError, ValueError, UnicodeError):
+            raise ProtocolError("search snippet contained an invalid file name or text") from None
+        if not isinstance(self.matched, bool):
+            raise ProtocolError("search snippet matched must be a boolean")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> SearchSnippet:
+        return cls(_string(data, "file_name"), _string(data, "text"), _boolean(data, "matched"))
+
+
+@dataclass(frozen=True, slots=True)
 class CurrentPageSearchItem:
     library_id: str
     section_id: str
@@ -994,6 +1032,7 @@ class CurrentPageSearchItem:
     title: str
     occurred_at: int
     match_sources: tuple[SearchMatchSource, ...]
+    snippet: SearchSnippet | None = None
 
     def __post_init__(self) -> None:
         require_canonical_api_path(self.revision_files_href, context="revision files href")
@@ -1008,6 +1047,7 @@ class CurrentPageSearchItem:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> CurrentPageSearchItem:
+        snippet = data.get("snippet")
         return cls(
             library_id=_string(data, "library_id"),
             section_id=_string(data, "section_id"),
@@ -1022,12 +1062,16 @@ class CurrentPageSearchItem:
                 SearchMatchSource.from_dict(_object(value, context="match source"))
                 for value in _object_list(data, "match_sources")
             ),
+            snippet=None
+            if snippet is None
+            else SearchSnippet.from_dict(_object(snippet, context="search snippet")),
         )
 
 
 @dataclass(frozen=True, slots=True)
 class CurrentPageSearchResult:
     items: tuple[CurrentPageSearchItem, ...]
+    next_cursor: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> CurrentPageSearchResult:
@@ -1035,7 +1079,8 @@ class CurrentPageSearchResult:
             tuple(
                 CurrentPageSearchItem.from_dict(_object(value, context="search item"))
                 for value in _object_list(data, "items")
-            )
+            ),
+            response_cursor(data) if "next_cursor" in data else None,
         )
 
 

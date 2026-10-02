@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 from collections.abc import Callable
 
 from patchouli_lib.api.contracts import Citation, build_api_v1_path
@@ -26,6 +27,7 @@ from patchouli_lib.identifiers import (
     validate_page_id,
     validate_revision_number,
 )
+from patchouli_lib.retrieval.cursor import CursorBinding
 from patchouli_lib.retrieval.repository import (
     RetrievalRepository,
     RetrievalUnsupportedFormatError,
@@ -35,6 +37,7 @@ from patchouli_lib.retrieval.schemas import (
     BookView,
     CurrentPageRead,
     KeysetPage,
+    LibraryPageMetadata,
     PageDocument,
     PageMetadata,
     PageView,
@@ -175,6 +178,75 @@ class RetrievalService:
                 stored.page.occurred_at,
                 stored.page.updated_at,
             ),
+        )
+
+    def list_library_pages(
+        self,
+        library_id: str,
+        section_id: str,
+        window: ReadWindow | None = None,
+    ) -> KeysetPage[LibraryPageMetadata]:
+        self._require_library_section_action(library_id, section_id, SectionAction.QUERY)
+        if self._repository.get_section(library_id, section_id) is None:
+            raise RetrievalNotFoundError
+        stored = self._repository.list_pages(library_id, section_id, window or ReadWindow())
+        return self._map_page(stored, self._library_metadata)
+
+    def get_library_page(self, library_id: str, page_id: str) -> LibraryPageMetadata:
+        caller, policy = self._require_discovery_agent(library_id)
+        if isinstance(policy, LegacySectionPolicy):
+            if library_id != caller.library_id:
+                raise RetrievalNotFoundError
+        elif not policy.read:
+            raise RetrievalNotFoundError
+        validate_page_id(page_id)
+        page = self._repository.get_page_by_id(library_id, page_id)
+        if page is None:
+            raise RetrievalNotFoundError
+        if isinstance(policy, LegacySectionPolicy):
+            actions = self._repository.section_actions(library_id, caller.id, page.section_id)
+            if SectionAction.PAGE_READ not in actions:
+                raise RetrievalNotFoundError
+        return self._library_metadata(page)
+
+    def library_page_cursor_binding(
+        self,
+        library_id: str,
+        section_id: str,
+        *,
+        limit: int,
+    ) -> CursorBinding:
+        """Build the new-route binding from current policy inside the read snapshot."""
+        caller, policy = self._require_library_section_action(
+            library_id,
+            section_id,
+            SectionAction.QUERY,
+        )
+        if isinstance(policy, LegacySectionPolicy):
+            rights: object = sorted(
+                action.value
+                for action in self._repository.section_actions(
+                    library_id,
+                    caller.id,
+                    section_id,
+                )
+            )
+        else:
+            rights = [policy.read, policy.write]
+        identity = json.dumps(
+            [caller.library_id, self._authenticated.credential.id, library_id, policy.mode, rights],
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+        return CursorBinding(
+            caller_id=caller.id,
+            policy_version=caller.policy_version,
+            section_id=section_id,
+            route_identity="library.pages.list",
+            limit=limit,
+            query_identity=b"query:none",
+            filters_identity=identity,
+            sort_identity=b"page-id:ascending;deleted:false;revision:current",
         )
 
     def get_revision(
@@ -345,6 +417,33 @@ class RetrievalService:
             raise RetrievalAuthorizationError
         return current, policy
 
+    def _require_discovery_agent(self, library_id: str) -> tuple[CallerRecord, LibraryPolicy]:
+        # Preserve older routes' cross-Library rejection semantics. Only these
+        # metadata discovery entries conceal a legacy credential's other Library.
+        caller, policy = self._require_current_agent()
+        if library_id == caller.library_id:
+            return caller, policy
+        if isinstance(policy, LegacySectionPolicy):
+            raise RetrievalNotFoundError
+        return self._require_current_agent(target_library_id=library_id)
+
+    def _require_library_section_action(
+        self,
+        library_id: str,
+        section_id: str,
+        action: SectionAction,
+    ) -> tuple[CallerRecord, LibraryPolicy]:
+        caller, policy = self._require_discovery_agent(library_id)
+        if isinstance(policy, LegacySectionPolicy):
+            if library_id != caller.library_id:
+                raise RetrievalNotFoundError
+            actions = self._repository.section_actions(library_id, caller.id, section_id)
+            if action not in actions:
+                raise RetrievalNotFoundError
+        elif not policy.read:
+            raise RetrievalNotFoundError
+        return caller, policy
+
     def _require_action(
         self,
         section_id: str,
@@ -383,6 +482,33 @@ class RetrievalService:
         return PageMetadata(
             page=view,
             citation=cls._citation(page, page.current_revision_id, page.current_revision_number),
+        )
+
+    @classmethod
+    def _library_metadata(cls, page: PageRecord) -> LibraryPageMetadata:
+        base = build_api_v1_path(
+            "libraries",
+            page.library_id,
+            "sections",
+            page.section_id,
+            "pages",
+            page.page_id,
+        )
+        return LibraryPageMetadata(
+            library_id=page.library_id,
+            page=cls._page_view(page),
+            current_files_href=base,
+            revision_files_href=build_api_v1_path(
+                "libraries",
+                page.library_id,
+                "sections",
+                page.section_id,
+                "pages",
+                page.page_id,
+                "revisions",
+                page.current_revision_id,
+                "files",
+            ),
         )
 
     @classmethod

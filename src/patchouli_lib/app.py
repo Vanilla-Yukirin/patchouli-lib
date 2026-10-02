@@ -94,7 +94,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(create_file_set_read_router(engine))
     application.include_router(create_file_set_write_router(engine))
     application.include_router(create_tag_router(engine))
-    application.include_router(create_search_v2_router(engine))
+    application.include_router(create_search_v2_router(engine, cursor_codec=cursor_codec))
     application.include_router(create_agent_skill_router(engine))
     if cursor_codec is not None:
         application.include_router(
@@ -108,6 +108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             create_admin_router(
                 engine,
                 resolved_settings,
+                cursor_codec=cursor_codec,
             )
         )
 

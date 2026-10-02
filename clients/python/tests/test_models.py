@@ -68,8 +68,11 @@ def test_collection_json_vectors_match_top_level_server_shape() -> None:
     search = response_object(responses["search"])
     assert search["status"] == 200
     search_body = response_object(search["body"])
-    assert set(search_body) == {"items"}
-    assert CurrentPageSearchResult.from_dict(search_body).items
+    assert set(search_body) == {"items", "next_cursor"}
+    parsed_search = CurrentPageSearchResult.from_dict(search_body)
+    assert parsed_search.items and parsed_search.items[0].snippet is None
+    assert parsed_search.next_cursor is None
+    assert response_cursor(search_body) is None
 
 
 def test_public_fixture_freezes_mutation_and_problem_envelopes() -> None:

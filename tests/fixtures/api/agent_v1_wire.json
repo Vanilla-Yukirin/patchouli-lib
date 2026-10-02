@@ -77,9 +77,11 @@
             "revision_files_href": "/api/v1/libraries/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/sections/11111111111111111111111111111111/pages/20260811t091500123z-synthetic-session/revisions/rev_0123456789abcdef0123456789abcdef/files",
             "title": "Synthetic session",
             "occurred_at": 1786439700123456,
-            "match_sources": [{"kind": "title", "file_name": null}]
+            "match_sources": [{"kind": "title", "file_name": null}],
+            "snippet": null
           }
-        ]
+        ],
+        "next_cursor": null
       }
     }
   },

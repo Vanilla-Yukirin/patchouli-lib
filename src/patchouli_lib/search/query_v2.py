@@ -12,7 +12,7 @@ from typing import Annotated, Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from patchouli_lib.api.contracts import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT
+from patchouli_lib.api.contracts import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, OpaqueCursor
 from patchouli_lib.content.models import MAX_OCCURRENCE_MICROSECONDS, MIN_OCCURRENCE_MICROSECONDS
 from patchouli_lib.library.schemas import OpaqueId
 from patchouli_lib.search.literal_v2 import MAX_QUERY_KEYWORDS, normalize_keywords
@@ -55,6 +55,7 @@ class SearchQueryV2:
     occurred_before_us: int | None
     libraries: tuple[str, ...] | None
     limit: int
+    cursor: str | None = None
 
 
 class SearchQueryV2Wire(_StrictWireModel):
@@ -72,6 +73,7 @@ class SearchQueryV2Wire(_StrictWireModel):
         Annotated[list[OpaqueId], Field(min_length=1, max_length=MAX_QUERY_LIBRARIES)] | None
     ) = None
     limit: Annotated[int, Field(ge=1, le=MAX_PAGE_LIMIT)] = DEFAULT_PAGE_LIMIT
+    cursor: OpaqueCursor | None = None
 
     @field_validator("keywords")
     @classmethod
@@ -107,6 +109,7 @@ class SearchQueryV2Wire(_StrictWireModel):
             occurred_before_us=self.occurred_before_us,
             libraries=None if self.libraries is None else tuple(dict.fromkeys(self.libraries)),
             limit=self.limit,
+            cursor=self.cursor,
         )
 
 

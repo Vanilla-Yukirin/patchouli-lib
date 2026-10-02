@@ -226,6 +226,8 @@ def test_application_registers_exact_agent_access_routes(tmp_path: Path) -> None
                 "GET",
             ),
             ("/api/v1/sections", "GET"),
+            ("/api/v1/libraries/{library_id}/sections/{section_id}/pages", "GET"),
+            ("/api/v1/libraries/{library_id}/pages/{page_id}", "GET"),
             ("/api/v1/sections/{section_id}/books", "GET"),
             ("/api/v1/sections/{section_id}/pages", "GET"),
             ("/api/v1/sections/{section_id}/pages/{page_id}", "GET"),

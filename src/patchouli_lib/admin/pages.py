@@ -980,6 +980,7 @@ class SearchFormValues:
     tags: tuple[str, ...] = ()
     occurred_from: str = ""
     occurred_before: str = ""
+    cursor: str | None = None
 
 
 def _search_match_sources(item: SearchPageV2, locale: AdminLocale) -> str:
@@ -1005,6 +1006,7 @@ def search_page(
     results: tuple[SearchPageV2, ...] | None = None,
     message: str | None = None,
     form_values: SearchFormValues | None = None,
+    next_cursor: str | None = None,
 ) -> str:
     """Render a server-side search form without placing terms or credentials in URLs."""
 
@@ -1079,6 +1081,11 @@ def search_page(
             f'<p class="meta">{localize(locale, "Occurred")}: {_time(item.occurred_at)}'
             f" · {localize(locale, 'Version')}: {item.revision_number}</p>"
             + _search_match_sources(item, locale)
+            + (
+                f'<p class="search-snippet">{escape(item.snippet.text)}</p>'
+                if item.snippet is not None
+                else ""
+            )
             + "</li>"
             for item in results
         )
@@ -1091,6 +1098,26 @@ def search_page(
             )
             + "</section>"
         )
+        if next_cursor is not None:
+            controls = [
+                ("keywords", form_values.keywords),
+                ("occurred_from", form_values.occurred_from),
+                ("occurred_before", form_values.occurred_before),
+                ("cursor", next_cursor),
+                *(("library_id", value) for value in form_values.library_ids),
+                *(("tags", value) for value in form_values.tags),
+            ]
+            hidden = "".join(
+                f'<input type="hidden" name="{name}" value="{escape(value, quote=True)}">'
+                for name, value in controls
+            )
+            label = "下一页" if locale == "zh-CN" else "Next page"
+            result_html += (
+                '<form method="post" action="/admin/search" class="search-next-page">'
+                + _csrf(csrf)
+                + hidden
+                + f'<button type="submit">{label}</button></form>'
+            )
     notice = "" if message is None else _notice(localize(locale, message), error=True)
     content = f"""
 {_header(csrf, locale, switch_path="/admin/search")}

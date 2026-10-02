@@ -129,6 +129,7 @@ from patchouli_lib.operator.service import (
     PolicyConflictError,
     ResourceNotFoundError,
 )
+from patchouli_lib.retrieval.cursor import CursorCodec, InvalidCursorError
 from patchouli_lib.search.index_v2 import SearchIndexUnavailableError
 from patchouli_lib.search.query_v2 import (
     MAX_QUERY_BODY_BYTES,
@@ -193,6 +194,7 @@ def create_admin_router(
     *,
     session_codec: AdminSessionCodec | None = None,
     action_service: AdminActionService | None = None,
+    cursor_codec: CursorCodec | None = None,
 ) -> APIRouter:
     if not settings.admin_enabled:
         raise ValueError("Admin router requires complete admin configuration.")
@@ -953,27 +955,38 @@ def create_admin_router(
                         "tags",
                         "occurred_from",
                         "occurred_before",
+                        "cursor",
                     }
                 ),
                 repeatable_fields=frozenset({"tags", "library_id"}),
-                max_fields=516,
+                max_fields=517,
                 max_bytes=MAX_QUERY_BODY_BYTES,
             )
             _require_csrf(values, session)
             form_values = _search_form_values(values)
             query = _search_query_from_form(form_values)
+            if query.cursor is not None and cursor_codec is None:
+                raise InvalidCursorError
             result = await run_in_threadpool(
                 search_pages_for_master,
                 engine,
                 request.cookies.get(_SESSION_COOKIE, ""),
                 codec,
                 query,
+                cursor_codec=cursor_codec,
             )
         except _FormError as exc:
             message, status = exc.safe_message, exc.status_code
         except InvalidSearchQueryV2:
             message = "The search form is invalid. Check the selected fields and UTC times."
             status = 422
+        except InvalidCursorError:
+            message = (
+                "搜索结果或权限已变化，或者分页信息无效。请重新搜索。"
+                if locale == "zh-CN"
+                else "Search results, permissions or cursor are no longer valid. Run a new search."
+            )
+            status = 400
         except SearchScopeError:
             message, status = "The selected search scope is unavailable.", 422
         except SearchIndexUnavailableError:
@@ -993,6 +1006,7 @@ def create_admin_router(
                     locale=locale,
                     results=result.items,
                     form_values=form_values,
+                    next_cursor=result.next_cursor,
                 ),
                 locale=locale,
             )
@@ -2911,7 +2925,12 @@ def _search_form_values(values: FormValues) -> SearchFormValues:
 
     library_ids = values.get("library_id", [])
     tags = values.get("tags", [])
-    if not isinstance(library_ids, list) or not isinstance(tags, list):
+    cursor = values.get("cursor", "")
+    if (
+        not isinstance(library_ids, list)
+        or not isinstance(tags, list)
+        or not isinstance(cursor, str)
+    ):
         raise InvalidSearchQueryV2
     return SearchFormValues(
         keywords=_single(values, "keywords"),
@@ -2919,6 +2938,7 @@ def _search_form_values(values: FormValues) -> SearchFormValues:
         tags=tuple(tags),
         occurred_from=_single(values, "occurred_from"),
         occurred_before=_single(values, "occurred_before"),
+        cursor=cursor or None,
     )
 
 
@@ -2933,6 +2953,8 @@ def _search_query_from_form(values: SearchFormValues) -> SearchQueryV2:
             raise InvalidSearchQueryV2
         tag_identities.append({"library_id": library, "tag_id": identity})
     query: dict[str, object] = {"keywords": keywords, "tags_any": tag_identities}
+    if values.cursor is not None:
+        query["cursor"] = values.cursor
     if values.library_ids:
         query["libraries"] = list(values.library_ids)
     for raw_time, field in (

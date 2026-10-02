@@ -7,7 +7,12 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from patchouli_lib.api.contracts import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Citation
+from patchouli_lib.api.contracts import (
+    DEFAULT_PAGE_LIMIT,
+    MAX_PAGE_LIMIT,
+    Citation,
+    build_api_v1_path,
+)
 from patchouli_lib.content.file_manifest import MAX_FILES_PER_PAGE, normalize_file_name
 from patchouli_lib.content.schemas import PageId, RevisionId, StrongPageETag
 from patchouli_lib.identifiers import parse_occurrence_time
@@ -156,6 +161,39 @@ class PageMetadata(RetrievalSchema):
         return self
 
 
+class LibraryPageMetadata(RetrievalSchema):
+    """Current ownership and file-set links, not a file manifest or write ETag."""
+
+    library_id: OpaqueId
+    page: PageView
+    current_files_href: Annotated[str, Field(min_length=1, max_length=2_048)]
+    revision_files_href: Annotated[str, Field(min_length=1, max_length=2_048)]
+
+    @model_validator(mode="after")
+    def require_exact_file_links(self) -> Self:
+        current = build_api_v1_path(
+            "libraries",
+            self.library_id,
+            "sections",
+            self.page.section_id,
+            "pages",
+            self.page.page_id,
+        )
+        if self.current_files_href != current or self.revision_files_href != build_api_v1_path(
+            "libraries",
+            self.library_id,
+            "sections",
+            self.page.section_id,
+            "pages",
+            self.page.page_id,
+            "revisions",
+            self.page.current_revision_id,
+            "files",
+        ):
+            raise ValueError("Page discovery links must identify the current file-set Revision.")
+        return self
+
+
 class PageDocument(RetrievalSchema):
     page: PageView
     revision: RevisionView
@@ -194,6 +232,7 @@ __all__ = [
     "CurrentPageRead",
     "InternalPageKey",
     "KeysetPage",
+    "LibraryPageMetadata",
     "PageDocument",
     "PageMetadata",
     "PageView",

@@ -25,7 +25,9 @@ description: 通过标准 HTTP 接入 PatchouliLib，验证设备身份、下载
 - 先从已授权列表确认 Section、Book 与现有 Page；这些 ID 和 Revision、ETag 都是
   不透明值，不从标题、路径或 ID 字面猜测身份。Section／Book 列表可按 HTTP 参考
   的可选 `library_id` 发现有 `read` 授权的目标库；省略仍限归属库，旧 Section 模式
-  不跨库。Page 列表仍限归属库，跨库准确读取使用显式 Library 的文件集路径。
+  不跨库。要发现目标库的 Page，使用显式 Library／Section 的新列表；已知稳定
+  Page ID 时可按 Library 查询其当前 Section／Book，再使用返回的准确文件集路径。
+  旧 Page 列表仍限归属库，新路径也不能绕过目标库或旧 Section 的读授权。
   仅有 `write` 时由管理员或其他已授权来源提供并核实目标 ID，绝不猜造。目标服务
   未实现新选择器时不可把旧列表结果当作跨库发现。新建 Page 前必须已有目标 Book。
 - 用户要上传时，先把完整内容准备为本机文件，再按[统一文件集 HTTP 流程](references/http.md)
@@ -40,7 +42,9 @@ description: 通过标准 HTTP 接入 PatchouliLib，验证设备身份、下载
   公布文件集能力，不能盲调新接口；是否改用旧接口应先说明其单文件限制。
 - 目标服务的能力响应含 `search` 时，按[标准 HTTP 搜索契约](references/http.md)
   调用跨知识库当前 Page 搜索。索引未重建或不完整会明确返回 `search_unavailable`；
-  不可把列表浏览或静态示例冒充真实搜索，也不要继续调用旧单 Section 搜索入口。
+  用 POST 正文中的不透明游标续页，失效时从第一页重搜；摘录是规范化索引文本，
+  需要原文时读取准确 Revision。不可把列表浏览或静态示例冒充真实搜索，也不要继续
+  调用旧单 Section 搜索入口。
 
 ## 凭据与报告边界
 

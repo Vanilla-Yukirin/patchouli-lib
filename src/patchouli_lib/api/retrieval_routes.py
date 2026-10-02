@@ -39,6 +39,7 @@ from patchouli_lib.retrieval.repository import RetrievalRepository
 from patchouli_lib.retrieval.schemas import (
     CurrentPageRead,
     KeysetPage,
+    LibraryPageMetadata,
     PageDocument,
     ReadWindow,
     RevisionFileManifestView,
@@ -330,6 +331,48 @@ def create_retrieval_router(
 
     router = APIRouter(prefix=API_V1_PREFIX)
     authenticate = BearerAuthentication(engine, clock=clock)
+
+    @router.get("/libraries/{library_id}/sections/{section_id}/pages")
+    async def list_library_pages(
+        library_id: str,
+        section_id: str,
+        request: Request,
+    ) -> JSONResponse:
+        context = await _authenticate(authenticate, request)
+        scoped_library = _validate_section_id(library_id)
+        scoped_section = _validate_section_id(section_id)
+        pagination = _pagination_parameters(request)
+
+        def operation(service: RetrievalService) -> PaginatedResponse[LibraryPageMetadata]:
+            binding = service.library_page_cursor_binding(
+                scoped_library,
+                scoped_section,
+                limit=pagination.limit,
+            )
+            window = _read_window(pagination, cursor_codec=cursor_codec, binding=binding)
+            page = service.list_library_pages(scoped_library, scoped_section, window)
+            return _collection(page, cursor_codec=cursor_codec, binding=binding)
+
+        response = await _read(engine, context, operation, clock=clock)
+        return _json_response(request, response)
+
+    @router.get("/libraries/{library_id}/pages/{page_id}")
+    async def get_library_page(
+        library_id: str,
+        page_id: str,
+        request: Request,
+    ) -> JSONResponse:
+        context = await _authenticate(authenticate, request)
+        scoped_library = _validate_section_id(library_id)
+        if request.query_params:
+            raise _validation_problem()
+        metadata = await _read(
+            engine,
+            context,
+            lambda service: service.get_library_page(scoped_library, page_id),
+            clock=clock,
+        )
+        return _json_response(request, metadata)
 
     @router.get("/sections")
     async def list_sections(request: Request) -> JSONResponse:

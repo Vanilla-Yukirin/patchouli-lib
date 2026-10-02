@@ -48,6 +48,20 @@ _API_ENDPOINTS = (
     ),
     (
         "GET",
+        "/api/v1/libraries/{library_id}/sections/{section_id}/pages",
+        "Current Pages in a selected Library and Section",
+        "指定知识库与分区中的当前页面",
+        "retrieval",
+    ),
+    (
+        "GET",
+        "/api/v1/libraries/{library_id}/pages/{page_id}",
+        "Find current Page ownership by stable ID",
+        "通过稳定 ID 查找当前页面归属",
+        "retrieval",
+    ),
+    (
+        "GET",
         "/api/v1/sections/{section_id}/pages/{page_id}",
         "Current Page and Revision",
         "当前页面与版本",
@@ -247,6 +261,7 @@ _SEARCH_V2_REQUEST_EXAMPLE: dict[str, object] = {
     "occurred_from_us": None,
     "occurred_before_us": None,
     "limit": 20,
+    "cursor": None,
 }
 
 _SEARCH_V2_SUCCESS_EXAMPLE: dict[str, object] = {
@@ -272,8 +287,14 @@ _SEARCH_V2_SUCCESS_EXAMPLE: dict[str, object] = {
             "title": "示例页面",
             "occurred_at": 1_893_456_000_000_000,
             "match_sources": [{"kind": "title", "file_name": None}],
+            "snippet": {
+                "file_name": "content.md",
+                "text": "示例正文",
+                "matched": False,
+            },
         }
-    ]
+    ],
+    "next_cursor": None,
 }
 
 
@@ -427,11 +448,16 @@ def api_guide(locale: GuideLocale, *, retrieval_available: bool) -> str:
             "the admin login cookie does not authorize them. Confirm actual features with "
             "capabilities. limits.max_query_bytes is a deprecated legacy field; current "
             "search uses limits.search when the index is ready. This page sends no "
-            "content API requests.",
+            "content API requests. Search continuation uses an opaque cursor in the "
+            "POST body, not the URL; snippets are normalized index text, not original "
+            "file bytes. If a cursor is invalid after a query, authorization, or "
+            "content change, start again without it.",
             "这里列出已注册的 v1 接口，不是请求控制台。内容 API 和受保护的 Skill "
             "下载需要独立的 Bearer Token；管理登录 Cookie 不能代替它。实际能力请以 "
             "capabilities 为准。limits.max_query_bytes 是旧接口遗留字段；当前搜索在索引就绪时"
-            "使用 limits.search。本页不会调用内容 API。",
+            "使用 limits.search。本页不会调用内容 API。搜索续页把不透明游标放在 POST "
+            "请求体中，不放入 URL；摘录是规范化后的索引文本，不是原文件字节。查询、"
+            "授权或内容变化导致游标失效时，请不带游标重新搜索。",
         )
         + "</p>"
         + (

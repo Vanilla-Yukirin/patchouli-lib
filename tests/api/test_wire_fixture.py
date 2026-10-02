@@ -135,11 +135,22 @@ def test_collection_vectors_use_server_models_and_flat_pagination() -> None:
 
     for response in (sections, pages, search):
         body = as_object(response["body"])
-        assert set(body) == ({"items"} if response is search else {"items", "next_cursor"})
+        assert set(body) == {"items", "next_cursor"}
         headers = as_headers(response["headers"])
         assert headers["Content-Type"] == "application/json"
         assert headers["Cache-Control"] == PROTECTED_CACHE_CONTROL
         assert _REQUEST_ID_PATTERN.fullmatch(headers[REQUEST_ID_HEADER]) is not None
+
+
+def test_search_accepts_older_responses_without_pagination_or_snippets() -> None:
+    responses = as_object(load_wire_fixture()["responses"])
+    body = as_object(as_object(responses["search"])["body"])
+    body.pop("next_cursor")
+    for item in cast(list[object], body["items"]):
+        as_object(item).pop("snippet")
+    parsed = SearchResponse.model_validate(body)
+    assert parsed.next_cursor is None
+    assert parsed.items and all(item.snippet is None for item in parsed.items)
 
 
 def test_page_collection_vector_rejects_non_current_citation() -> None:
