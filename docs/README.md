@@ -32,6 +32,8 @@
 - [同库 Page 移动](proposals/master-web-page-move.md)：稳定 Page 身份、历史路径证明、
   原成功重试及备份兼容已在开发分支接通，尚未合并或部署。
 - [开发、验证与交付](development-and-delivery.md)
+- [搜索索引的显式启用与重建](search-index-maintenance.md)：本地维护命令、停写、
+  失败回滚及恢复后的就绪核查；迁移本身不会自动启用搜索。
 - [网页管理面板](admin-web-console.md) / [简体中文兼容文件](admin-web-console.zh-CN.md)
 - [Agent 贡献工作流](agent-contribution-workflow.md)
 - [ADR 0001：实现与交付基线](decisions/0001-implementation-baseline.md)
