@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from sqlalchemy import Connection, Engine
 from starlette.responses import Response
 
+from patchouli_lib.api.archive_routes import _replay_target_section
 from patchouli_lib.api.authentication import (
     AuthenticatedRequestContext,
     BearerAuthentication,
@@ -44,6 +45,7 @@ from patchouli_lib.auth.service import (
     utc_microseconds,
 )
 from patchouli_lib.content.file_set_create_service import (
+    FILE_SET_CREATE_ROUTE_TEMPLATE,
     FileSetCreateCommand,
     FileSetCreateNotFoundError,
     FileSetCreateReplay,
@@ -52,6 +54,7 @@ from patchouli_lib.content.file_set_create_service import (
 )
 from patchouli_lib.content.file_set_service import FileSetPreconditionFailedError
 from patchouli_lib.content.file_set_write_service import (
+    FILE_SET_APPEND_ROUTE_TEMPLATE,
     FileSetAppendCommand,
     FileSetWriteNotFoundError,
     FileSetWritePreconditionRequiredError,
@@ -352,10 +355,28 @@ def _authorize_scope(
     section_id: str,
     *,
     clock: Clock,
+    idempotency: ArchiveIdempotencyKey | None = None,
+    route_template: str | None = None,
+    page_id: str | None = None,
+    book_id: str | None = None,
 ) -> None:
     if context.authenticated.caller.kind is not CallerKind.AGENT:
         raise insufficient_scope()
     with immediate_transaction(engine) as connection:
+        if idempotency is not None:
+            if route_template is None:
+                raise AssertionError("Replay preflight requires an exact namespace.")
+            section_id = _replay_target_section(
+                connection,
+                context,
+                library_id,
+                section_id,
+                method="POST",
+                route_template=route_template,
+                idempotency=idempotency,
+                page_id=page_id,
+                book_id=book_id,
+            )
         policy = AuthRepository(connection).get_library_policy(
             credential_id=context.authenticated.credential.id,
             caller_id=context.authenticated.caller.id,
@@ -529,7 +550,17 @@ def create_file_set_write_router(
             partial(authenticate, request), abandon_on_cancel=False
         )
         await anyio.to_thread.run_sync(
-            partial(_authorize_scope, engine, context, scoped_library, scoped_section, clock=clock),
+            partial(
+                _authorize_scope,
+                engine,
+                context,
+                scoped_library,
+                scoped_section,
+                clock=clock,
+                idempotency=idempotency,
+                route_template=FILE_SET_CREATE_ROUTE_TEMPLATE,
+                book_id=scoped_book,
+            ),
             abandon_on_cancel=False,
         )
         upload = await parse_file_set_multipart(request)
@@ -589,7 +620,17 @@ def create_file_set_write_router(
             partial(authenticate, request), abandon_on_cancel=False
         )
         await anyio.to_thread.run_sync(
-            partial(_authorize_scope, engine, context, scoped_library, scoped_section, clock=clock),
+            partial(
+                _authorize_scope,
+                engine,
+                context,
+                scoped_library,
+                scoped_section,
+                clock=clock,
+                idempotency=idempotency,
+                route_template=FILE_SET_APPEND_ROUTE_TEMPLATE,
+                page_id=page_id,
+            ),
             abandon_on_cancel=False,
         )
         upload = await parse_file_set_multipart(request)

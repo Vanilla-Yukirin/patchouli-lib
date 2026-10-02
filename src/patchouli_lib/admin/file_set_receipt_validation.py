@@ -11,6 +11,10 @@ import sqlite3
 
 from patchouli_lib.admin.file_set_receipts import MasterFileSetReceipt
 from patchouli_lib.content.file_manifest import FileManifest, build_file_manifest
+from patchouli_lib.content.page_membership_history import (
+    PageMembershipHistoryError,
+    load_page_state_timeline,
+)
 from patchouli_lib.content.service import page_current_etag
 
 
@@ -116,9 +120,30 @@ def validate_master_file_set_receipt(
         digest,
     ) = row
     _require(page_id == receipt.page_id)
-    # Page movement is not implemented yet. Its future history must prove the
-    # original membership before this current-path check can be replaced.
-    _require((section_id, book_id) == (receipt.section_id, receipt.book_id))
+    revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+    from patchouli_lib.backup.manifest import PAGE_MOVE_SCHEMA_REVISION
+
+    timeline = None
+    if revision == (PAGE_MOVE_SCHEMA_REVISION,):
+        try:
+            timeline = load_page_state_timeline(
+                connection,
+                schema_revision=PAGE_MOVE_SCHEMA_REVISION,
+                library_id=receipt.library_id,
+                page_uid=receipt.page_uid,
+            )
+            state = timeline.exact_state(receipt.original_page_updated_at)
+            _require(
+                state.deleted_at is None
+                and state.revision_id == receipt.revision_id
+                and state.revision_number == receipt.revision_number
+                and state.occurred_at == receipt.original_occurred_at
+                and (state.section_id, state.book_id) == (receipt.section_id, receipt.book_id)
+            )
+        except PageMembershipHistoryError:
+            raise MasterFileSetReceiptCorruptError("Stored file-set success is invalid.") from None
+    else:
+        _require((section_id, book_id) == (receipt.section_id, receipt.book_id))
     _require(
         connection.execute(
             "SELECT count(*) FROM revision_file_seals WHERE library_id = ? AND page_uid = ? "
@@ -166,10 +191,11 @@ def validate_master_file_set_receipt(
             and (md, md_size, md_hash) == (None, None, None)
             and digest == manifest.snapshot_sha256
         )
-    _require(
-        (receipt.original_occurred_at, receipt.original_page_updated_at)
-        in _active_states(connection, receipt, occurrence, revision_at)
-    )
+    if timeline is None:
+        _require(
+            (receipt.original_occurred_at, receipt.original_page_updated_at)
+            in _active_states(connection, receipt, occurrence, revision_at)
+        )
     _require(
         receipt.response_etag
         == page_current_etag(

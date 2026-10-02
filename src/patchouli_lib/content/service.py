@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import sqlite3
 from collections.abc import Callable
-from typing import Final, Literal
+from typing import TYPE_CHECKING, Final, Literal
 from uuid import uuid4
 
 from sqlalchemy import Connection
@@ -20,7 +21,7 @@ from patchouli_lib.auth.schemas import (
     NewAuditEvent,
     SectionAction,
 )
-from patchouli_lib.auth.service import AuthenticationService, utc_microseconds
+from patchouli_lib.auth.service import AuthenticationService, AuthorizationError, utc_microseconds
 from patchouli_lib.content.models import MAX_OCCURRENCE_MICROSECONDS, MIN_OCCURRENCE_MICROSECONDS
 from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import (
@@ -73,9 +74,13 @@ from patchouli_lib.identifiers import (
     generate_page_uid,
     generate_revision_id,
     page_id_registry_digest,
+    parse_occurrence_time,
     validate_page_uid,
     validate_revision_id,
 )
+
+if TYPE_CHECKING:
+    from patchouli_lib.content.page_membership_history import PageState, PageStateTimeline
 
 Clock = Callable[[], int]
 IdFactory = Callable[[], str]
@@ -201,6 +206,80 @@ def page_current_etag(
     return f'"page-v2-{digest.hexdigest()}"'
 
 
+def _replay_timeline(connection: Connection, page: PageRecord) -> PageStateTimeline:
+    # History imports the ETag function above. Load it only after service import
+    # completes, and use the caller's existing transaction rather than a new read.
+    from patchouli_lib.content.page_membership_history import (
+        PageMembershipHistoryError,
+        load_page_state_timeline,
+    )
+
+    raw = connection.connection.driver_connection
+    if not isinstance(raw, sqlite3.Connection):
+        raise ArchiveReplayCorruptError
+    try:
+        revision = raw.execute("SELECT version_num FROM alembic_version").fetchone()
+        if revision is None:
+            raise ArchiveReplayCorruptError
+        return load_page_state_timeline(
+            raw, schema_revision=revision[0], library_id=page.library_id, page_uid=page.page_uid
+        )
+    except (PageMembershipHistoryError, sqlite3.Error, ValueError):
+        raise ArchiveReplayCorruptError from None
+
+
+def _require_replay_state(
+    connection: Connection,
+    page: PageRecord,
+    replay: ReplayResponse,
+    *,
+    section_id: str,
+    revision_id: str,
+    revision_number: int,
+    updated_at: int | None = None,
+    book_id: str | None = None,
+    active: bool = True,
+    allow_legacy_etag: bool = False,
+) -> PageState:
+    """Prove one complete historical state, not a path that merely once existed."""
+    from patchouli_lib.content.page_membership_history import PageMembershipHistoryError
+
+    timeline = _replay_timeline(connection, page)
+    try:
+        if updated_at is None:
+            return timeline.match_active_etag(
+                revision_id=revision_id,
+                revision_number=revision_number,
+                etag=replay.response_etag,
+                section_id=section_id,
+                book_id=book_id,
+            )
+        state = timeline.exact_state(updated_at)
+    except PageMembershipHistoryError:
+        raise ArchiveReplayCorruptError from None
+    etags = {
+        page_current_etag(
+            page.page_uid,
+            state.revision_id,
+            state.revision_number,
+            state.occurred_at,
+            state.updated_at,
+        )
+    }
+    if allow_legacy_etag:
+        etags.add(legacy_page_current_etag(page.page_uid, state.revision_id, state.revision_number))
+    if (
+        state.section_id != section_id
+        or (book_id is not None and state.book_id != book_id)
+        or state.revision_id != revision_id
+        or state.revision_number != revision_number
+        or (state.deleted_at is None) != active
+        or replay.response_etag not in etags
+    ):
+        raise ArchiveReplayCorruptError
+    return state
+
+
 class ArchiveService:
     """Coordinate authorized Archive writes without starting or committing a transaction.
 
@@ -241,19 +320,12 @@ class ArchiveService:
         """Create one Archive Page graph and its replay/audit state atomically."""
 
         self._require_transaction()
-        book = self._content.get_book(command.library_id, command.book_id)
-        if book is None:
-            raise ArchiveNotFoundError
         operation_at = self._operation_time()
-        authenticated = AuthenticationService(
+        authentication = AuthenticationService(
             self._auth_repository,
             clock=lambda: operation_at,
-        ).authorize_content(
-            token_value,
-            library_id=command.library_id,
-            section_id=book.section_id,
-            action=SectionAction.ARCHIVE_WRITE,
         )
+        authenticated = authentication.authenticate(token_value)
         caller = TransactionValidatedCaller(
             library_id=command.library_id,
             actor_home_library_id=authenticated.caller.library_id,
@@ -265,12 +337,43 @@ class ArchiveService:
             key_digest=idempotency.key_digest,
             request_fingerprint=self._create_fingerprint(command),
         )
-        replay = self._idempotency.lookup(caller, request)
-        # A reused key must compare its route-bound fingerprint first; neither
-        # an exact replay nor a fresh mutation may cross the relationship gate.
+        stored = IdempotencyRepository(self._connection).get(caller, request)
+        if stored is not None:
+            # This body is internal lookup material only. The caller has not
+            # yet been authorized to learn even whether its fingerprint matches.
+            try:
+                stored_body = ArchiveResponseBody.model_validate_json(stored.response_body)
+            except ValueError:
+                raise AuthorizationError from None
+            page = self._content.get_page(command.library_id, stored_body.page.page_id)
+            if page is None or page.page_type != "archive":
+                raise AuthorizationError
+            authentication.authorize_content(
+                token_value,
+                library_id=command.library_id,
+                section_id=page.section_id,
+                action=SectionAction.ARCHIVE_WRITE,
+            )
+            replay = self._idempotency.lookup(caller, request)
+            if replay is None:
+                raise ArchiveReplayCorruptError
+            result = self._replay_result(replay)
+            self._validate_archive_replay(page, result, command.section_id, revision_location=False)
+            if result.body.page.book_id != command.book_id:
+                raise ArchiveReplayCorruptError
+            return result
+        book = self._content.get_book(command.library_id, command.book_id)
+        if book is None:
+            raise ArchiveNotFoundError
+        authenticated = authentication.authorize_content(
+            token_value,
+            library_id=command.library_id,
+            section_id=book.section_id,
+            action=SectionAction.ARCHIVE_WRITE,
+        )
         self._require_route_section(book.section_id, command.section_id)
-        if replay is not None:
-            return self._replay_result(replay)
+        if self._idempotency.lookup(caller, request) is not None:
+            raise ArchiveReplayCorruptError
 
         occurred_at = operation_at if command.occurred_at is None else command.occurred_at
         try:
@@ -387,11 +490,11 @@ class ArchiveService:
             request_fingerprint=self._revision_fingerprint(command),
         )
         replay = self._idempotency.lookup(caller, request)
-        # The exact route is part of the request identity, while this gate keeps
-        # both replay presentation and revision state scoped to the target Page.
-        self._require_route_section(page.section_id, command.section_id)
         if replay is not None:
-            return self._replay_result(replay)
+            result = self._replay_result(replay)
+            self._validate_archive_replay(page, result, command.section_id, revision_location=True)
+            return result
+        self._require_route_section(page.section_id, command.section_id)
         if page.deleted_at is not None:
             raise ArchiveNotFoundError
         if command.expected_etag is None:
@@ -504,13 +607,40 @@ class ArchiveService:
             request_fingerprint=self._occurrence_fingerprint(command),
         )
         replay = self._idempotency.lookup(caller, request)
-        self._require_route_section(page.section_id, command.section_id)
         if replay is not None:
             try:
-                OccurrenceCorrectionResponseBody.model_validate_json(replay.response_body)
+                body = OccurrenceCorrectionResponseBody.model_validate_json(replay.response_body)
+                corrected_at = parse_occurrence_time(
+                    replay.original_request_timestamp
+                ).utc_microseconds
             except ValueError:
                 raise ArchiveReplayCorruptError from None
+            state = _require_replay_state(
+                self._connection,
+                page,
+                replay,
+                section_id=command.section_id,
+                revision_id=body.current_revision_id,
+                revision_number=body.current_revision_number,
+                updated_at=corrected_at,
+            )
+            correction_row = self._connection.exec_driver_sql(
+                "SELECT old_occurred_at, new_occurred_at FROM page_occurrence_corrections "
+                "WHERE library_id = ? AND page_uid = ? AND corrected_at = ?",
+                (page.library_id, page.page_uid, corrected_at),
+            ).one_or_none()
+            if (
+                correction_row is None
+                or body.page_id != page.page_id
+                or body.section_id != command.section_id
+                or body.previous_occurred_at != canonical_utc_wire(correction_row[0])
+                or body.occurred_at != canonical_utc_wire(state.occurred_at)
+                or correction_row[1] != command.occurred_at
+            ):
+                raise ArchiveReplayCorruptError
+            self._validate_metadata_replay(page, replay, body.citation, command.section_id)
             return replay
+        self._require_route_section(page.section_id, command.section_id)
         if page.deleted_at is not None:
             raise ArchiveNotFoundError
 
@@ -672,13 +802,41 @@ class ArchiveService:
             request_fingerprint=self._lifecycle_fingerprint(command, action),
         )
         replay = self._idempotency.lookup(caller, request)
-        self._require_route_section(page.section_id, command.section_id)
         if replay is not None:
             try:
-                PageLifecycleResponseBody.model_validate_json(replay.response_body)
+                body = PageLifecycleResponseBody.model_validate_json(replay.response_body)
+                changed_at = parse_occurrence_time(body.updated_at).utc_microseconds
             except ValueError:
                 raise ArchiveReplayCorruptError from None
+            state = _require_replay_state(
+                self._connection,
+                page,
+                replay,
+                section_id=command.section_id,
+                revision_id=body.current_revision_id,
+                revision_number=body.current_revision_number,
+                updated_at=changed_at,
+                active=action == "restore",
+            )
+            event_row = self._connection.exec_driver_sql(
+                "SELECT action FROM page_lifecycle_events "
+                "WHERE library_id = ? AND page_uid = ? AND changed_at = ?",
+                (page.library_id, page.page_uid, changed_at),
+            ).one_or_none()
+            if (
+                event_row is None
+                or event_row[0] != action
+                or body.page_id != page.page_id
+                or body.section_id != command.section_id
+                or body.state != ("trashed" if action == "delete" else "active")
+                or body.deleted_at
+                != (canonical_utc_wire(state.deleted_at) if state.deleted_at is not None else None)
+                or replay.original_request_timestamp != body.updated_at
+            ):
+                raise ArchiveReplayCorruptError
+            self._validate_metadata_replay(page, replay, body.citation, command.section_id)
             return replay
+        self._require_route_section(page.section_id, command.section_id)
 
         current_etag = page_current_etag(
             page.page_uid,
@@ -962,6 +1120,78 @@ class ArchiveService:
         except ValueError:
             raise ArchiveReplayCorruptError from None
         return ArchiveMutationReplay(body, replay)
+
+    def _validate_archive_replay(
+        self,
+        page: PageRecord,
+        result: ArchiveMutationReplay,
+        section_id: str,
+        *,
+        revision_location: bool,
+    ) -> None:
+        body, replay = result.body, result.response
+        state = _require_replay_state(
+            self._connection,
+            page,
+            replay,
+            section_id=section_id,
+            book_id=body.page.book_id,
+            revision_id=body.revision.revision_id,
+            revision_number=body.revision.revision_number,
+            updated_at=parse_occurrence_time(body.revision.created_at).utc_microseconds,
+            allow_legacy_etag=True,
+        )
+        revision = self._content.get_revision(
+            page.library_id, page.page_uid, body.revision.revision_number
+        )
+        href = build_api_v1_path(
+            "sections",
+            section_id,
+            "pages",
+            page.page_id,
+            "revisions",
+            str(body.revision.revision_number),
+        )
+        if (
+            body.page.page_id != page.page_id
+            or body.page.section_id != section_id
+            or body.page.title != state.title
+            or body.page.occurred_at != canonical_utc_wire(state.occurred_at)
+            or revision is None
+            or body.revision.revision_id != revision.revision_id
+            or body.revision.content.encode("utf-8") != revision.content_md
+            or body.revision.content_sha256 != revision.content_sha256.hex()
+            or replay.response_status != 201
+            or replay.original_request_timestamp != body.revision.created_at
+            or body.citation.href != href
+            or replay.response_location
+            != (
+                href
+                if revision_location
+                else build_api_v1_path("sections", section_id, "pages", page.page_id)
+            )
+        ):
+            raise ArchiveReplayCorruptError
+
+    @staticmethod
+    def _validate_metadata_replay(
+        page: PageRecord, replay: ReplayResponse, citation: ArchiveCitation, section_id: str
+    ) -> None:
+        if (
+            replay.response_status != 200
+            or replay.response_location
+            != build_api_v1_path("sections", section_id, "pages", page.page_id)
+            or citation.href
+            != build_api_v1_path(
+                "sections",
+                section_id,
+                "pages",
+                page.page_id,
+                "revisions",
+                str(citation.revision_number),
+            )
+        ):
+            raise ArchiveReplayCorruptError
 
     @staticmethod
     def _create_fingerprint(command: CreateArchiveCommand) -> bytes:

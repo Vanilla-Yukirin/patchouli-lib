@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import sqlite3
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from hashlib import sha256
@@ -15,6 +16,11 @@ from sqlalchemy.sql import Select
 
 from patchouli_lib.admin.file_set_receipts import MasterFileSetReceipt, MasterFileSetReceiptRow
 from patchouli_lib.admin.master_audit import grant_revisions_for_credentials
+from patchouli_lib.admin.move_receipts import (
+    MasterMoveReceipt,
+    MasterMoveReceiptRow,
+    validate_master_move_receipt,
+)
 from patchouli_lib.auth.models import (
     AgentTokenValue,
     AuditEvent,
@@ -25,6 +31,7 @@ from patchouli_lib.auth.models import (
     MasterAuditEvent,
     SectionGrant,
 )
+from patchouli_lib.auth.service import AuthenticationError
 from patchouli_lib.content.models import (
     MAX_OCCURRENCE_MICROSECONDS,
     MIN_OCCURRENCE_MICROSECONDS,
@@ -33,6 +40,7 @@ from patchouli_lib.content.models import (
     Revision,
     RevisionFile,
 )
+from patchouli_lib.content.page_membership_history import load_page_state_timeline
 from patchouli_lib.content.service import page_current_etag
 from patchouli_lib.identifiers.page_ids import InvalidPageIdError, validate_page_id
 from patchouli_lib.library.models import Book, Library, Section
@@ -749,6 +757,7 @@ class AdminReadModel:
                             "content.page.occurrence.correct",
                             "content.page.file_set.create",
                             "content.page.file_set.revise",
+                            "content.page.move",
                             "tag.create",
                             "tag.page.attach",
                             "tag.page.detach",
@@ -780,6 +789,7 @@ class AdminReadModel:
                     "content.page.occurrence.correct",
                     "content.page.file_set.create",
                     "content.page.file_set.revise",
+                    "content.page.move",
                 ):
                     if event["target_type"] != "page" or len(parts) != 2:
                         raise RuntimeError("Invalid content activity audit target.")
@@ -810,6 +820,8 @@ class AdminReadModel:
                         revision_number = _master_file_set_activity_revision(
                             connection, event, page
                         )
+                    elif event["action"] == "content.page.move":
+                        revision_number = _master_move_activity_revision(connection, event, page)
                     elif event["action"] == "content.page.occurrence.correct":
                         corrections = connection.execute(
                             select(
@@ -1212,189 +1224,288 @@ class AdminReadModel:
         revision_number: int | None = None,
         before_revision_number: int | None = None,
     ) -> PageView | None:
+        with self._engine.connect() as connection:
+            return self._get_page(
+                connection,
+                library_id,
+                section_id,
+                book_id,
+                page_id,
+                revision_number,
+                before_revision_number,
+            )
+
+    def get_page_by_id(
+        self,
+        library_id: str,
+        page_id: str,
+        revision_number: int | None = None,
+        before_revision_number: int | None = None,
+        *,
+        authorize: Callable[[Connection], bool],
+    ) -> PageView | None:
+        """Authorize and resolve a live Page's exact version in one read snapshot.
+
+        The router must admit only a current master session on this connection.
+        The callback must not end the transaction or read through another connection.
+        """
+        with self._engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN")
+            try:
+                if not authorize(connection):
+                    raise AuthenticationError
+                if len(library_id) != 32 or any(
+                    character not in "0123456789abcdef" for character in library_id
+                ):
+                    return None
+                try:
+                    validate_page_id(page_id)
+                except (InvalidPageIdError, TypeError, ValueError):
+                    return None
+                location = connection.execute(
+                    select(Page.section_id, Page.book_id).where(
+                        Page.library_id == library_id,
+                        Page.page_id == page_id,
+                        Page.deleted_at.is_(None),
+                    )
+                ).one_or_none()
+                if location is None:
+                    return None
+                return self._get_page(
+                    connection,
+                    library_id,
+                    location.section_id,
+                    location.book_id,
+                    page_id,
+                    revision_number,
+                    before_revision_number,
+                )
+            finally:
+                connection.rollback()
+
+    @staticmethod
+    def _get_page(
+        connection: Connection,
+        library_id: str,
+        section_id: str,
+        book_id: str,
+        page_id: str,
+        revision_number: int | None,
+        before_revision_number: int | None,
+    ) -> PageView | None:
         if revision_number is not None and not 1 <= revision_number <= (1 << 63) - 1:
             return None
         if before_revision_number is not None and not 2 <= before_revision_number <= 1 << 63:
             return None
-        with self._engine.connect() as connection:
-            library = _get_library(connection, library_id)
-            section = _get_section(connection, library_id, section_id)
-            book = _get_book(connection, library_id, section_id, book_id)
-            if library is None or section is None or book is None:
-                return None
-            revision_match = (
-                and_(
-                    Revision.revision_number == Page.current_revision_number,
-                    Revision.revision_id == Page.current_revision_id,
-                )
-                if revision_number is None
-                else Revision.revision_number == revision_number
+        library = _get_library(connection, library_id)
+        section = _get_section(connection, library_id, section_id)
+        book = _get_book(connection, library_id, section_id, book_id)
+        if library is None or section is None or book is None:
+            return None
+        revision_match = (
+            and_(
+                Revision.revision_number == Page.current_revision_number,
+                Revision.revision_id == Page.current_revision_id,
             )
-            row = (
+            if revision_number is None
+            else Revision.revision_number == revision_number
+        )
+        row = (
+            connection.execute(
+                select(
+                    Page.page_id,
+                    Page.page_uid,
+                    Page.title,
+                    Page.page_type,
+                    Page.occurred_at,
+                    Page.current_revision_number,
+                    Page.updated_at,
+                    Revision.content_md,
+                    Page.current_revision_id,
+                    Revision.revision_id.label("selected_revision_id"),
+                    Revision.revision_number.label("selected_revision_number"),
+                    Revision.created_at.label("selected_revision_created_at"),
+                )
+                .join(
+                    Revision,
+                    and_(
+                        Revision.library_id == Page.library_id,
+                        Revision.page_uid == Page.page_uid,
+                        revision_match,
+                    ),
+                )
+                .where(
+                    Page.library_id == library_id,
+                    Page.section_id == section_id,
+                    Page.book_id == book_id,
+                    Page.page_id == page_id,
+                    Page.deleted_at.is_(None),
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            return None
+        current_revision_number = row["current_revision_number"]
+        if (
+            before_revision_number is not None
+            and before_revision_number > current_revision_number + 1
+        ):
+            return None
+        files = tuple(
+            RevisionFileItem(
+                item["filename"], item["size_bytes"], bytes(item["content_sha256"]).hex()
+            )
+            for item in connection.execute(
+                select(
+                    RevisionFile.filename,
+                    RevisionFile.size_bytes,
+                    RevisionFile.content_sha256,
+                )
+                .where(
+                    RevisionFile.library_id == library_id,
+                    RevisionFile.page_uid == row["page_uid"],
+                    RevisionFile.revision_id == row["selected_revision_id"],
+                    RevisionFile.revision_number == row["selected_revision_number"],
+                )
+                .order_by(RevisionFile.filename)
+            ).mappings()
+        )
+        markdown: str | None
+        if row["content_md"] is not None:
+            # Preserve the existing legacy Archive preview, including its size limit.
+            markdown = bytes(row["content_md"]).decode("utf-8")
+        else:
+            # A file-set Revision has no legacy Markdown mirror. Preview only
+            # a small, verified content.md as escaped plain text in the page.
+            preview = (
                 connection.execute(
                     select(
-                        Page.page_id,
-                        Page.page_uid,
-                        Page.title,
-                        Page.page_type,
-                        Page.occurred_at,
-                        Page.current_revision_number,
-                        Page.updated_at,
-                        Revision.content_md,
-                        Page.current_revision_id,
-                        Revision.revision_id.label("selected_revision_id"),
-                        Revision.revision_number.label("selected_revision_number"),
-                        Revision.created_at.label("selected_revision_created_at"),
-                    )
-                    .join(
-                        Revision,
-                        and_(
-                            Revision.library_id == Page.library_id,
-                            Revision.page_uid == Page.page_uid,
-                            revision_match,
-                        ),
-                    )
-                    .where(
-                        Page.library_id == library_id,
-                        Page.section_id == section_id,
-                        Page.book_id == book_id,
-                        Page.page_id == page_id,
-                        Page.deleted_at.is_(None),
+                        RevisionFile.content_bytes,
+                        RevisionFile.size_bytes,
+                        RevisionFile.content_sha256,
+                    ).where(
+                        RevisionFile.library_id == library_id,
+                        RevisionFile.page_uid == row["page_uid"],
+                        RevisionFile.revision_id == row["selected_revision_id"],
+                        RevisionFile.revision_number == row["selected_revision_number"],
+                        RevisionFile.filename == "content.md",
+                        RevisionFile.size_bytes <= _MAX_FILE_SET_PREVIEW_BYTES,
+                        func.length(RevisionFile.content_bytes) <= _MAX_FILE_SET_PREVIEW_BYTES,
                     )
                 )
                 .mappings()
                 .one_or_none()
             )
-            if row is None:
-                return None
-            current_revision_number = row["current_revision_number"]
-            if (
-                before_revision_number is not None
-                and before_revision_number > current_revision_number + 1
-            ):
-                return None
-            files = tuple(
-                RevisionFileItem(
-                    item["filename"], item["size_bytes"], bytes(item["content_sha256"]).hex()
+            markdown = None
+            if preview is not None:
+                content = bytes(preview["content_bytes"])
+                if (
+                    len(content) == preview["size_bytes"]
+                    and sha256(content).digest() == bytes(preview["content_sha256"])
+                    and b"\x00" not in content
+                ):
+                    with suppress(UnicodeDecodeError):
+                        markdown = content.decode("utf-8", errors="strict")
+        history_before = before_revision_number or current_revision_number + 1
+        if before_revision_number is None and (
+            current_revision_number - row["selected_revision_number"] >= _PAGE_HISTORY_SIZE
+        ):
+            history_before = row["selected_revision_number"] + 1
+        history_filter = (
+            Revision.revision_number <= (1 << 63) - 1
+            if history_before == 1 << 63
+            else Revision.revision_number < history_before
+        )
+        history_rows = tuple(
+            connection.execute(
+                select(Revision.revision_number, Revision.created_at)
+                .where(
+                    Revision.library_id == library_id,
+                    Revision.page_uid == row["page_uid"],
+                    history_filter,
                 )
-                for item in connection.execute(
-                    select(
-                        RevisionFile.filename,
-                        RevisionFile.size_bytes,
-                        RevisionFile.content_sha256,
-                    )
-                    .where(
-                        RevisionFile.library_id == library_id,
-                        RevisionFile.page_uid == row["page_uid"],
-                        RevisionFile.revision_id == row["selected_revision_id"],
-                        RevisionFile.revision_number == row["selected_revision_number"],
-                    )
-                    .order_by(RevisionFile.filename)
-                ).mappings()
-            )
-            markdown: str | None
-            if row["content_md"] is not None:
-                # Preserve the existing legacy Archive preview, including its size limit.
-                markdown = bytes(row["content_md"]).decode("utf-8")
-            else:
-                # A file-set Revision has no legacy Markdown mirror. Preview only
-                # a small, verified content.md as escaped plain text in the page.
-                preview = (
-                    connection.execute(
-                        select(
-                            RevisionFile.content_bytes,
-                            RevisionFile.size_bytes,
-                            RevisionFile.content_sha256,
-                        ).where(
-                            RevisionFile.library_id == library_id,
-                            RevisionFile.page_uid == row["page_uid"],
-                            RevisionFile.revision_id == row["selected_revision_id"],
-                            RevisionFile.revision_number == row["selected_revision_number"],
-                            RevisionFile.filename == "content.md",
-                            RevisionFile.size_bytes <= _MAX_FILE_SET_PREVIEW_BYTES,
-                            func.length(RevisionFile.content_bytes) <= _MAX_FILE_SET_PREVIEW_BYTES,
-                        )
-                    )
-                    .mappings()
-                    .one_or_none()
+                .order_by(Revision.revision_number.desc())
+                .limit(_PAGE_HISTORY_SIZE + 1)
+            ).mappings()
+        )
+        revisions = tuple(
+            RevisionItem(item["revision_number"], item["created_at"])
+            for item in history_rows[:_PAGE_HISTORY_SIZE]
+        )
+        older_revisions_before = (
+            revisions[-1].number if len(history_rows) > _PAGE_HISTORY_SIZE else None
+        )
+        tag_choices = tuple(
+            PageTagChoice(item["id"], item["display_name"], item["tag_id"] is not None)
+            for item in connection.execute(
+                select(Tag.id, Tag.display_name, PageTag.tag_id)
+                .outerjoin(
+                    PageTag,
+                    and_(
+                        PageTag.library_id == Tag.library_id,
+                        PageTag.tag_id == Tag.id,
+                        PageTag.page_uid == row["page_uid"],
+                    ),
                 )
-                markdown = None
-                if preview is not None:
-                    content = bytes(preview["content_bytes"])
-                    if (
-                        len(content) == preview["size_bytes"]
-                        and sha256(content).digest() == bytes(preview["content_sha256"])
-                        and b"\x00" not in content
-                    ):
-                        with suppress(UnicodeDecodeError):
-                            markdown = content.decode("utf-8", errors="strict")
-            history_before = before_revision_number or current_revision_number + 1
-            if before_revision_number is None and (
-                current_revision_number - row["selected_revision_number"] >= _PAGE_HISTORY_SIZE
-            ):
-                history_before = row["selected_revision_number"] + 1
-            history_filter = (
-                Revision.revision_number <= (1 << 63) - 1
-                if history_before == 1 << 63
-                else Revision.revision_number < history_before
+                .where(Tag.library_id == library_id)
+                .order_by(Tag.match_key, Tag.id)
+            ).mappings()
+        )
+        return PageView(
+            library,
+            section,
+            book,
+            _page_item(row),
+            markdown,
+            row["selected_revision_number"],
+            row["selected_revision_created_at"],
+            files,
+            revisions,
+            history_before,
+            older_revisions_before,
+            history_before == current_revision_number + 1,
+            tag_choices,
+            page_current_etag(
+                row["page_uid"],
+                row["current_revision_id"],
+                current_revision_number,
+                row["occurred_at"],
+                row["updated_at"],
+            ),
+        )
+
+
+def _master_move_activity_revision(
+    connection: Connection, event: RowMapping, page: RowMapping | None
+) -> int:
+    row = (
+        connection.execute(
+            select(MasterMoveReceiptRow.__table__).where(
+                MasterMoveReceiptRow.master_audit_event_id == event["id"]
             )
-            history_rows = tuple(
-                connection.execute(
-                    select(Revision.revision_number, Revision.created_at)
-                    .where(
-                        Revision.library_id == library_id,
-                        Revision.page_uid == row["page_uid"],
-                        history_filter,
-                    )
-                    .order_by(Revision.revision_number.desc())
-                    .limit(_PAGE_HISTORY_SIZE + 1)
-                ).mappings()
-            )
-            revisions = tuple(
-                RevisionItem(item["revision_number"], item["created_at"])
-                for item in history_rows[:_PAGE_HISTORY_SIZE]
-            )
-            older_revisions_before = (
-                revisions[-1].number if len(history_rows) > _PAGE_HISTORY_SIZE else None
-            )
-            tag_choices = tuple(
-                PageTagChoice(item["id"], item["display_name"], item["tag_id"] is not None)
-                for item in connection.execute(
-                    select(Tag.id, Tag.display_name, PageTag.tag_id)
-                    .outerjoin(
-                        PageTag,
-                        and_(
-                            PageTag.library_id == Tag.library_id,
-                            PageTag.tag_id == Tag.id,
-                            PageTag.page_uid == row["page_uid"],
-                        ),
-                    )
-                    .where(Tag.library_id == library_id)
-                    .order_by(Tag.match_key, Tag.id)
-                ).mappings()
-            )
-            return PageView(
-                library,
-                section,
-                book,
-                _page_item(row),
-                markdown,
-                row["selected_revision_number"],
-                row["selected_revision_created_at"],
-                files,
-                revisions,
-                history_before,
-                older_revisions_before,
-                history_before == current_revision_number + 1,
-                tag_choices,
-                page_current_etag(
-                    row["page_uid"],
-                    row["current_revision_id"],
-                    current_revision_number,
-                    row["occurred_at"],
-                    row["updated_at"],
-                ),
-            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None or page is None:
+        raise RuntimeError("Invalid master movement activity association.")
+    receipt = MasterMoveReceipt.model_validate(dict(row))
+    if (
+        receipt.changed != 1
+        or receipt.identity_id != event["identity_id"]
+        or receipt.page_id != page["page_id"]
+        or event["target_type"] != "page"
+        or event["target_id"] != f"{receipt.library_id}:{receipt.page_uid.hex()}"
+        or event["occurred_at"] != receipt.result_updated_at
+    ):
+        raise RuntimeError("Invalid master movement activity association.")
+    raw = connection.connection.driver_connection
+    if not isinstance(raw, sqlite3.Connection):
+        raise RuntimeError("Page history requires SQLite.")
+    validate_master_move_receipt(raw, receipt)
+    return receipt.revision_number
 
 
 def _master_file_set_activity_revision(
@@ -1405,6 +1516,8 @@ def _master_file_set_activity_revision(
     The caller holds one read snapshot for audits, receipts and current metadata.
     Missing associations must fail closed rather than silently truncate a page.
     """
+    from patchouli_lib.backup.manifest import PAGE_MOVE_SCHEMA_REVISION
+
     row = (
         connection.execute(
             select(MasterFileSetReceiptRow.__table__).where(
@@ -1425,10 +1538,26 @@ def _master_file_set_activity_revision(
         or event["target_id"] != f"{receipt.library_id}:{receipt.page_uid.hex()}"
         or receipt.operation_at != event["occurred_at"]
         or receipt.page_id != page["page_id"]
-        or receipt.section_id != page["section_id"]
-        or receipt.book_id != page["book_id"]
     ):
         raise RuntimeError("Invalid master file-set activity association.")
+    raw = connection.connection.driver_connection
+    if not isinstance(raw, sqlite3.Connection):
+        raise RuntimeError("Page history requires SQLite.")
+    original = load_page_state_timeline(
+        raw,
+        schema_revision=PAGE_MOVE_SCHEMA_REVISION,
+        library_id=receipt.library_id,
+        page_uid=receipt.page_uid,
+    ).exact_state(receipt.original_page_updated_at)
+    if (
+        original.deleted_at is not None
+        or original.section_id != receipt.section_id
+        or original.book_id != receipt.book_id
+        or original.revision_id != receipt.revision_id
+        or original.revision_number != receipt.revision_number
+        or original.occurred_at != receipt.original_occurred_at
+    ):
+        raise RuntimeError("Invalid master file-set activity historical association.")
     revision = connection.execute(
         select(Revision.revision_id).where(
             Revision.library_id == receipt.library_id,

@@ -12,7 +12,7 @@ from pydantic import TypeAdapter, ValidationError
 from python_multipart import MultipartParser
 from python_multipart.exceptions import FormParserError, MultipartParseError
 from python_multipart.multipart import parse_options_header
-from sqlalchemy import Connection, Engine
+from sqlalchemy import Connection, Engine, select
 from starlette.responses import JSONResponse, Response
 
 from patchouli_lib.api.authentication import (
@@ -69,10 +69,23 @@ from patchouli_lib.content.schemas import (
     PageRecord,
     StrongPageETag,
 )
+from patchouli_lib.content.service import (
+    CORRECT_OCCURRENCE_ROUTE_TEMPLATE,
+    CREATE_ROUTE_TEMPLATE,
+    DELETE_PAGE_ROUTE_TEMPLATE,
+    RESTORE_PAGE_ROUTE_TEMPLATE,
+    REVISE_ROUTE_TEMPLATE,
+)
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.idempotency import IdempotencyConflictError, digest_idempotency_key
+from patchouli_lib.idempotency.models import IdempotencyRecord
 from patchouli_lib.idempotency.schemas import OriginalResponse, ReplayResponse
-from patchouli_lib.identifiers import InvalidPageIdError, canonical_utc_wire, parse_occurrence_time
+from patchouli_lib.identifiers import (
+    InvalidPageIdError,
+    canonical_utc_wire,
+    parse_occurrence_time,
+    validate_page_id,
+)
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import OpaqueId
 from patchouli_lib.retrieval.cursor import CursorBinding, CursorCodec, InvalidCursorError
@@ -756,6 +769,11 @@ async def _require_archive_access(
     clock: Clock,
     *,
     read_action: SectionAction | None = None,
+    idempotency: ArchiveIdempotencyKey | None = None,
+    method: str = "POST",
+    route_template: str | None = None,
+    page_id: str | None = None,
+    book_id: str | None = None,
 ) -> None:
     def preflight() -> None:
         caller = context.authenticated.caller
@@ -764,6 +782,21 @@ async def _require_archive_access(
         with engine.connect() as connection:
             connection.exec_driver_sql("BEGIN")
             try:
+                authorized_section = section_id
+                if idempotency is not None:
+                    if route_template is None:
+                        raise AssertionError("Replay preflight requires an exact namespace.")
+                    authorized_section = _replay_target_section(
+                        connection,
+                        context,
+                        caller.library_id,
+                        section_id,
+                        method=method,
+                        route_template=route_template,
+                        idempotency=idempotency,
+                        page_id=page_id,
+                        book_id=book_id,
+                    )
                 policy = resolve_library_policy(
                     connection,
                     credential_id=context.authenticated.credential.id,
@@ -779,7 +812,9 @@ async def _require_archive_access(
                         caller.library_id, caller.id
                     )
                     actions = {
-                        grant.action for grant in current_grants if grant.section_id == section_id
+                        grant.action
+                        for grant in current_grants
+                        if grant.section_id == authorized_section
                     }
                     if not actions:
                         raise resource_not_found()
@@ -789,12 +824,139 @@ async def _require_archive_access(
                         raise insufficient_scope()
                 elif not policy.write or (read_action is not None and not policy.read):
                     raise insufficient_scope()
-                if LibraryRepository(connection).get_section(caller.library_id, section_id) is None:
+                if (
+                    LibraryRepository(connection).get_section(caller.library_id, authorized_section)
+                    is None
+                ):
                     raise resource_not_found()
             finally:
                 connection.rollback()
 
     await anyio.to_thread.run_sync(preflight, abandon_on_cancel=False)
+
+
+def _replay_target_section(
+    connection: Connection,
+    context: AuthenticatedRequestContext,
+    library_id: str,
+    section_id: str,
+    *,
+    method: str,
+    route_template: str,
+    idempotency: ArchiveIdempotencyKey,
+    page_id: str | None = None,
+    book_id: str | None = None,
+) -> str:
+    """Locate only this Caller's recorded success before receiving request bytes.
+
+    This is not replay acceptance: the write transaction must reauthenticate,
+    compare the complete fingerprint and validate the full historical state.
+    No receipt, fingerprint or response body escapes this internal lookup.
+    """
+    page = _find_replay_page(
+        connection,
+        context,
+        library_id,
+        section_id,
+        method=method,
+        route_template=route_template,
+        idempotency=idempotency,
+        page_id=page_id,
+        book_id=book_id,
+    )
+    return section_id if page is None else page.section_id
+
+
+def _find_replay_page(
+    connection: Connection,
+    context: AuthenticatedRequestContext,
+    library_id: str,
+    section_id: str,
+    *,
+    method: str,
+    route_template: str,
+    idempotency: ArchiveIdempotencyKey,
+    page_id: str | None = None,
+    book_id: str | None = None,
+) -> PageRecord | None:
+    caller = context.authenticated.caller
+    stored = connection.execute(
+        select(IdempotencyRecord.response_body).where(
+            IdempotencyRecord.library_id == library_id,
+            IdempotencyRecord.actor_home_library_id == caller.library_id,
+            IdempotencyRecord.caller_id == caller.id,
+            IdempotencyRecord.method == method,
+            IdempotencyRecord.route_template == route_template,
+            IdempotencyRecord.key_digest == idempotency.key_digest,
+        )
+    ).scalar_one_or_none()
+    if stored is None:
+        return None
+    try:
+        body = json.loads(stored, object_pairs_hook=_unique_object)
+        if not isinstance(body, dict):
+            raise ValueError
+        target = body.get("page", body)
+        if not isinstance(target, dict) or not isinstance(target.get("page_id"), str):
+            raise ValueError
+        stored_page_id = validate_page_id(target["page_id"])
+        if page_id is not None and stored_page_id != page_id:
+            raise ValueError
+        if target.get("section_id") != section_id:
+            raise ValueError
+        if book_id is not None and target.get("book_id") != book_id:
+            raise ValueError
+    except (ValueError, RecursionError, TypeError):
+        raise resource_not_found() from None
+    page = ContentRepository(connection).get_page(library_id, stored_page_id)
+    if page is None or page.page_type != "archive":
+        raise resource_not_found()
+    return page
+
+
+def _authorize_archive_mutation(
+    connection: Connection,
+    token: str,
+    command: CreateArchiveCommand
+    | AppendArchiveRevisionCommand
+    | CorrectArchiveOccurrenceCommand
+    | PageLifecycleCommand,
+    idempotency: ArchiveIdempotencyKey,
+    *,
+    method: str,
+    route_template: str,
+    clock: Clock,
+) -> None:
+    authentication = AuthenticationService(AuthRepository(connection), clock=clock)
+    authenticated = authentication.authenticate(token)
+    replay_page = _find_replay_page(
+        connection,
+        AuthenticatedRequestContext(authenticated, ()),
+        command.library_id,
+        command.section_id,
+        method=method,
+        route_template=route_template,
+        idempotency=idempotency,
+        page_id=None if isinstance(command, CreateArchiveCommand) else command.page_id,
+        book_id=command.book_id if isinstance(command, CreateArchiveCommand) else None,
+    )
+    authentication.authorize_content(
+        token,
+        library_id=command.library_id,
+        section_id=command.section_id if replay_page is None else replay_page.section_id,
+        action=SectionAction.ARCHIVE_WRITE,
+    )
+    if replay_page is not None:
+        return
+    content = ContentRepository(connection)
+    if isinstance(command, CreateArchiveCommand):
+        book = content.get_book(command.library_id, command.book_id)
+        if book is None or book.section_id != command.section_id:
+            raise ArchiveNotFoundError
+    else:
+        page = content.get_page(command.library_id, command.page_id)
+        if page is None or page.page_type != "archive" or page.section_id != command.section_id:
+            raise ArchiveNotFoundError
 
 
 async def _require_trash_read_access(
@@ -825,32 +987,19 @@ def _perform_mutation(
 ) -> ArchiveMutationResult:
     try:
         with immediate_transaction(engine) as connection:
-            AuthenticationService(
-                AuthRepository(connection),
-                clock=clock,
-            ).authorize_content(
+            # The service owns current authorization, historical replay proof
+            # and fresh-request path gates in this same write transaction.
+            _authorize_archive_mutation(
+                connection,
                 token,
-                library_id=command.library_id,
-                section_id=command.section_id,
-                action=SectionAction.ARCHIVE_WRITE,
+                command,
+                idempotency,
+                method="POST",
+                route_template=CREATE_ROUTE_TEMPLATE
+                if mutation == "create"
+                else REVISE_ROUTE_TEMPLATE,
+                clock=clock,
             )
-            content = ContentRepository(connection)
-            if mutation == "create":
-                if not isinstance(command, CreateArchiveCommand):
-                    raise AssertionError("Create mutation requires a create command.")
-                book = content.get_book(command.library_id, command.book_id)
-                if book is None or book.section_id != command.section_id:
-                    raise ArchiveNotFoundError
-            else:
-                if not isinstance(command, AppendArchiveRevisionCommand):
-                    raise AssertionError("Revision mutation requires a revision command.")
-                page = content.get_page(command.library_id, command.page_id)
-                if (
-                    page is None
-                    or page.page_type != "archive"
-                    or page.section_id != command.section_id
-                ):
-                    raise ArchiveNotFoundError
             service = service_factory(connection)
             if mutation == "create":
                 if not isinstance(command, CreateArchiveCommand):
@@ -885,15 +1034,15 @@ def _perform_occurrence_correction(
 ) -> OriginalResponse | ReplayResponse:
     try:
         with immediate_transaction(engine) as connection:
-            AuthenticationService(AuthRepository(connection), clock=clock).authorize_content(
+            _authorize_archive_mutation(
+                connection,
                 token,
-                library_id=command.library_id,
-                section_id=command.section_id,
-                action=SectionAction.ARCHIVE_WRITE,
+                command,
+                idempotency,
+                method="PATCH",
+                route_template=CORRECT_OCCURRENCE_ROUTE_TEMPLATE,
+                clock=clock,
             )
-            page = ContentRepository(connection).get_page(command.library_id, command.page_id)
-            if page is None or page.page_type != "archive" or page.section_id != command.section_id:
-                raise ArchiveNotFoundError
             return service_factory(connection).correct_occurrence(token, command, idempotency)
     except AuthenticationError:
         raise invalid_token() from None
@@ -920,15 +1069,17 @@ def _perform_lifecycle(
 ) -> OriginalResponse | ReplayResponse:
     try:
         with immediate_transaction(engine) as connection:
-            AuthenticationService(AuthRepository(connection), clock=clock).authorize_content(
+            _authorize_archive_mutation(
+                connection,
                 token,
-                library_id=command.library_id,
-                section_id=command.section_id,
-                action=SectionAction.ARCHIVE_WRITE,
+                command,
+                idempotency,
+                method="DELETE" if action == "delete" else "POST",
+                route_template=DELETE_PAGE_ROUTE_TEMPLATE
+                if action == "delete"
+                else RESTORE_PAGE_ROUTE_TEMPLATE,
+                clock=clock,
             )
-            page = ContentRepository(connection).get_page(command.library_id, command.page_id)
-            if page is None or page.page_type != "archive" or page.section_id != command.section_id:
-                raise ArchiveNotFoundError
             return service_factory(connection).transition_page_lifecycle(
                 token, command, idempotency, action=action
             )
@@ -1107,7 +1258,15 @@ def create_archive_router(
         idempotency = _idempotency_key(request)
         _create_precondition(request)
         context = await _authenticate(authenticate, request)
-        await _require_archive_access(engine, context, validated_section_id, clock)
+        await _require_archive_access(
+            engine,
+            context,
+            validated_section_id,
+            clock,
+            idempotency=idempotency,
+            route_template=CREATE_ROUTE_TEMPLATE,
+            book_id=validated_book_id,
+        )
         metadata, content = await _archive_parts(request)
         command = _create_command(
             metadata,
@@ -1138,7 +1297,15 @@ def create_archive_router(
         idempotency = _idempotency_key(request)
         expected_etag = _revision_precondition(request)
         context = await _authenticate(authenticate, request)
-        await _require_archive_access(engine, context, validated_section_id, clock)
+        await _require_archive_access(
+            engine,
+            context,
+            validated_section_id,
+            clock,
+            idempotency=idempotency,
+            route_template=REVISE_ROUTE_TEMPLATE,
+            page_id=page_id,
+        )
         metadata, content = await _archive_parts(request)
         command = _revision_command(
             metadata,
@@ -1170,7 +1337,16 @@ def create_archive_router(
         idempotency = _idempotency_key(request)
         expected_etag = _revision_precondition(request)
         context = await _authenticate(authenticate, request)
-        await _require_archive_access(engine, context, validated_section_id, clock)
+        await _require_archive_access(
+            engine,
+            context,
+            validated_section_id,
+            clock,
+            idempotency=idempotency,
+            method="PATCH",
+            route_template=CORRECT_OCCURRENCE_ROUTE_TEMPLATE,
+            page_id=page_id,
+        )
         occurred_at = await _occurrence_value(request)
         command = _occurrence_command(
             context=context,
@@ -1205,7 +1381,18 @@ def create_archive_router(
         idempotency = _idempotency_key(request)
         expected_etag = _revision_precondition(request)
         context = await _authenticate(authenticate, request)
-        await _require_archive_access(engine, context, validated_section_id, clock)
+        await _require_archive_access(
+            engine,
+            context,
+            validated_section_id,
+            clock,
+            idempotency=idempotency,
+            method="DELETE" if action == "delete" else "POST",
+            route_template=DELETE_PAGE_ROUTE_TEMPLATE
+            if action == "delete"
+            else RESTORE_PAGE_ROUTE_TEMPLATE,
+            page_id=page_id,
+        )
         await _require_empty_body(request)
         command = _lifecycle_command(
             context=context,

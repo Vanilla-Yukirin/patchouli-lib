@@ -53,6 +53,7 @@ from patchouli_lib.admin.master_token_store import (
     MasterTokenAlreadyInitialized,
     MasterTokenRepository,
 )
+from patchouli_lib.admin.page_move_routes import create_master_page_move_router
 from patchouli_lib.admin.pages import (
     REVEAL_SCRIPT,
     STYLESHEET,
@@ -2071,6 +2072,77 @@ def create_admin_router(
             status_code=404 if view is None else status,
         )
 
+    def stable_page_response(
+        request: Request,
+        library_id: str,
+        page_id: str,
+        revision_number: str | None = None,
+    ) -> Response:
+        locale = locale_for(request)
+        session: AdminSession | None = None
+
+        def authorize(connection: Connection) -> bool:
+            nonlocal session
+            session = session_for_connection(request, connection)
+            return isinstance(session, MasterAdminSession)
+
+        # Bad path/cursor text still passes transaction-local admission before 404.
+        number = None
+        if revision_number is not None:
+            number = (
+                int(revision_number)
+                if 1 <= len(revision_number) <= 19
+                and revision_number.isascii()
+                and revision_number.isdecimal()
+                and revision_number[0] != "0"
+                else 0
+            )
+        try:
+            before = revision_history_before(request)
+        except ValueError:
+            before = 0
+        try:
+            view = read_model.get_page_by_id(
+                library_id,
+                page_id,
+                number,
+                before_revision_number=before,
+                authorize=authorize,
+            )
+        except AuthenticationError:
+            if session is not None:
+                return forbidden(request, "A master session is required.")
+            redirect_response = redirect("/admin/login")
+            _clear_cookie(redirect_response, secure=secure_cookie(request))
+            remember_requested_locale(redirect_response, request)
+            return redirect_response
+        assert isinstance(session, MasterAdminSession)
+        response = html(
+            browser_not_found_page(session.csrf_token, locale=locale)
+            if view is None
+            else page_preview_page(
+                session.csrf_token,
+                view,
+                locale=locale,
+                master_mode=True,
+                navigation_base=f"/admin/libraries/{library_id}/pages/{page_id}",
+            ),
+            locale=locale,
+            status_code=404 if view is None else 200,
+        )
+        remember_requested_locale(response, request)
+        return response
+
+    @router.get("/libraries/{library_id}/pages/{page_id}")
+    def stable_page_detail(request: Request, library_id: str, page_id: str) -> Response:
+        return stable_page_response(request, library_id, page_id)
+
+    @router.get("/libraries/{library_id}/pages/{page_id}/revisions/{revision_number}")
+    def stable_page_revision_detail(
+        request: Request, library_id: str, page_id: str, revision_number: str
+    ) -> Response:
+        return stable_page_response(request, library_id, page_id, revision_number)
+
     @router.get("/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages/{page_id}")
     def page_detail(
         request: Request, library_id: str, section_id: str, book_id: str, page_id: str
@@ -2665,6 +2737,20 @@ def create_admin_router(
 
     router.include_router(
         create_master_file_set_router(
+            engine,
+            current_session=current_session,
+            locale_for=locale_for,
+            same_origin=_same_origin_submission,
+            html_response=lambda content, locale, status, script: html(
+                content, locale=locale, status_code=status, allow_self_script=script
+            ),
+            clear_session=lambda response, request: _clear_cookie(
+                response, secure=secure_cookie(request)
+            ),
+        )
+    )
+    router.include_router(
+        create_master_page_move_router(
             engine,
             current_session=current_session,
             locale_for=locale_for,

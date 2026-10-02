@@ -46,7 +46,11 @@ from patchouli_lib.content.schemas import (
     RevisionId,
     StrongPageETag,
 )
-from patchouli_lib.content.service import page_current_etag
+from patchouli_lib.content.service import (
+    ArchiveReplayCorruptError,
+    _require_replay_state,
+    page_current_etag,
+)
 from patchouli_lib.idempotency.repository import IdempotencyRepository
 from patchouli_lib.idempotency.schemas import (
     IdempotencyRequest,
@@ -185,20 +189,25 @@ class FileSetWriteService:
         manifest = build_file_manifest(command.files)
         with self._connection.begin_nested():
             operation_at = self._operation_time()
-            authenticated = AuthenticationService(
-                self._auth_repository,
-                clock=lambda: operation_at,
-            ).authorize_content(
-                token_value,
-                library_id=command.library_id,
-                section_id=command.section_id,
-                action=SectionAction.ARCHIVE_WRITE,
+            authentication = AuthenticationService(
+                self._auth_repository, clock=lambda: operation_at
             )
+            authentication.authenticate(token_value)
             page = self._content.get_page(command.library_id, command.page_id)
             if page is None or page.page_type != "archive":
+                authentication.authorize_content(
+                    token_value,
+                    library_id=command.library_id,
+                    section_id=command.section_id,
+                    action=SectionAction.ARCHIVE_WRITE,
+                )
                 raise FileSetWriteNotFoundError("Page is not available.")
-            if not hmac.compare_digest(page.section_id, command.section_id):
-                raise FileSetWriteNotFoundError("Page is not available.")
+            authenticated = authentication.authorize_content(
+                token_value,
+                library_id=command.library_id,
+                section_id=page.section_id,
+                action=SectionAction.ARCHIVE_WRITE,
+            )
             caller = TransactionValidatedCaller(
                 library_id=command.library_id,
                 actor_home_library_id=authenticated.caller.library_id,
@@ -218,9 +227,50 @@ class FileSetWriteService:
                     raise FileSetWriteReplayCorruptError(
                         "Stored file-set response is invalid."
                     ) from None
-                if body.section_id != page.section_id or body.page_id != page.page_id:
+                try:
+                    state = _require_replay_state(
+                        self._connection,
+                        page,
+                        replay,
+                        section_id=command.section_id,
+                        revision_id=body.revision_id,
+                        revision_number=body.revision_number,
+                    )
+                except ArchiveReplayCorruptError:
+                    raise FileSetWriteReplayCorruptError(
+                        "Stored file-set history is invalid."
+                    ) from None
+                revision_at = self._connection.exec_driver_sql(
+                    "SELECT created_at FROM revisions WHERE library_id = ? AND page_uid = ? "
+                    "AND revision_number = ?",
+                    (page.library_id, page.page_uid, body.revision_number),
+                ).scalar_one_or_none()
+                if (
+                    body.section_id != command.section_id
+                    or body.page_id != page.page_id
+                    or replay.response_status != 200
+                    or replay.response_location is not None
+                    or revision_at is None
+                    or (body.changed and state.updated_at != revision_at)
+                    or body.snapshot_sha256 != manifest.snapshot_sha256.hex()
+                    or [(f.filename, f.size_bytes, f.content_sha256) for f in body.files]
+                    != [
+                        (f.name, f.content_size_bytes, f.content_sha256.hex())
+                        for f in manifest.files
+                    ]
+                ):
                     raise FileSetWriteReplayCorruptError("Stored file-set response target changed.")
                 return FileSetWriteReplay(replay)
+            AuthenticationService(
+                self._auth_repository, clock=lambda: operation_at
+            ).authorize_content(
+                token_value,
+                library_id=command.library_id,
+                section_id=command.section_id,
+                action=SectionAction.ARCHIVE_WRITE,
+            )
+            if not hmac.compare_digest(page.section_id, command.section_id):
+                raise FileSetWriteNotFoundError("Page is not available.")
             if page.deleted_at is not None:
                 raise FileSetWriteNotFoundError("Page is not available.")
             if command.expected_etag is None:

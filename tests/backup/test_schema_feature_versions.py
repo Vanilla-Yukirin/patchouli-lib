@@ -6,6 +6,7 @@ import ast
 import sqlite3
 import sys
 from contextlib import closing
+from dataclasses import replace
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import ModuleType
@@ -22,6 +23,7 @@ from patchouli_lib.backup.manifest import (
     BACKUP_FILENAME,
     MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
     MASTER_OCCURRENCE_SCHEMA_REVISION,
+    PAGE_MOVE_SCHEMA_REVISION,
 )
 
 from .conftest import APP_VERSION, _config
@@ -34,9 +36,8 @@ from .test_master_occurrence_backup import (
     _source,
 )
 from .test_page_lifecycle_validation import _TIME, _credential
-from .test_service import _create
 
-_FUTURE_DEFAULT = "20261001_0028"
+_FUTURE_DEFAULT = "20261001_0029"
 
 
 def _future_default_modules(
@@ -91,7 +92,10 @@ def test_future_default_does_not_relabel_historical_catalogues(
     for name in vars(backup_validation):
         if name.endswith("_REVISIONS"):
             assert getattr(validation, name) == getattr(backup_validation, name)
-    assert {"20261001_0027"} == validation._MASTER_OCCURRENCE_REVISIONS
+    assert {
+        MASTER_OCCURRENCE_SCHEMA_REVISION,
+        PAGE_MOVE_SCHEMA_REVISION,
+    } == validation._MASTER_OCCURRENCE_REVISIONS
     assert MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION not in validation._MASTER_OCCURRENCE_REVISIONS
     assert _FUTURE_DEFAULT not in validation._EXPECTED_SQL_HASHES_BY_REVISION
     assert "MASTER_OCCURRENCE_SCHEMA_REVISION" in manifest.__all__
@@ -135,7 +139,10 @@ def test_real_historical_bundles_restore_after_default_changes(
     bundle = tmp_path / "historical-bundle"
     if revision == MASTER_OCCURRENCE_SCHEMA_REVISION:
         _master_correct(complete_engine, session, page_id, at=_TIME + 30)
-        expected = _create(complete_engine, bundle).manifest
+        source = _source(complete_engine)
+        command.downgrade(_config(source, monkeypatch), revision)
+        expected = replace(_historical_bundle(source, bundle), schema_revision=revision)
+        (bundle / "manifest.json").write_bytes(expected.canonical_bytes())
     else:
         source = _source(complete_engine)
         command.downgrade(_config(source, monkeypatch), revision)

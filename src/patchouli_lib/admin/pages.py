@@ -412,6 +412,7 @@ _ZH_CN: dict[str, str] = {
     "Created a page": "创建了页面",
     "Revised a page": "更新了页面",
     "Changed a page title": "修改了页面标题",
+    "Moved a page": "移动了页面",
     "Corrected a page's occurrence time": "更正了页面的发生时间",
     "Edit declared time": "修改文档发生时间",
     "Declared time (RFC3339)": "文档发生时间（带时区的标准时间）",
@@ -1264,6 +1265,7 @@ def _content_activity_timeline(
                 "content.archive.delete": "Deleted a page",
                 "content.archive.restore": "Restored a page",
                 "content.page.title.edit": "Changed a page title",
+                "content.page.move": "Moved a page",
             }[item.action]
             description = f"{localize(locale, action)} {page}"
         entries.append(
@@ -2439,11 +2441,13 @@ def page_preview_page(
     message: str | None = None,
     error: bool = False,
     master_mode: bool = False,
+    navigation_base: str | None = None,
 ) -> str:
     library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
     section_path = f"{library_path}/sections/{escape(view.section.id, quote=True)}"
     book_path = f"{section_path}/books/{escape(view.book.id, quote=True)}"
     base = f"{book_path}/pages/{escape(view.page.id, quote=True)}"
+    navigation = base if navigation_base is None else escape(navigation_base, quote=True)
     history_query = (
         ""
         if view.history_is_latest
@@ -2452,7 +2456,7 @@ def page_preview_page(
     history = "".join(
         "<li"
         + (' aria-current="true"' if item.number == view.selected_revision_number else "")
-        + f'><a href="{base}/revisions/{item.number}{history_query}">'
+        + f'><a href="{navigation}/revisions/{item.number}{history_query}">'
         f"{localize(locale, 'Version')} {item.number}</a>"
         + (
             f' <span class="selected-marker">({localize(locale, "Viewing")})</span>'
@@ -2472,9 +2476,11 @@ def page_preview_page(
         for item in view.files
     )
     current = view.selected_revision_number == view.page.revision_number
-    selected_path = base if current else f"{base}/revisions/{view.selected_revision_number}"
+    selected_path = (
+        navigation if current else f"{navigation}/revisions/{view.selected_revision_number}"
+    )
     latest_path = (
-        base
+        navigation
         if current
         else f"{selected_path}?before_revision_number={view.page.revision_number + 1}"
     )
@@ -2500,7 +2506,7 @@ def page_preview_page(
         + (
             ""
             if current
-            else f'<p><a href="{base}">{localize(locale, "Back to current version")}</a></p>'
+            else f'<p><a href="{navigation}">{localize(locale, "Back to current version")}</a></p>'
         )
         + (
             f"<h2>{localize(locale, heading)}</h2>"
@@ -2525,9 +2531,11 @@ def page_preview_page(
             f'{view.selected_revision_number}/restore">{restore_label}</a></p>'
         )
     if current and master_mode:
+        move_label = "移动文档" if locale == "zh-CN" else "Move document"
         body += (
             f'<p><a class="button" href="{base}/files/edit">'
             f"{localize(locale, 'Update files')}</a></p>"
+            f'<p><a class="button" href="{base}/move">{move_label}</a></p>'
         )
         body += (
             f'<section class="card"><h2>{localize(locale, "Edit Page title")}</h2>'

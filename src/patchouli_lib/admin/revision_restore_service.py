@@ -85,8 +85,6 @@ class MasterRevisionRestoreService:
                 if (
                     book is None
                     or page is None
-                    or page.section_id != command.section_id
-                    or page.book_id != command.book_id
                     or command.source_revision_number > page.current_revision_number
                 ):
                     raise MasterFileSetNotFoundError("Source version is not available.")
@@ -105,7 +103,8 @@ class MasterRevisionRestoreService:
             finally:
                 connection.rollback()
 
-        # Do not reject deletion or a stale ETag in the read phase. The locked
+        # Resolve the immutable source by stable Page identity. Do not reject a
+        # subsequent move, deletion or stale ETag in the read phase. The locked
         # service authenticates again and checks a prior success before deciding
         # whether a new write is allowed. It also closes the read/write race.
         append = FileSetAppendCommand(

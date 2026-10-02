@@ -21,7 +21,7 @@ from sqlalchemy import Connection
 
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import AuditEventRecord, AuditOutcome, NewAuditEvent, SectionAction
-from patchouli_lib.auth.service import AuthenticationService, utc_microseconds
+from patchouli_lib.auth.service import AuthenticationService, AuthorizationError, utc_microseconds
 from patchouli_lib.content.file_manifest import FileManifest, build_file_manifest
 from patchouli_lib.content.file_set_create_core import (
     FileSetCreateIdentifierExhaustedError,
@@ -40,7 +40,11 @@ from patchouli_lib.content.schemas import (
     RequestId,
     RevisionId,
 )
-from patchouli_lib.content.service import page_current_etag
+from patchouli_lib.content.service import (
+    ArchiveReplayCorruptError,
+    _require_replay_state,
+    page_current_etag,
+)
 from patchouli_lib.idempotency.repository import IdempotencyRepository
 from patchouli_lib.idempotency.schemas import (
     IdempotencyRequest,
@@ -55,6 +59,7 @@ from patchouli_lib.identifiers import (
     canonical_utc_wire,
     generate_page_uid,
     generate_revision_id,
+    parse_occurrence_time,
 )
 
 Clock = Callable[[], int]
@@ -188,18 +193,11 @@ class FileSetCreateService:
             # matches no row and fires no application mutation trigger.
             self._connection.exec_driver_sql("UPDATE libraries SET id = id WHERE 0")
             operation_at = self._operation_time()
-            authenticated = AuthenticationService(
+            authentication = AuthenticationService(
                 self._auth_repository,
                 clock=lambda: operation_at,
-            ).authorize_content(
-                token_value,
-                library_id=command.library_id,
-                section_id=command.section_id,
-                action=SectionAction.ARCHIVE_WRITE,
             )
-            book = self._content.get_book(command.library_id, command.book_id)
-            if book is None or not hmac.compare_digest(book.section_id, command.section_id):
-                raise FileSetCreateNotFoundError("Book is not available.")
+            authenticated = authentication.authenticate(token_value)
             caller = TransactionValidatedCaller(
                 library_id=command.library_id,
                 actor_home_library_id=authenticated.caller.library_id,
@@ -211,24 +209,74 @@ class FileSetCreateService:
                 key_digest=idempotency.key_digest,
                 request_fingerprint=self._fingerprint(command, manifest),
             )
-            replay = self._idempotency.lookup(caller, request)
-            if replay is not None:
+            stored = IdempotencyRepository(self._connection).get(caller, request)
+            if stored is not None:
                 try:
-                    body = _CreateBody.model_validate_json(replay.response_body)
+                    body = _CreateBody.model_validate_json(stored.response_body)
                 except ValueError:
+                    raise AuthorizationError from None
+                page = self._content.get_page(command.library_id, body.page_id)
+                if page is None or page.page_type != "archive":
+                    raise AuthorizationError
+                authentication.authorize_content(
+                    token_value,
+                    library_id=command.library_id,
+                    section_id=page.section_id,
+                    action=SectionAction.ARCHIVE_WRITE,
+                )
+                replay = self._idempotency.lookup(caller, request)
+                if replay is None:
                     raise FileSetCreateReplayCorruptError(
-                        "Stored file-set response is invalid."
+                        "Stored file-set response is unavailable."
+                    )
+                try:
+                    state = _require_replay_state(
+                        self._connection,
+                        page,
+                        replay,
+                        section_id=command.section_id,
+                        book_id=command.book_id,
+                        revision_id=body.revision_id,
+                        revision_number=1,
+                        updated_at=parse_occurrence_time(
+                            replay.original_request_timestamp
+                        ).utc_microseconds,
+                    )
+                except (ArchiveReplayCorruptError, ValueError):
+                    raise FileSetCreateReplayCorruptError(
+                        "Stored file-set history is invalid."
                     ) from None
                 if (
                     replay.response_status != 201
                     or replay.response_location is not None
-                    or body.section_id != book.section_id
-                    or body.book_id != book.id
+                    or body.section_id != command.section_id
+                    or body.book_id != command.book_id
+                    or body.occurred_at != canonical_utc_wire(state.occurred_at)
+                    or body.occurrence_defaulted != (command.occurred_at is None)
+                    or state.title != command.title
+                    or body.snapshot_sha256 != manifest.snapshot_sha256.hex()
+                    or [(f.filename, f.size_bytes, f.content_sha256) for f in body.files]
+                    != [
+                        (f.name, f.content_size_bytes, f.content_sha256.hex())
+                        for f in manifest.files
+                    ]
                 ):
                     raise FileSetCreateReplayCorruptError(
                         "Stored file-set response target changed."
                     )
                 return FileSetCreateReplay(replay)
+
+            authenticated = authentication.authorize_content(
+                token_value,
+                library_id=command.library_id,
+                section_id=command.section_id,
+                action=SectionAction.ARCHIVE_WRITE,
+            )
+            book = self._content.get_book(command.library_id, command.book_id)
+            if book is None or not hmac.compare_digest(book.section_id, command.section_id):
+                raise FileSetCreateNotFoundError("Book is not available.")
+            if self._idempotency.lookup(caller, request) is not None:
+                raise FileSetCreateReplayCorruptError("Stored file-set response is unexpected.")
 
             occurred_at = operation_at if command.occurred_at is None else command.occurred_at
             page = self._create_core.create_page(

@@ -52,7 +52,11 @@ def _append_revision(
             connection.execute(
                 update(Page)
                 .where(Page.library_id == library_id, Page.page_uid == page_uid)
-                .values(current_revision_id=revision_id, current_revision_number=number),
+                .values(
+                    current_revision_id=revision_id,
+                    current_revision_number=number,
+                    updated_at=2_000_000 + number,
+                ),
             )
         return revision_id
     finally:
@@ -247,6 +251,7 @@ def test_backfills_all_revisions_preserves_sources_and_legacy_writes(
                 == legacy_sources
             )
             assert len(connection.execute(select(Revision)).all()) == 3
+            assert connection.execute(select(Page.updated_at)).scalar_one() == 2_000_003
     finally:
         engine.dispose()
     command.upgrade(config, "head")

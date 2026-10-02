@@ -3,9 +3,11 @@ from logging.config import fileConfig
 from alembic import context
 
 from patchouli_lib.admin import file_set_receipts as master_file_set_models
+from patchouli_lib.admin import move_receipts as master_move_models
 from patchouli_lib.auth import models as auth_models
 from patchouli_lib.config import Settings
 from patchouli_lib.content import models as content_models
+from patchouli_lib.content import page_move_models
 from patchouli_lib.database import build_engine
 from patchouli_lib.idempotency import models as idempotency_models
 from patchouli_lib.library import models as library_models
@@ -35,6 +37,10 @@ if request_log_models.RequestLogRecord.metadata is not Base.metadata:
 if master_file_set_models.MasterFileSetReceiptRow.metadata is not Base.metadata:
     raise RuntimeError("Master file-set models must use the shared SQLAlchemy metadata.")
 target_metadata = Base.metadata
+if master_move_models.MasterMoveReceiptRow.metadata is not Base.metadata:
+    raise RuntimeError("Master move models must use the shared SQLAlchemy metadata.")
+if page_move_models.PageMoveEvent.metadata is not Base.metadata:
+    raise RuntimeError("Page move models must use the shared SQLAlchemy metadata.")
 
 
 def _include_object(
