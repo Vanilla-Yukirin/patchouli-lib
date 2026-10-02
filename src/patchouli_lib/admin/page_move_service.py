@@ -11,7 +11,7 @@ from time import time
 from uuid import uuid4
 
 from pydantic import Field, field_validator
-from sqlalchemy import Engine, func, insert, select, update
+from sqlalchemy import Engine, func, select
 
 from patchouli_lib.admin.master_audit import MasterAuditRepository
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
@@ -22,10 +22,12 @@ from patchouli_lib.admin.move_receipts import (
 )
 from patchouli_lib.admin.session import MasterAdminSession
 from patchouli_lib.auth.service import AuthenticationError, utc_microseconds
-from patchouli_lib.content.file_set_service import FileSetPreconditionFailedError
-from patchouli_lib.content.models import Page
-from patchouli_lib.content.page_move_models import PageMoveEvent, PageMoveGuard
-from patchouli_lib.content.repository import ContentRepository
+from patchouli_lib.content.page_move_core import (
+    PageMoveNotFoundError,
+    apply_page_move,
+    prepare_page_move,
+)
+from patchouli_lib.content.page_move_models import PageMoveGuard
 from patchouli_lib.content.schemas import (
     ArchiveIdempotencyKey,
     ContentSchema,
@@ -36,12 +38,9 @@ from patchouli_lib.content.schemas import (
 from patchouli_lib.content.service import page_current_etag
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.idempotency.schemas import digest_request_fingerprint
-from patchouli_lib.identifiers import canonical_utc_wire, validate_page_id
-from patchouli_lib.library.repository import LibraryRepository
+from patchouli_lib.identifiers import validate_page_id
 
-
-class MasterPageMoveNotFoundError(RuntimeError):
-    """The active source Page or exact target Book is unavailable."""
+MasterPageMoveNotFoundError = PageMoveNotFoundError
 
 
 class MasterPageMoveConflictError(RuntimeError):
@@ -107,48 +106,25 @@ class MasterPageMoveService:
                 validate_master_move_receipt(raw, previous)
                 result = MasterPageMoveResult(previous, True)
             else:
-                page = ContentRepository(connection).get_page(command.library_id, command.page_id)
-                if (
-                    page is None
-                    or page.deleted_at is not None
-                    or page.section_id != command.source_section_id
-                    or page.book_id != command.source_book_id
-                ):
-                    raise MasterPageMoveNotFoundError
-                expected = page_current_etag(
-                    page.page_uid,
-                    page.current_revision_id,
-                    page.current_revision_number,
-                    page.occurred_at,
-                    page.updated_at,
-                )
-                if not hmac.compare_digest(expected, command.expected_etag):
-                    raise FileSetPreconditionFailedError
-                target = LibraryRepository(connection).get_book(
-                    command.library_id, command.target_section_id, command.target_book_id
-                )
-                if target is None:
-                    raise MasterPageMoveNotFoundError
                 now = self._clock()
-                if type(now) is not int or now < 0:
-                    raise ValueError("Invalid movement time.")
-                canonical_utc_wire(now)
-                changed = (page.section_id, page.book_id) != (target.section_id, target.id)
-                updated_at = page.updated_at
-                sequence = None
+                plan = prepare_page_move(
+                    connection,
+                    library_id=command.library_id,
+                    page_id=command.page_id,
+                    source_section_id=command.source_section_id,
+                    source_book_id=command.source_book_id,
+                    target_section_id=command.target_section_id,
+                    target_book_id=command.target_book_id,
+                    expected_etag=command.expected_etag,
+                    operation_at=now,
+                )
+                page = plan.page
+                expected = command.expected_etag
+                changed = plan.changed
+                updated_at = plan.updated_at
+                sequence = plan.sequence
                 audit_id = None
                 if changed:
-                    updated_at = max(now, page.updated_at + 1)
-                    canonical_utc_wire(updated_at)
-                    sequence = 1 + (
-                        connection.scalar(
-                            select(func.max(PageMoveEvent.sequence)).where(
-                                PageMoveEvent.library_id == page.library_id,
-                                PageMoveEvent.page_uid == page.page_uid,
-                            )
-                        )
-                        or 0
-                    )
                     audit_id = uuid4().hex
                     MasterAuditRepository(connection).add_success(
                         identity_id=master_session.identity_id,
@@ -160,42 +136,7 @@ class MasterPageMoveService:
                         occurred_at=updated_at,
                         event_id=audit_id,
                     )
-                    connection.execute(
-                        insert(PageMoveGuard),
-                        {
-                            "library_id": page.library_id,
-                            "page_uid": page.page_uid,
-                            "sequence": sequence,
-                            "old_section_id": page.section_id,
-                            "old_book_id": page.book_id,
-                            "new_section_id": target.section_id,
-                            "new_book_id": target.id,
-                            "old_updated_at": page.updated_at,
-                            "changed_at": updated_at,
-                            "at_revision_id": page.current_revision_id,
-                            "at_revision_number": page.current_revision_number,
-                            "occurred_at_at_event": page.occurred_at,
-                            "master_audit_event_id": audit_id,
-                        },
-                    )
-                    affected = connection.execute(
-                        update(Page)
-                        .where(
-                            Page.library_id == page.library_id,
-                            Page.page_uid == page.page_uid,
-                            Page.section_id == page.section_id,
-                            Page.book_id == page.book_id,
-                            Page.updated_at == page.updated_at,
-                            Page.deleted_at.is_(None),
-                        )
-                        .values(
-                            section_id=target.section_id,
-                            book_id=target.id,
-                            updated_at=updated_at,
-                        )
-                    )
-                    if affected.rowcount != 1:
-                        raise FileSetPreconditionFailedError
+                apply_page_move(connection, plan, master_audit_event_id=audit_id)
                 receipt = MasterMoveReceipt(
                     identity_id=master_session.identity_id,
                     operation="move",
@@ -206,8 +147,8 @@ class MasterPageMoveService:
                     page_id=page.page_id,
                     source_section_id=page.section_id,
                     source_book_id=page.book_id,
-                    target_section_id=target.section_id,
-                    target_book_id=target.id,
+                    target_section_id=plan.target_section_id,
+                    target_book_id=plan.target_book_id,
                     revision_id=page.current_revision_id,
                     revision_number=page.current_revision_number,
                     original_occurred_at=page.occurred_at,

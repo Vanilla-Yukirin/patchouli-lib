@@ -179,14 +179,20 @@ class MasterMoveReceiptCorruptError(RuntimeError):
 
 
 def validate_master_move_receipt(
-    connection: sqlite3.Connection, receipt: MasterMoveReceipt
+    connection: sqlite3.Connection,
+    receipt: MasterMoveReceipt,
+    *,
+    schema_revision: str | None = None,
 ) -> PageState:
-    from patchouli_lib.backup.manifest import PAGE_MOVE_SCHEMA_REVISION
 
+    if schema_revision is None:
+        schema_revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()[
+            0
+        ]
     try:
         timeline = load_page_state_timeline(
             connection,
-            schema_revision=PAGE_MOVE_SCHEMA_REVISION,
+            schema_revision=schema_revision,
             library_id=receipt.library_id,
             page_uid=receipt.page_uid,
         )

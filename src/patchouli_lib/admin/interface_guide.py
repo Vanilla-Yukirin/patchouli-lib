@@ -25,6 +25,13 @@ GuideLocale = Literal["en", "zh-CN"]
 _API_ENDPOINTS = (
     ("GET", "/api/v1/capabilities", "Service capabilities", "服务能力", "always"),
     (
+        "POST",
+        "/api/v1/libraries/{library_id}/pages/{page_id}/move",
+        "Move a Page within one Library (explicit Library write grant required)",
+        "在同一知识库内移动页面（需要逐库写授权）",
+        "always",
+    ),
+    (
         "GET",
         "/api/v1/auth/whoami",
         "Caller identity and effective authorization mode",
@@ -412,9 +419,9 @@ def _preview(
 def api_guide(locale: GuideLocale, *, retrieval_available: bool) -> str:
     capabilities_example = capabilities_response(
         CapabilityConfiguration(
-            features=("archive", FILE_SET_FEATURE, "retrieval", "tags")
+            features=("archive", FILE_SET_FEATURE, "page-move", "retrieval", "tags")
             if retrieval_available
-            else ("archive", FILE_SET_FEATURE, "tags"),
+            else ("archive", FILE_SET_FEATURE, "page-move", "tags"),
             content_mutation_idempotency=True,
             successful_replay_retention="indefinite-alpha",
         )

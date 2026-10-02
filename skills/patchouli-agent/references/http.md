@@ -353,6 +353,44 @@ Bash 和 PowerShell 的交互式输入方式见 [本机凭据输入](local-token
 同一标准库脚本。后续上传程序应从本机文件读取 Markdown 与元数据、在进程内存里
 组装 multipart、通过请求头提交随机幂等键；不要把敏感正文拼进 Shell 参数。
 
+## 同一知识库内移动 Page
+
+仅在服务公布 `page-move` 能力时使用：
+
+```text
+POST /api/v1/libraries/{library_id}/pages/{page_id}/move
+```
+
+使用 `library_grants` 模式的 Agent Token，需目标库的 `write`；旧 Section 凭据和
+operator 不适用。源和目标必须同属一个 Library，可以跨 Section／Book。此操作
+保留 Page ID、全部文件和历史、标签、标题与声明时间，不生成内容 Revision。
+
+请求带原 `Idempotency-Key`、当前强 `If-Match` 和 `Content-Type: application/json`；
+JSON 只含以下四个字段，替换为已核实的实际 ID（以下全部为合成值）：
+
+```json
+{
+  "source_section_id": "11111111111111111111111111111111",
+  "source_book_id": "22222222222222222222222222222222",
+  "target_section_id": "33333333333333333333333333333333",
+  "target_book_id": "44444444444444444444444444444444"
+}
+```
+
+有 `read` 且服务还公布 `retrieval` 时，可先用稳定 Page 查询确认当前位置，再从当前
+文件集接口取得强 ETag。没有 `retrieval` 但已知准确 Section／Page 路径时，直接用
+当前文件集 GET 取得 ETag；位置不明则请已授权来源提供，不把缺少发现接口的 404
+当作 Page 不存在。只有 `write` 时由已授权来源提供准确位置与 ETag，不会因此开放内容读取。
+成功返回 200、`changed`、源／目标 ID、未变的 Revision 信息和结果 ETag。同目标
+返回 `changed=false`，也会记住这次成功。请求结果不确定时原样重试，不能自动换源、
+换目标、换键或换 ETag；旧版本冲突返回 412，应重新核对而不是强行覆盖。
+
+`Idempotency-Replayed: true` 表示返回原成功，即使页面后来再次移动或进入回收站，
+也不会再次移动或恢复它。原成功描述当时的位置；需要当前位置时，若服务公布
+`retrieval`，可重新做获授权的稳定 Page 查询；否则按上段从已授权来源确认。
+旧深层链接不会自动改写。现有 SDK／CLI／MCP 的服务能力透传不代表它们
+已有移动方法或工具；此功能使用本节的标准 HTTP 请求。
+
 ## 已实现的 Tag 接口
 
 Tag 是当前 Library 内的标记，不改变 Page 的 Section／Book 归属。所有请求都带设备

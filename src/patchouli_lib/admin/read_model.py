@@ -628,6 +628,7 @@ class AdminReadModel:
                     AuditEvent.action,
                     AuditEvent.resource_type,
                     AuditEvent.resource_id,
+                    AuditEvent.request_id,
                     AuditEvent.occurred_at,
                 )
                 .join(
@@ -648,6 +649,7 @@ class AdminReadModel:
                             "content.archive.correct_occurrence",
                             "content.archive.delete",
                             "content.archive.restore",
+                            "content.page.move",
                             "tag.create",
                             "tag.page.attach",
                             "tag.page.detach",
@@ -744,6 +746,8 @@ class AdminReadModel:
                         .mappings()
                         .one_or_none()
                     )
+                if action == "content.page.move":
+                    revision_number = _caller_move_activity_revision(connection, event)
                 tag = (
                     connection.execute(
                         select(Tag.id, Tag.display_name).where(
@@ -1575,6 +1579,46 @@ class AdminReadModel:
         )
 
 
+def _caller_move_activity_revision(connection: Connection, event: RowMapping) -> int:
+    from patchouli_lib.content.page_move_receipts import validate_caller_move_receipt
+    from patchouli_lib.content.page_move_schemas import PAGE_MOVE_ROUTE_TEMPLATE
+    from patchouli_lib.idempotency.schemas import StoredIdempotencyRecord
+    from patchouli_lib.identifiers import canonical_utc_wire
+
+    rows = (
+        connection.exec_driver_sql(
+            "SELECT * FROM idempotency_records WHERE library_id=? AND actor_home_library_id=? "
+            "AND caller_id=? AND route_template=? AND original_request_id=? "
+            "AND json_extract(response_body, '$.updated_at')=? "
+            "AND json_extract(response_body, '$.page_id')=? LIMIT 2",
+            (
+                event["library_id"],
+                event["actor_home_library_id"],
+                event["actor_caller_id"],
+                PAGE_MOVE_ROUTE_TEMPLATE,
+                event["request_id"],
+                canonical_utc_wire(event["occurred_at"]),
+                event["resource_id"],
+            ),
+        )
+        .mappings()
+        .all()
+    )
+    if len(rows) != 1:
+        raise RuntimeError("Invalid Caller movement activity association.")
+    raw = connection.connection.driver_connection
+    if not isinstance(raw, sqlite3.Connection):
+        raise RuntimeError("Page history requires SQLite.")
+    body = validate_caller_move_receipt(
+        raw,
+        StoredIdempotencyRecord.model_validate(dict(rows[0])),
+        schema_revision=raw.execute("SELECT version_num FROM alembic_version").fetchone()[0],
+    )
+    if not body.changed:
+        raise RuntimeError("A no-op cannot have a movement activity.")
+    return body.revision_number
+
+
 def _master_move_activity_revision(
     connection: Connection, event: RowMapping, page: RowMapping | None
 ) -> int:
@@ -1614,7 +1658,6 @@ def _master_file_set_activity_revision(
     The caller holds one read snapshot for audits, receipts and current metadata.
     Missing associations must fail closed rather than silently truncate a page.
     """
-    from patchouli_lib.backup.manifest import PAGE_MOVE_SCHEMA_REVISION
 
     row = (
         connection.execute(
@@ -1643,7 +1686,7 @@ def _master_file_set_activity_revision(
         raise RuntimeError("Page history requires SQLite.")
     original = load_page_state_timeline(
         raw,
-        schema_revision=PAGE_MOVE_SCHEMA_REVISION,
+        schema_revision=raw.execute("SELECT version_num FROM alembic_version").fetchone()[0],
         library_id=receipt.library_id,
         page_uid=receipt.page_uid,
     ).exact_state(receipt.original_page_updated_at)

@@ -1,4 +1,4 @@
-"""Master-attributed immutable membership events and consumed write guards."""
+"""Exactly one real audit actor per immutable movement and consumed guard."""
 
 from __future__ import annotations
 
@@ -37,6 +37,14 @@ def _constraints(*, guard: bool) -> tuple[Constraint, ...]:
             ["master_audit_event_id"], ["admin_master_audit_events.id"], ondelete="RESTRICT"
         ),
         UniqueConstraint("master_audit_event_id"),
+        ForeignKeyConstraint(
+            ["caller_audit_event_id"], ["auth_audit_events.id"], ondelete="RESTRICT"
+        ),
+        UniqueConstraint("caller_audit_event_id"),
+        CheckConstraint(
+            "(master_audit_event_id IS NOT NULL AND caller_audit_event_id IS NULL) OR "
+            "(master_audit_event_id IS NULL AND caller_audit_event_id IS NOT NULL)"
+        ),
         CheckConstraint("typeof(page_uid) = 'blob' AND length(page_uid) = 16"),
         CheckConstraint(
             "typeof(sequence) = 'integer' AND sequence BETWEEN 1 AND 9223372036854775807"
@@ -90,7 +98,8 @@ class _MoveColumns:
     at_revision_id: Mapped[str] = mapped_column(String(36), nullable=False)
     at_revision_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
     occurred_at_at_event: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    master_audit_event_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    master_audit_event_id: Mapped[str | None] = mapped_column(String(32))
+    caller_audit_event_id: Mapped[str | None] = mapped_column(String(32))
 
 
 class PageMoveEvent(_MoveColumns, Base):

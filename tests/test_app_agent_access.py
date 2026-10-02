@@ -173,6 +173,7 @@ def test_application_registers_exact_agent_access_routes(tmp_path: Path) -> None
         assert routes == {
             ("/api/v1/capabilities", "GET"),
             ("/api/v1/auth/whoami", "GET"),
+            ("/api/v1/libraries/{library_id}/pages/{page_id}/move", "POST"),
             ("/api/v1/agent/skill/manifest", "GET"),
             ("/api/v1/agent/skill/files/{resource_path}", "GET"),
             (
@@ -390,7 +391,7 @@ def test_application_does_not_register_retrieval_without_cursor_secret(tmp_path:
                 headers={"Authorization": f"Bearer {token}"},
             )
             assert capabilities.status_code == 200
-            assert capabilities.json()["features"] == ["archive", "file-sets", "tags"]
+            assert capabilities.json()["features"] == ["archive", "file-sets", "page-move", "tags"]
             assert (
                 client.get(
                     "/api/v1/sections",
@@ -443,7 +444,13 @@ def test_integrated_archive_create_replay_and_revise(
             headers={"Authorization": f"Bearer {token}"},
         )
         assert capabilities.status_code == 200
-        assert capabilities.json()["features"] == ["archive", "file-sets", "retrieval", "tags"]
+        assert capabilities.json()["features"] == [
+            "archive",
+            "file-sets",
+            "page-move",
+            "retrieval",
+            "tags",
+        ]
         assert capabilities.json()["idempotency"] == {
             "content_mutations": True,
             "successful_replay_retention": "indefinite-alpha",

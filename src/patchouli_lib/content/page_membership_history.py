@@ -14,6 +14,8 @@ from typing import Any
 from patchouli_lib.content.service import page_current_etag
 
 _PAGE_MOVE_REVISION = "20261001_0028"
+_CALLER_MOVE_REVISION = "20261002_0029"
+_MOVE_REVISIONS = frozenset({_PAGE_MOVE_REVISION, _CALLER_MOVE_REVISION})
 _TITLE_REVISIONS = frozenset(
     {
         "20260930_0022",
@@ -23,6 +25,7 @@ _TITLE_REVISIONS = frozenset(
         "20261001_0026",
         "20261001_0027",
         _PAGE_MOVE_REVISION,
+        _CALLER_MOVE_REVISION,
     }
 )
 
@@ -164,17 +167,19 @@ def load_page_state_timeline(
             connection,
             "SELECT sequence, old_section_id, old_book_id, new_section_id, new_book_id, "
             "old_updated_at, changed_at, at_revision_id, at_revision_number, "
-            "occurred_at_at_event, master_audit_event_id FROM page_move_events "
+            "occurred_at_at_event, master_audit_event_id, "
+            + ("caller_audit_event_id" if schema_revision == _CALLER_MOVE_REVISION else "NULL")
+            + " AS caller_audit_event_id FROM page_move_events "
             "WHERE library_id = ? AND page_uid = ? ORDER BY sequence",
             key,
         )
-        if schema_revision == _PAGE_MOVE_REVISION
+        if schema_revision in _MOVE_REVISIONS
         else []
     )
     for table in (
         "page_occurrence_correction_guards",
         "page_lifecycle_guards",
-        *(("page_move_guards",) if schema_revision == _PAGE_MOVE_REVISION else ()),
+        *(("page_move_guards",) if schema_revision in _MOVE_REVISIONS else ()),
     ):
         _require(
             connection.execute(
@@ -262,14 +267,34 @@ def load_page_state_timeline(
                     and row["at_revision_id"] == state.revision_id
                     and row["occurred_at_at_event"] == state.occurred_at
                 )
-                audit = connection.execute(
-                    "SELECT action, target_type, target_id, occurred_at "
-                    "FROM admin_master_audit_events WHERE id = ?",
-                    (row["master_audit_event_id"],),
-                ).fetchone()
-                _require(
-                    audit == ("content.page.move", "page", f"{library_id}:{page_uid.hex()}", at)
-                )
+                if row["master_audit_event_id"] is None:
+                    audit = connection.execute(
+                        "SELECT library_id, action, resource_type, resource_id, outcome, "
+                        "occurred_at "
+                        "FROM auth_audit_events WHERE id = ?",
+                        (row["caller_audit_event_id"],),
+                    ).fetchone()
+                    _require(
+                        audit
+                        == (
+                            library_id,
+                            "content.page.move",
+                            "page",
+                            page["page_id"],
+                            "succeeded",
+                            at,
+                        )
+                    )
+                else:
+                    _require(row["caller_audit_event_id"] is None)
+                    audit = connection.execute(
+                        "SELECT action, target_type, target_id, occurred_at "
+                        "FROM admin_master_audit_events WHERE id = ?",
+                        (row["master_audit_event_id"],),
+                    ).fetchone()
+                    _require(
+                        audit == ("content.page.move", "page", f"{library_id}:{page_uid.hex()}", at)
+                    )
                 state = replace(state, section_id=row["new_section_id"], book_id=row["new_book_id"])
         state = replace(state, updated_at=at)
         states.append(state)

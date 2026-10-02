@@ -41,6 +41,9 @@ description: 通过标准 HTTP 接入 PatchouliLib，验证设备身份、下载
   回读确认后清理；尚未完成核验时保留以便重试，用户原始文件绝不自动删除。
 - 旧单 Markdown Archive 写入是兼容路径，新客户端优先统一文件集。目标服务若尚未
   公布文件集能力，不能盲调新接口；是否改用旧接口应先说明其单文件限制。
+- 整理 Page 归属时，服务需公布 `page-move`，设备需拥有该 Library 的写权限。
+  按 [HTTP 移动流程](references/http.md)提交准确源／目标、当前 ETag 与幂等键；
+  只在同库内移动，不复制文件或创建新 Page。原成功重试不能改写为新的移动目标。
 - 目标服务的能力响应含 `search` 时，按[标准 HTTP 搜索契约](references/http.md)
   调用跨知识库当前 Page 搜索。索引未重建或不完整会明确返回 `search_unavailable`；
   用 POST 正文中的不透明游标续页，失效时从第一页重搜；摘录是规范化索引文本，

@@ -10,6 +10,8 @@ from sqlalchemy import Engine, inspect, select, text, update
 
 from patchouli_lib.content.models import Page, PageLifecycleEvent, PageLifecycleGuard
 from patchouli_lib.content.repository import ContentRepository
+from patchouli_lib.content.schemas import ArchiveIdempotencyKey, PageLifecycleCommand
+from patchouli_lib.content.service import ArchiveService, page_current_etag
 from patchouli_lib.database import build_engine, immediate_transaction
 
 from .conftest import OPERATION_TIME, ArchiveScope, alembic_config, configure_database
@@ -91,13 +93,25 @@ def test_downgrade_refuses_to_discard_lifecycle_events(
         repository = ContentRepository(connection)
         page = repository.get_page(archive_scope.library_id, values[0].page_id)
         assert page is not None
-        repository.transition_page_lifecycle(
-            page,
+        # Later migrations validate the complete historical graph. Exercise a
+        # real deletion with its audit and durable success, not a partial event.
+        ArchiveService(connection, clock=lambda: OPERATION_TIME).transition_page_lifecycle(
+            archive_scope.token.value,
+            PageLifecycleCommand(
+                library_id=archive_scope.library_id,
+                section_id=archive_scope.section_id,
+                page_id=page.page_id,
+                expected_etag=page_current_etag(
+                    page.page_uid,
+                    page.current_revision_id,
+                    page.current_revision_number,
+                    page.occurred_at,
+                    page.updated_at,
+                ),
+                request_id="req_" + "a" * 32,
+            ),
+            ArchiveIdempotencyKey(key_digest=b"k" * 32),
             action="delete",
-            actor_caller_id=archive_scope.caller_id,
-            actor_home_library_id=archive_scope.library_id,
-            request_id="req_" + "a" * 32,
-            changed_at=OPERATION_TIME,
         )
     with pytest.raises(RuntimeError, match="Cannot discard recorded"):
         command.downgrade(alembic_config(), "20260929_0011")
