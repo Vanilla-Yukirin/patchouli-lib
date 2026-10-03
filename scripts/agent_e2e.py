@@ -564,7 +564,7 @@ def _exercise_agent(
     capability_data = _object(capabilities.get("data"), step="Agent capabilities")
     _require_equal(
         capability_data.get("features"),
-        ["archive", "file-sets", "retrieval", "search", "tags"],
+        ["archive", "file-sets", "page-lifecycle", "page-move", "retrieval", "search", "tags"],
         step="Capabilities",
     )
 

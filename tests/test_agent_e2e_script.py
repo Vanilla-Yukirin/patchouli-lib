@@ -299,3 +299,56 @@ def test_packaged_client_uses_its_own_nonsecret_configuration(
             agent_token=agent_token,
         )
     assert inherited.read_text(encoding="utf-8") == "must remain unchanged"
+
+
+@pytest.mark.parametrize("current_features", [True, False], ids=["current", "old"])
+def test_packaged_agent_requires_exact_current_service_features(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, current_features: bool
+) -> None:
+    features = ["archive", "file-sets", "retrieval", "search", "tags"]
+    if current_features:
+        features = [
+            "archive",
+            "file-sets",
+            "page-lifecycle",
+            "page-move",
+            "retrieval",
+            "search",
+            "tags",
+        ]
+    calls: list[tuple[str, ...]] = []
+
+    def capability_then_stop(
+        executable: Path,
+        arguments: tuple[str, ...],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        step: str,
+    ) -> dict[str, object]:
+        del executable, cwd, environment, step
+        calls.append(arguments)
+        if arguments == ("capabilities",):
+            return {"data": {"features": features}}
+        assert arguments == ("whoami",)
+        raise agent_e2e.E2EFailure("stop after accepted capabilities")
+
+    monkeypatch.setattr(agent_e2e, "_cli_success", capability_then_stop)
+    expected = (
+        "stop after accepted capabilities"
+        if current_features
+        else "Capabilities did not preserve the accepted contract."
+    )
+    with pytest.raises(agent_e2e.E2EFailure) as captured:
+        agent_e2e._exercise_agent(
+            Path("synthetic-cli"),
+            Path("synthetic-operator-cli"),
+            runtime=tmp_path,
+            endpoint="https://127.0.0.1:18443",
+            ca_certificate=tmp_path / "synthetic-ca.crt",
+            server_environment={},
+            operator_token="plb1.synthetic-operator",
+            agent_token="plb1.synthetic-agent",
+        )
+    assert str(captured.value) == expected
+    assert calls == ([("capabilities",), ("whoami",)] if current_features else [("capabilities",)])
