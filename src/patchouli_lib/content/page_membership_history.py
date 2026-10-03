@@ -15,7 +15,9 @@ from patchouli_lib.content.service import page_current_etag
 
 _PAGE_MOVE_REVISION = "20261001_0028"
 _CALLER_MOVE_REVISION = "20261002_0029"
-_MOVE_REVISIONS = frozenset({_PAGE_MOVE_REVISION, _CALLER_MOVE_REVISION})
+_LIBRARY_LIFECYCLE_REVISION = "20261003_0030"
+_CALLER_MOVE_REVISIONS = frozenset({_CALLER_MOVE_REVISION, _LIBRARY_LIFECYCLE_REVISION})
+_MOVE_REVISIONS = frozenset({_PAGE_MOVE_REVISION, *_CALLER_MOVE_REVISIONS})
 _TITLE_REVISIONS = frozenset(
     {
         "20260930_0022",
@@ -26,6 +28,7 @@ _TITLE_REVISIONS = frozenset(
         "20261001_0027",
         _PAGE_MOVE_REVISION,
         _CALLER_MOVE_REVISION,
+        _LIBRARY_LIFECYCLE_REVISION,
     }
 )
 
@@ -168,7 +171,7 @@ def load_page_state_timeline(
             "SELECT sequence, old_section_id, old_book_id, new_section_id, new_book_id, "
             "old_updated_at, changed_at, at_revision_id, at_revision_number, "
             "occurred_at_at_event, master_audit_event_id, "
-            + ("caller_audit_event_id" if schema_revision == _CALLER_MOVE_REVISION else "NULL")
+            + ("caller_audit_event_id" if schema_revision in _CALLER_MOVE_REVISIONS else "NULL")
             + " AS caller_audit_event_id FROM page_move_events "
             "WHERE library_id = ? AND page_uid = ? ORDER BY sequence",
             key,

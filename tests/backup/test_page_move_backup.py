@@ -265,9 +265,36 @@ def test_semantic_move_corruption_rejected_with_original_trigger_sql(
         validate_database(database)
 
 
+@pytest.mark.parametrize(
+    "start_revision,parent_revision,error_type,error_message",
+    [
+        (
+            "20261001_0028",
+            "20261001_0027",
+            RuntimeError,
+            r"^Cannot discard Page move audit history\.$",
+        ),
+        (
+            "20261002_0029",
+            "20261001_0028",
+            RuntimeError,
+            r"^Cannot discard Page move audit history\.$",
+        ),
+        (
+            "20261003_0030",
+            "20261002_0029",
+            BackupDatabaseError,
+            r"^Backup database validation failed\.$",
+        ),
+    ],
+)
 def test_orphan_audit_is_detected_by_backup_and_blocks_downgrade(
     complete_engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
+    start_revision: str,
+    parent_revision: str,
+    error_type: type[Exception],
+    error_message: str,
 ) -> None:
     from alembic import command
 
@@ -275,7 +302,16 @@ def test_orphan_audit_is_detected_by_backup_and_blocks_downgrade(
 
     from .conftest import _config
 
+    source = _source(complete_engine)
+    config = _config(source, monkeypatch)
+    # Select each real historical format while the graph is still valid. After
+    # corruption, 0030 must refuse at its graph check rather than reaching the
+    # older explicit audit guards being independently exercised below.
+    command.downgrade(config, start_revision)
     session = _session(complete_engine)
+    assert (
+        validate_database(source, schema_revision=start_revision).schema_revision == start_revision
+    )
     with immediate_transaction(complete_engine) as connection:
         MasterAuditRepository(connection).add_success(
             identity_id=session.identity_id,
@@ -287,7 +323,55 @@ def test_orphan_audit_is_detected_by_backup_and_blocks_downgrade(
             occurred_at=_TIME,
             event_id="e" * 32,
         )
+    tables = (
+        "admin_master_audit_events",
+        "page_move_events",
+        "page_move_guards",
+        "admin_master_move_receipts",
+        "idempotency_records",
+    )
+    with complete_engine.connect() as connection:
+        assert (
+            connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
+            == start_revision
+        )
+        original_schema = tuple(
+            tuple(row)
+            for row in connection.exec_driver_sql(
+                "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name"
+            )
+        )
+        original_history = {
+            table: tuple(
+                tuple(row)
+                for row in connection.exec_driver_sql(f"SELECT * FROM {table} ORDER BY rowid")
+            )
+            for table in tables
+        }
     with pytest.raises(BackupDatabaseError):
-        validate_database(_source(complete_engine))
-    with pytest.raises(RuntimeError, match="Cannot discard Page move audit"):
-        command.downgrade(_config(_source(complete_engine), monkeypatch), "20261001_0027")
+        # The operation default must not turn historical-schema rejection into
+        # a false positive for this orphan-audit corruption test.
+        validate_database(source, schema_revision=start_revision)
+    with pytest.raises(error_type, match=error_message):
+        command.downgrade(config, parent_revision)
+    with complete_engine.connect() as connection:
+        assert (
+            connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
+            == start_revision
+        )
+        assert (
+            tuple(
+                tuple(row)
+                for row in connection.exec_driver_sql(
+                    "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name"
+                )
+            )
+            == original_schema
+        )
+        assert {
+            table: tuple(
+                tuple(row)
+                for row in connection.exec_driver_sql(f"SELECT * FROM {table} ORDER BY rowid")
+            )
+            for table in tables
+        } == original_history

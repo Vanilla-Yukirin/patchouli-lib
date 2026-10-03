@@ -22,6 +22,7 @@ from patchouli_lib.backup.errors import BackupDatabaseError, BackupManifestError
 from patchouli_lib.backup.manifest import (
     BACKUP_FILENAME,
     CALLER_PAGE_MOVE_SCHEMA_REVISION,
+    LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
     MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
     MASTER_OCCURRENCE_SCHEMA_REVISION,
     PAGE_MOVE_SCHEMA_REVISION,
@@ -97,6 +98,7 @@ def test_future_default_does_not_relabel_historical_catalogues(
         MASTER_OCCURRENCE_SCHEMA_REVISION,
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
     } == validation._MASTER_OCCURRENCE_REVISIONS
     assert MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION not in validation._MASTER_OCCURRENCE_REVISIONS
     assert _FUTURE_DEFAULT not in validation._EXPECTED_SQL_HASHES_BY_REVISION

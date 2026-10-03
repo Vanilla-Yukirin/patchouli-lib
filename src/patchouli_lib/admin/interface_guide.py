@@ -25,6 +25,20 @@ GuideLocale = Literal["en", "zh-CN"]
 _API_ENDPOINTS = (
     ("GET", "/api/v1/capabilities", "Service capabilities", "服务能力", "always"),
     (
+        "DELETE",
+        "/api/v1/libraries/{library_id}/pages/{page_id}",
+        "Soft-delete a Page (explicit Library write grant required)",
+        "软删除页面（需要逐库写授权）",
+        "always",
+    ),
+    (
+        "POST",
+        "/api/v1/libraries/{library_id}/pages/{page_id}/restore",
+        "Restore a Page (explicit Library write grant required)",
+        "恢复页面（需要逐库写授权）",
+        "always",
+    ),
+    (
         "POST",
         "/api/v1/libraries/{library_id}/pages/{page_id}/move",
         "Move a Page within one Library (explicit Library write grant required)",
@@ -419,9 +433,16 @@ def _preview(
 def api_guide(locale: GuideLocale, *, retrieval_available: bool) -> str:
     capabilities_example = capabilities_response(
         CapabilityConfiguration(
-            features=("archive", FILE_SET_FEATURE, "page-move", "retrieval", "tags")
+            features=(
+                "archive",
+                FILE_SET_FEATURE,
+                "page-lifecycle",
+                "page-move",
+                "retrieval",
+                "tags",
+            )
             if retrieval_available
-            else ("archive", FILE_SET_FEATURE, "page-move", "tags"),
+            else ("archive", FILE_SET_FEATURE, "page-lifecycle", "page-move", "tags"),
             content_mutation_idempotency=True,
             successful_replay_retention="indefinite-alpha",
         )

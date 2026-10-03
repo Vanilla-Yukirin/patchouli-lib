@@ -62,6 +62,10 @@ _REQUEST_LOG_HELP = (
     "API request metadata is kept online for 30 days. "
     "Tokens, content and search terms are not recorded."
 )
+_DISABLE_AGENT_WARNING = (
+    "Every Token for this identity will stop working, including Tokens granted access "
+    "to other Libraries. The identity, credentials and activity history remain visible."
+)
 
 REVEAL_SCRIPT = """
 document.querySelectorAll('.token-reveal').forEach((form) => {
@@ -468,6 +472,19 @@ _ZH_CN: dict[str, str] = {
     "Identity description": "身份说明",
     "Identity disabled": "身份已停用",
     "Identity active": "身份有效",
+    "Disable this Agent identity": "停用此 Agent／设备身份",
+    _DISABLE_AGENT_WARNING: (
+        "此身份的所有 Token 都将停止工作，包括可访问其他知识库的 Token。"
+        "身份、凭据记录和活动历史仍可查看。"
+    ),
+    "I confirm disabling every Token for this identity.": (
+        "我确认此身份的所有 Token 都将停止工作。"
+    ),
+    "Confirm identity disable": "确认停用身份",
+    "Confirm that all Tokens for this identity will stop working.": (
+        "请确认此身份的所有 Token 都将停止工作。"
+    ),
+    "The Agent identity was not found.": "找不到该 Agent／设备身份。",
     "Existing credentials": "现有凭据",
     "Credential metadata": "查看凭据元数据",
     "Credential active": "凭据有效",
@@ -1378,6 +1395,8 @@ def _content_activity_timeline(
                 "content.page.occurrence.correct": "Corrected a page's occurrence time",
                 "content.archive.delete": "Deleted a page",
                 "content.archive.restore": "Restored a page",
+                "content.page.delete": "Deleted a page",
+                "content.page.restore": "Restored a page",
                 "content.page.title.edit": "Changed a page title",
                 "content.page.move": "Moved a page",
             }[item.action]
@@ -1658,6 +1677,20 @@ def caller_page(
             f"{escape(view.description)}</textarea>"
             f'<button type="submit">{localize(locale, "Save Agent")}</button>'
             "</form></section>"
+        )
+    if allow_master_actions and view.kind == "agent" and view.disabled_at is None:
+        path = f"/admin/libraries/{view.library_id}/callers/{view.id}/disable"
+        body += (
+            '<section class="card"><details>'
+            f"<summary>{localize(locale, 'Disable this Agent identity')}</summary>"
+            f"<p>{localize(locale, _DISABLE_AGENT_WARNING)}</p>"
+            f"<p><code>{escape(view.id)}</code></p>"
+            f'<form method="post" action="{escape(path, quote=True)}">'
+            f"{_csrf(escape(csrf_token, quote=True))}"
+            '<label><input type="checkbox" name="confirm_disable" value="yes" required> '
+            f"{localize(locale, 'I confirm disabling every Token for this identity.')}</label>"
+            f'<button type="submit">{localize(locale, "Confirm identity disable")}</button>'
+            "</form></details></section>"
         )
     if message is not None:
         body = _notice(localize(locale, message), error=True) + body

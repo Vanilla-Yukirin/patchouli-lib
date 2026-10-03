@@ -116,7 +116,13 @@ def test_api_directory_and_synthetic_examples_match_reviewed_wire_shapes(
     capabilities = _preview(response.text, "capabilities-preview")
     parsed_capabilities = CapabilitiesResponse.model_validate(capabilities)
     assert parsed_capabilities.api_versions == ("v1",)
-    assert parsed_capabilities.features == ("archive", "file-sets", "page-move", "tags")
+    assert parsed_capabilities.features == (
+        "archive",
+        "file-sets",
+        "page-lifecycle",
+        "page-move",
+        "tags",
+    )
     assert parsed_capabilities.limits.file_set is not None
 
     search_error = _preview(response.text, "search-preview")

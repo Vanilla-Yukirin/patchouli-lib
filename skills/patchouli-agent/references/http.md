@@ -391,6 +391,32 @@ JSON 只含以下四个字段，替换为已核实的实际 ID（以下全部为
 旧深层链接不会自动改写。现有 SDK／CLI／MCP 的服务能力透传不代表它们
 已有移动方法或工具；此功能使用本节的标准 HTTP 请求。
 
+## 库明确的软删除与恢复
+
+仅在服务公布 `page-lifecycle` 时使用以下空正文请求：
+
+```text
+DELETE /api/v1/libraries/{library_id}/pages/{page_id}
+POST   /api/v1/libraries/{library_id}/pages/{page_id}/restore
+```
+
+每个请求带设备 Bearer、强 `If-Match` 原值与 `Idempotency-Key`；不传 JSON、
+multipart 或查询参数。只有 `library_grants` Agent 的目标 Library `write` 可调用；
+旧 Section 模式和 operator 不扩权，管理登录 Cookie／主 Token 不能替代设备 Token。
+WRITE 不包含 READ：只有写权限时，由已授权来源提供 Page ID 与准确 ETag；删除成功
+响应中的 ETag 可用于恢复，丢失响应时原样重试删除以取回原成功，不猜测 ETag。
+
+200 返回操作时的 Library、Page、Section／Book、状态、未变的 Revision 身份与 ETag，
+不返回标题、内容或文件清单。删除保留全部历史和字节，恢复不是重新上传。
+`Idempotency-Replayed: true` 返回原成功，即使后来发生修订、移动或再次删除／恢复，
+也不再次变更 Page；原响应不是当前位置或当前状态。重放仍要求现有目标 WRITE。
+
+缺少 If-Match 返回 428，陈旧版本返回 412；同状态的新操作返回
+409 `lifecycle_state_conflict`，同键不同请求返回 409 `idempotency_conflict`。
+不要换键或强行覆盖来消除冲突。无效凭据 401、权限不足 403、未知目标 404，
+非空正文等不满足契约的输入 422。旧 Archive 的 Section 删除／恢复入口保持原语义；
+此功能使用标准 HTTP 与 Skill，不代表现有 SDK／CLI／MCP 增加了生命周期方法。
+
 ## 已实现的 Tag 接口
 
 Tag 是当前 Library 内的标记，不改变 Page 的 Section／Book 归属。所有请求都带设备

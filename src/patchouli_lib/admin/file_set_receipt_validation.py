@@ -123,11 +123,16 @@ def validate_master_file_set_receipt(
     revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
     from patchouli_lib.backup.manifest import (
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         PAGE_MOVE_SCHEMA_REVISION,
     )
 
     timeline = None
-    if revision in {(PAGE_MOVE_SCHEMA_REVISION,), (CALLER_PAGE_MOVE_SCHEMA_REVISION,)}:
+    if revision in {
+        (PAGE_MOVE_SCHEMA_REVISION,),
+        (CALLER_PAGE_MOVE_SCHEMA_REVISION,),
+        (LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,),
+    }:
         try:
             timeline = load_page_state_timeline(
                 connection,

@@ -44,6 +44,9 @@ description: 通过标准 HTTP 接入 PatchouliLib，验证设备身份、下载
 - 整理 Page 归属时，服务需公布 `page-move`，设备需拥有该 Library 的写权限。
   按 [HTTP 移动流程](references/http.md)提交准确源／目标、当前 ETag 与幂等键；
   只在同库内移动，不复制文件或创建新 Page。原成功重试不能改写为新的移动目标。
+- 软删除或恢复 Page 时，服务需公布 `page-lifecycle`，设备需有目标 Library 的写权限；
+  使用库明确的稳定 Page ID 路径、强 `If-Match`、`Idempotency-Key` 与空正文。
+  WRITE 不包含 READ；成功后保留原请求用于重试，不能把恢复当成文件内容重传。
 - 目标服务的能力响应含 `search` 时，按[标准 HTTP 搜索契约](references/http.md)
   调用跨知识库当前 Page 搜索。索引未重建或不完整会明确返回 `search_unavailable`；
   用 POST 正文中的不透明游标续页，失效时从第一页重搜；摘录是规范化索引文本，

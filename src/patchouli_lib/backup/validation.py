@@ -35,6 +35,7 @@ from patchouli_lib.backup.manifest import (
     INTERMEDIATE_SCHEMA_REVISION,
     LEGACY_SCHEMA_REVISION,
     LIBRARY_DESCRIPTION_SCHEMA_REVISION,
+    LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
     LIBRARY_POLICY_SCHEMA_REVISION,
     LIFECYCLE_SCHEMA_REVISION,
     MASTER_AUDIT_SCHEMA_REVISION,
@@ -60,6 +61,12 @@ from patchouli_lib.content.file_manifest import (
 )
 from patchouli_lib.content.file_set_create_service import FILE_SET_CREATE_ROUTE_TEMPLATE
 from patchouli_lib.content.file_set_write_service import FILE_SET_APPEND_ROUTE_TEMPLATE
+from patchouli_lib.content.page_lifecycle_receipts import require_library_lifecycle_graph
+from patchouli_lib.content.page_lifecycle_schemas import (
+    LIBRARY_LIFECYCLE_ROUTES,
+    LibraryPageLifecycleBody,
+    lifecycle_route,
+)
 from patchouli_lib.content.page_membership_history import (
     PageMembershipHistoryError,
     PageStateTimeline,
@@ -832,6 +839,7 @@ _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     MASTER_OCCURRENCE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0027,
     PAGE_MOVE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0028,
     CALLER_PAGE_MOVE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0029,
+    LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0029,
 }
 _FILE_SET_REVISIONS: Final = frozenset(
     {
@@ -852,6 +860,7 @@ _FILE_SET_REVISIONS: Final = frozenset(
         MASTER_OCCURRENCE_SCHEMA_REVISION,
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
     }
 )
 _MASTER_LIFECYCLE_REVISIONS: Final = frozenset(
@@ -867,12 +876,18 @@ _MASTER_LIFECYCLE_REVISIONS: Final = frozenset(
         MASTER_OCCURRENCE_SCHEMA_REVISION,
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
     }
 )
 _LIFECYCLE_REVISIONS: Final = _FILE_SET_REVISIONS | {LIFECYCLE_SCHEMA_REVISION}
 _OCCURRENCE_REVISIONS: Final = _LIFECYCLE_REVISIONS | {OCCURRENCE_SCHEMA_REVISION}
 _MASTER_OCCURRENCE_REVISIONS: Final = frozenset(
-    {MASTER_OCCURRENCE_SCHEMA_REVISION, PAGE_MOVE_SCHEMA_REVISION, CALLER_PAGE_MOVE_SCHEMA_REVISION}
+    {
+        MASTER_OCCURRENCE_SCHEMA_REVISION,
+        PAGE_MOVE_SCHEMA_REVISION,
+        CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+    }
 )
 
 
@@ -1365,6 +1380,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
         MASTER_OCCURRENCE_SCHEMA_REVISION,
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
     }:
         for row in connection.execute(
             "SELECT library_id, page_uid, sequence, old_title, new_title, "
@@ -1465,6 +1481,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
                         MASTER_OCCURRENCE_SCHEMA_REVISION,
                         PAGE_MOVE_SCHEMA_REVISION,
                         CALLER_PAGE_MOVE_SCHEMA_REVISION,
+                        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
                     }
                 )
             ):
@@ -1493,16 +1510,26 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
                 if action == "delete"
                 else ("POST", RESTORE_PAGE_ROUTE_TEMPLATE)
             )
+            new_route = (
+                lifecycle_route(action)[1]
+                if schema_revision == LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION
+                else route
+            )
             replays = connection.execute(
-                "SELECT response_body FROM idempotency_records WHERE library_id = ? "
-                "AND caller_id = ? AND method = ? AND route_template = ? "
+                "SELECT response_body, route_template FROM idempotency_records "
+                "WHERE library_id = ? "
+                "AND caller_id = ? AND method = ? AND route_template IN (?, ?) "
                 "AND original_request_id = ? AND original_request_timestamp = ?",
-                (library_id, actor, method, route, request_id, timestamp),
+                (library_id, actor, method, route, new_route, request_id, timestamp),
             ).fetchall()
             if len(replays) != 1 or type(replays[0][0]) is not bytes:
                 raise BackupDatabaseError
             try:
-                replay_body = PageLifecycleResponseBody.model_validate_json(replays[0][0])
+                replay_body = (
+                    LibraryPageLifecycleBody.model_validate_json(replays[0][0])
+                    if replays[0][1] in LIBRARY_LIFECYCLE_ROUTES
+                    else PageLifecycleResponseBody.model_validate_json(replays[0][0])
+                )
             except ValueError:
                 raise BackupDatabaseError from None
             if replay_body.section_id != section_id or replay_body.page_id != pages[key][1]:
@@ -1534,7 +1561,11 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
         updated_at,
         final_revision,
     ) in pages.items():
-        if schema_revision in {PAGE_MOVE_SCHEMA_REVISION, CALLER_PAGE_MOVE_SCHEMA_REVISION}:
+        if schema_revision in {
+            PAGE_MOVE_SCHEMA_REVISION,
+            CALLER_PAGE_MOVE_SCHEMA_REVISION,
+            LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        }:
             _page_timeline(connection, schema_revision, key[0], key[1])
             continue
         first_revision = first_revisions.get(key)
@@ -1936,7 +1967,11 @@ def _require_master_audit(connection: sqlite3.Connection, schema_revision: str) 
         ):
             raise BackupDatabaseError
         if action == "content.page.move":
-            if schema_revision not in {PAGE_MOVE_SCHEMA_REVISION, CALLER_PAGE_MOVE_SCHEMA_REVISION}:
+            if schema_revision not in {
+                PAGE_MOVE_SCHEMA_REVISION,
+                CALLER_PAGE_MOVE_SCHEMA_REVISION,
+                LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+            }:
                 raise BackupDatabaseError
             linked = connection.execute(
                 "SELECT e.library_id, e.page_uid, e.changed_at FROM page_move_events e "
@@ -1981,6 +2016,7 @@ def _require_master_audit(connection: sqlite3.Connection, schema_revision: str) 
                 MASTER_OCCURRENCE_SCHEMA_REVISION,
                 PAGE_MOVE_SCHEMA_REVISION,
                 CALLER_PAGE_MOVE_SCHEMA_REVISION,
+                LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
             }:
                 raise BackupDatabaseError
             linked_events = connection.execute(
@@ -2012,6 +2048,7 @@ def _require_master_audit(connection: sqlite3.Connection, schema_revision: str) 
                 MASTER_OCCURRENCE_SCHEMA_REVISION,
                 PAGE_MOVE_SCHEMA_REVISION,
                 CALLER_PAGE_MOVE_SCHEMA_REVISION,
+                LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
             }
             and action == "content.page.title.edit"
         ):
@@ -2131,6 +2168,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         MASTER_OCCURRENCE_SCHEMA_REVISION,
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
     }:
         invalid_library_policies = _one_integer(
             connection,
@@ -2160,6 +2198,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         MASTER_OCCURRENCE_SCHEMA_REVISION,
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
     }:
         _require_agent_token_values(connection)
 
@@ -2178,6 +2217,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         MASTER_OCCURRENCE_SCHEMA_REVISION,
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
     }:
         _require_master_identity(connection)
 
@@ -2195,6 +2235,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         MASTER_OCCURRENCE_SCHEMA_REVISION,
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
     }:
         _require_actor_home_graph(connection, schema_revision)
 
@@ -2211,6 +2252,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         MASTER_OCCURRENCE_SCHEMA_REVISION,
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
     }:
         _require_master_audit(connection, schema_revision)
 
@@ -2333,7 +2375,11 @@ def _require_lifecycle_replay(
         actor,
         revision_id,
     ) = matching[0]
-    if schema_revision in {PAGE_MOVE_SCHEMA_REVISION, CALLER_PAGE_MOVE_SCHEMA_REVISION}:
+    if schema_revision in {
+        PAGE_MOVE_SCHEMA_REVISION,
+        CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+    }:
         state = _page_timeline(connection, schema_revision, library_id, page_uid).exact_state(
             changed_at
         )
@@ -2474,6 +2520,7 @@ def _file_set_valid_current_etags(
         MASTER_OCCURRENCE_SCHEMA_REVISION,
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
     }:
         for (changed_at,) in connection.execute(
             "SELECT changed_at FROM page_title_events "
@@ -2542,7 +2589,14 @@ def _require_file_set_replay(
         (
             library_id,
             body.section_id,
-            int(schema_revision in {PAGE_MOVE_SCHEMA_REVISION, CALLER_PAGE_MOVE_SCHEMA_REVISION}),
+            int(
+                schema_revision
+                in {
+                    PAGE_MOVE_SCHEMA_REVISION,
+                    CALLER_PAGE_MOVE_SCHEMA_REVISION,
+                    LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+                }
+            ),
             body.page_id,
             body.revision_id,
             body.revision_number,
@@ -2564,7 +2618,11 @@ def _require_file_set_replay(
     ):
         raise BackupDatabaseError
     timeline = None
-    if schema_revision in {PAGE_MOVE_SCHEMA_REVISION, CALLER_PAGE_MOVE_SCHEMA_REVISION}:
+    if schema_revision in {
+        PAGE_MOVE_SCHEMA_REVISION,
+        CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+    }:
         timeline = _page_timeline(connection, schema_revision, library_id, page_uid)
         state = timeline.match_active_etag(
             revision_id=body.revision_id,
@@ -2712,6 +2770,7 @@ def _page_title_at(
         MASTER_OCCURRENCE_SCHEMA_REVISION,
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
     }:
         return current_title
     row = connection.execute(
@@ -2724,6 +2783,17 @@ def _page_title_at(
 
 
 def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: str) -> None:
+    if schema_revision == LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION:
+        try:
+            require_library_lifecycle_graph(connection, schema_revision=schema_revision)
+        except (ValueError, RuntimeError, sqlite3.Error):
+            raise BackupDatabaseError from None
+    elif connection.execute(
+        "SELECT 1 FROM auth_audit_events WHERE action IN "
+        "('content.page.delete','content.page.restore') LIMIT 1"
+    ).fetchone():
+        raise BackupDatabaseError
+
     def reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
         result: dict[str, object] = {}
         for key, value in pairs:
@@ -2776,8 +2846,17 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             raise BackupDatabaseError from None
 
+        if route in LIBRARY_LIFECYCLE_ROUTES:
+            if schema_revision != LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION:
+                raise BackupDatabaseError
+            # Full bidirectional proof was checked above, including exact bytes.
+            continue
+
         if route == "/api/v1/libraries/{library_id}/pages/{page_id}/move":
-            if schema_revision != CALLER_PAGE_MOVE_SCHEMA_REVISION:
+            if schema_revision not in {
+                CALLER_PAGE_MOVE_SCHEMA_REVISION,
+                LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+            }:
                 raise BackupDatabaseError
             continue
 
@@ -2808,7 +2887,11 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
                     correction_body.section_id,
                     int(
                         schema_revision
-                        in {PAGE_MOVE_SCHEMA_REVISION, CALLER_PAGE_MOVE_SCHEMA_REVISION}
+                        in {
+                            PAGE_MOVE_SCHEMA_REVISION,
+                            CALLER_PAGE_MOVE_SCHEMA_REVISION,
+                            LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+                        }
                     ),
                     correction_body.page_id,
                     correction_time.utc_microseconds,
@@ -2826,7 +2909,11 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
                 corrected_at,
                 revision_id,
             ) = matching[0]
-            if schema_revision in {PAGE_MOVE_SCHEMA_REVISION, CALLER_PAGE_MOVE_SCHEMA_REVISION}:
+            if schema_revision in {
+                PAGE_MOVE_SCHEMA_REVISION,
+                CALLER_PAGE_MOVE_SCHEMA_REVISION,
+                LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+            }:
                 state = _page_timeline(
                     connection, schema_revision, library_id, page_uid
                 ).exact_state(corrected_at)
@@ -2937,7 +3024,12 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
                 body.page.page_id,
                 body.page.section_id,
                 int(
-                    schema_revision in {PAGE_MOVE_SCHEMA_REVISION, CALLER_PAGE_MOVE_SCHEMA_REVISION}
+                    schema_revision
+                    in {
+                        PAGE_MOVE_SCHEMA_REVISION,
+                        CALLER_PAGE_MOVE_SCHEMA_REVISION,
+                        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+                    }
                 ),
             ),
         ).fetchone()
@@ -2956,7 +3048,11 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
             raise BackupDatabaseError
         historical_book = row[1]
         response_occurrence = row[4]
-        if schema_revision in {PAGE_MOVE_SCHEMA_REVISION, CALLER_PAGE_MOVE_SCHEMA_REVISION}:
+        if schema_revision in {
+            PAGE_MOVE_SCHEMA_REVISION,
+            CALLER_PAGE_MOVE_SCHEMA_REVISION,
+            LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        }:
             state = _page_timeline(connection, schema_revision, library_id, row[0]).exact_state(
                 row[5]
             )
@@ -3154,7 +3250,7 @@ def _page_timeline(
         raise BackupDatabaseError from None
 
 
-def _require_caller_move_graph(connection: sqlite3.Connection) -> None:
+def _require_caller_move_graph(connection: sqlite3.Connection, schema_revision: str) -> None:
     from collections import Counter
 
     from patchouli_lib.content.page_move_receipts import validate_caller_move_receipt
@@ -3169,9 +3265,7 @@ def _require_caller_move_graph(connection: sqlite3.Connection) -> None:
     try:
         for row in cursor:
             record = StoredIdempotencyRecord.model_validate(dict(zip(names, row, strict=True)))
-            body = validate_caller_move_receipt(
-                connection, record, schema_revision=CALLER_PAGE_MOVE_SCHEMA_REVISION
-            )
+            body = validate_caller_move_receipt(connection, record, schema_revision=schema_revision)
             if body.changed:
                 successes[
                     (
@@ -3214,8 +3308,11 @@ def _require_page_moves(
         "(r.move_sequence IS NULL OR r.changed != 1) LIMIT 1"
     ).fetchone():
         raise BackupDatabaseError
-    if schema_revision == CALLER_PAGE_MOVE_SCHEMA_REVISION:
-        _require_caller_move_graph(connection)
+    if schema_revision in {
+        CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+    }:
+        _require_caller_move_graph(connection, schema_revision)
     cursor = connection.execute("SELECT * FROM admin_master_move_receipts")
     names = [item[0] for item in cursor.description]
     for row in cursor:
@@ -3273,6 +3370,7 @@ def _validate_connection(
         MASTER_OCCURRENCE_SCHEMA_REVISION,
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
     }:
         _require_library_descriptions(connection)
     if schema_revision in _LIFECYCLE_REVISIONS:
@@ -3288,13 +3386,18 @@ def _validate_connection(
         _require_idempotency_graph(connection, schema_revision)
     except PageMembershipHistoryError:
         raise BackupDatabaseError from None
-    if schema_revision in {PAGE_MOVE_SCHEMA_REVISION, CALLER_PAGE_MOVE_SCHEMA_REVISION}:
+    if schema_revision in {
+        PAGE_MOVE_SCHEMA_REVISION,
+        CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+    }:
         _require_page_moves(connection, schema_revision=schema_revision)
     if schema_revision in {
         MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
         MASTER_OCCURRENCE_SCHEMA_REVISION,
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
     }:
         _require_master_file_set_receipts(connection)
     if schema_revision in {
@@ -3305,6 +3408,7 @@ def _validate_connection(
         MASTER_OCCURRENCE_SCHEMA_REVISION,
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
     }:
         _require_request_log_graph(connection)
     if schema_revision in {
@@ -3314,6 +3418,7 @@ def _validate_connection(
         MASTER_OCCURRENCE_SCHEMA_REVISION,
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
     }:
         _require_search_projection_reset(connection)
     return DatabaseValidationReport(

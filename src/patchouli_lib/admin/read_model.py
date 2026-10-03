@@ -650,6 +650,8 @@ class AdminReadModel:
                             "content.archive.delete",
                             "content.archive.restore",
                             "content.page.move",
+                            "content.page.delete",
+                            "content.page.restore",
                             "tag.create",
                             "tag.page.attach",
                             "tag.page.detach",

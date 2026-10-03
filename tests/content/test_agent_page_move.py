@@ -409,9 +409,11 @@ def test_caller_success_blocks_lossy_downgrade(
             _config(Path(content_engine.url.database), monkeypatch), "20261001_0028"
         )
     with content_engine.connect() as connection:
+        # 0030 has no new lifecycle behavior here: its safe downgrade finishes
+        # before 0029 refuses to discard the Caller movement success/history.
         assert (
             connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-            == CURRENT_SCHEMA_REVISION
+            == "20261002_0029"
         )
 
 

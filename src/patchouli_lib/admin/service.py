@@ -858,6 +858,40 @@ class AdminActionService:
             )
         return True
 
+    def disable_agent_as_master(
+        self,
+        library_id: str,
+        caller_id: str,
+        *,
+        master_session: MasterAdminSession,
+    ) -> bool:
+        """Disable one Agent identity and all its credentials without erasing history."""
+        with immediate_transaction(self._engine) as connection:
+            self._require_current_admin_session(
+                connection, master_session, master_session.audit_fingerprint()
+            )
+            repository = AuthRepository(connection)
+            caller = repository.get_caller(library_id, caller_id)
+            if caller is None or caller.kind is not CallerKind.AGENT:
+                raise ResourceNotFoundError
+            if caller.disabled_at is not None:
+                return False
+            now = max(self._clock(), caller.updated_at)
+            disabled = repository.disable_caller(library_id, caller_id, disabled_at=now)
+            if disabled is None or disabled.disabled_at != now:
+                raise CredentialLifecycleError
+            MasterAuditRepository(connection).add_success(
+                identity_id=master_session.identity_id,
+                session_generation=master_session.session_generation,
+                session_fingerprint=master_session.audit_fingerprint(),
+                action="auth.agent_identity.disable",
+                target_type="caller",
+                target_id=caller_id,
+                occurred_at=now,
+                event_id=uuid4().hex,
+            )
+        return True
+
     def create_tag(self, library_id: str, request: TagFormInput) -> tuple[str, bool]:
         token = request.operator_token.get_secret_value()
         now = self._clock()

@@ -1746,6 +1746,55 @@ def create_admin_router(
             status_code=status,
         )
 
+    @router.post("/libraries/{library_id}/callers/{caller_id}/disable")
+    async def disable_agent_as_master(
+        request: Request, library_id: str, caller_id: str
+    ) -> Response:
+        locale = locale_for(request)
+        if not _same_origin_submission(request):
+            return forbidden(request)
+        session = current_session(request)
+        if session is None:
+            return html(
+                login_page(locale=locale, message="Sign in again."), locale=locale, status_code=401
+            )
+        if not isinstance(session, MasterAdminSession):
+            return forbidden(request, "A master session is required.")
+        try:
+            values = await _read_form(
+                request, allowed_fields=frozenset({"csrf_token", "confirm_disable"})
+            )
+            _require_csrf(values, session)
+            if values.get("confirm_disable") != "yes":
+                raise _FormError(
+                    422, "Confirm that all Tokens for this identity will stop working."
+                )
+            await run_in_threadpool(
+                service.disable_agent_as_master,
+                library_id,
+                caller_id,
+                master_session=session,
+            )
+        except _FormError as exc:
+            status, message = exc.status_code, exc.safe_message
+        except AuthenticationError:
+            status, message = 401, "Sign in again."
+        except ResourceNotFoundError:
+            status, message = 404, "The Agent identity was not found."
+        except (CredentialLifecycleError, IntegrityError):
+            status, message = 409, "The action conflicts with current local state."
+        except Exception:
+            status, message = 500, "The action could not be completed."
+        else:
+            return redirect(f"/admin/libraries/{library_id}/callers/{caller_id}")
+        if status == 401:
+            return html(login_page(locale=locale, message=message), locale=locale, status_code=401)
+        return html(
+            operations_page(session.csrf_token, locale=locale, message=message, master_mode=True),
+            locale=locale,
+            status_code=status,
+        )
+
     @router.post("/libraries/{library_id}/callers/{caller_id}/credentials/{credential_id}/rotate")
     async def rotate_agent_token_as_master(
         request: Request, library_id: str, caller_id: str, credential_id: str
