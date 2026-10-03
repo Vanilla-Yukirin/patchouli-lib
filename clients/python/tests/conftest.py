@@ -1,13 +1,56 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+import os
+import shutil
+import uuid
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import cast
+
+import pytest
 
 WIRE_FIXTURE_PATH = (
     Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "api" / "agent_v1_wire.json"
 )
+
+
+@contextmanager
+def _trusted_tmp_path(
+    tmp_path: Path, *, environ: Mapping[str, str], platform: str
+) -> Iterator[Path]:
+    configured = environ.get("PATCHOULI_TEST_TRUSTED_TMP_ROOT")
+    if configured is not None:
+        parent = Path(configured)
+        if not configured or not parent.is_absolute() or not parent.is_dir():
+            raise ValueError(
+                "PATCHOULI_TEST_TRUSTED_TMP_ROOT must be an existing absolute directory"
+            )
+    elif platform != "nt":
+        yield tmp_path
+        return
+    else:
+        local = environ.get("LOCALAPPDATA")
+        if not local:
+            pytest.skip("LOCALAPPDATA is unavailable")
+        parent = Path(local) / "PatchouliLibTests"
+        parent.mkdir(exist_ok=True)
+
+    path = parent / str(uuid.uuid4())
+    path.mkdir()
+    try:
+        yield path
+    finally:
+        # Remove only the fresh child owned by this fixture, never the configured root.
+        shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture
+def trusted_tmp_path(tmp_path: Path) -> Iterator[Path]:
+    """Select an isolated test directory without bypassing product filesystem checks."""
+    with _trusted_tmp_path(tmp_path, environ=os.environ, platform=os.name) as path:
+        yield path
 
 
 def load_agent_wire_fixture() -> dict[str, object]:

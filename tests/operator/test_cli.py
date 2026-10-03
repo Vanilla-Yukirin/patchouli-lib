@@ -5,10 +5,11 @@ from io import StringIO
 from pathlib import Path
 
 import pytest
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, func, select, update
 
 from patchouli_lib import operator_cli
 from patchouli_lib.auth.models import (
+    AgentTokenValue,
     AuditEvent,
     BootstrapMarker,
     Caller,
@@ -258,6 +259,81 @@ def test_bootstrap_seeds_structure_and_outputs_secret_only_after_commit(
         assert connection.scalar(select(func.count()).select_from(AuditEvent)) == 1
 
 
+def test_bootstrap_normalizes_existing_library_name_before_opt_in_guard(
+    cli_database: tuple[Path, Engine, list[int]],
+) -> None:
+    _, engine, _ = cli_database
+    first_code, first_stdout, first_stderr = _run(_bootstrap_arguments())
+    assert first_code == 0
+    assert first_stderr == ""
+    first_token = _token(first_stdout)
+
+    arguments = _bootstrap_arguments()
+    arguments[arguments.index("--library-name") + 1] = f"  {_LIBRARY_NAME}  "
+    repeated_code, repeated_stdout, repeated_stderr = _run(arguments)
+
+    assert repeated_code == 1
+    assert repeated_stdout == ""
+    assert repeated_stderr == "Operator command failed.\n"
+    assert first_token not in repeated_stderr
+    with engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(Library)) == 1
+        assert connection.scalar(select(func.count()).select_from(Caller)) == 1
+        assert connection.scalar(select(func.count()).select_from(AuditEvent)) == 1
+
+
+def test_bootstrap_requires_opt_in_after_library_rename(
+    cli_database: tuple[Path, Engine, list[int]],
+) -> None:
+    _, engine, _ = cli_database
+    first_code, first_stdout, first_stderr = _run(_bootstrap_arguments())
+    assert first_code == 0
+    assert first_stderr == ""
+    first_token = _token(first_stdout)
+
+    renamed_name = "Renamed Local Library"
+    with engine.begin() as connection:
+        library_id = connection.scalar(select(Library.id).where(Library.name == _LIBRARY_NAME))
+        assert isinstance(library_id, str)
+        connection.execute(
+            update(Library)
+            .where(Library.id == library_id)
+            .values(name=renamed_name, updated_at=2_000_000)
+        )
+
+    blocked_code, blocked_stdout, blocked_stderr = _run(_bootstrap_arguments())
+    assert blocked_code == 2
+    assert blocked_stdout == ""
+    expected_error = "Library name not found in a non-empty database;"
+    expected_error += " pass --create-new-library to create one."
+    assert blocked_stderr == expected_error + "\n"
+    assert first_token not in blocked_stderr
+    assert _LIBRARY_NAME not in blocked_stderr
+    assert renamed_name not in blocked_stderr
+    with engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(Library)) == 1
+        assert connection.scalar(select(func.count()).select_from(Caller)) == 1
+        assert connection.scalar(select(func.count()).select_from(Credential)) == 1
+        assert connection.scalar(select(func.count()).select_from(AuditEvent)) == 1
+        assert (
+            connection.scalar(select(Library.name).where(Library.id == library_id)) == renamed_name
+        )
+
+    created_code, created_stdout, created_stderr = _run(
+        [*_bootstrap_arguments(), "--create-new-library"]
+    )
+    assert created_code == 0
+    assert created_stderr == ""
+    assert _token(created_stdout) != first_token
+    with engine.connect() as connection:
+        assert set(connection.scalars(select(Library.name))) == {_LIBRARY_NAME, renamed_name}
+        assert (
+            connection.scalar(select(Library.name).where(Library.id == library_id)) == renamed_name
+        )
+        assert connection.scalar(select(func.count()).select_from(Caller)) == 2
+        assert connection.scalar(select(func.count()).select_from(AuditEvent)) == 2
+
+
 def test_local_recovery_retires_prior_operator_token_without_replaying_it(
     cli_database: tuple[Path, Engine, list[int]],
 ) -> None:
@@ -361,6 +437,15 @@ def test_provision_agent_reads_operator_token_from_stdin_and_grants_exact_action
         assert audit_actions.count("auth.caller.create") == 1
         assert audit_actions.count("auth.credential.create") == 1
         assert audit_actions.count("auth.grant.add") == 2
+        assert (
+            connection.scalar(
+                select(AgentTokenValue.token_value).where(
+                    AgentTokenValue.credential_id == agent_credential.id
+                )
+            )
+            == agent_token
+        )
+        assert connection.scalar(select(func.count()).select_from(AgentTokenValue)) == 1
 
         authentication = AuthenticationService(repository, clock=lambda: 3_000_000)
         for action in (SectionAction.QUERY, SectionAction.ARCHIVE_WRITE):
@@ -381,7 +466,6 @@ def test_provision_agent_reads_operator_token_from_stdin_and_grants_exact_action
         connection.rollback()
     database_bytes = database_path.read_bytes()
     assert operator_token.encode() not in database_bytes
-    assert agent_token.encode() not in database_bytes
 
 
 def test_revoke_agent_credential_commits_exact_audit_and_rejects_bearer(
@@ -430,6 +514,14 @@ def test_revoke_agent_credential_commits_exact_audit_and_rejects_bearer(
         assert audit.outcome == "succeeded"
         assert audit.request_id.startswith("req_local_")
         assert audit.occurred_at == 3_000_000
+        assert (
+            connection.scalar(
+                select(AgentTokenValue.credential_id).where(
+                    AgentTokenValue.credential_id == agent_credential_id
+                )
+            )
+            is None
+        )
         with pytest.raises(AuthenticationError):
             AuthenticationService(
                 AuthRepository(connection),
@@ -438,7 +530,6 @@ def test_revoke_agent_credential_commits_exact_audit_and_rejects_bearer(
         connection.rollback()
     database_bytes = database_path.read_bytes()
     assert operator_token.encode() not in database_bytes
-    assert agent_token.encode() not in database_bytes
 
     clock[0] = 4_000_000
     repeated_code, repeated_stdout, repeated_stderr = _run(
@@ -639,7 +730,7 @@ def test_agent_output_failure_revokes_unknown_credential_and_audits_compensation
     cli_database: tuple[Path, Engine, list[int]],
     failure: str,
 ) -> None:
-    database_path, engine, clock = cli_database
+    _, engine, clock = cli_database
     bootstrap_code, bootstrap_stdout, _ = _run(_bootstrap_arguments())
     assert bootstrap_code == 0
     operator_token = _token(bootstrap_stdout)
@@ -677,12 +768,19 @@ def test_agent_output_failure_revokes_unknown_credential_and_audits_compensation
         assert actions.count("auth.credential.create") == 1
         assert actions.count("auth.grant.add") == 2
         assert actions.count("auth.credential.revoke") == 1
+        assert (
+            connection.scalar(
+                select(AgentTokenValue.credential_id).where(
+                    AgentTokenValue.credential_id == credential.id
+                )
+            )
+            is None
+        )
         with pytest.raises(AuthenticationError, match="Invalid or inactive credential"):
             AuthenticationService(
                 AuthRepository(connection),
                 clock=lambda: 3_000_000,
             ).authenticate(attempted_token)
-    assert attempted_token.encode() not in database_path.read_bytes()
 
 
 @pytest.mark.parametrize("seekable", [True, False])
@@ -690,7 +788,7 @@ def test_agent_short_write_is_failed_delivery_with_revoked_credential(
     cli_database: tuple[Path, Engine, list[int]],
     seekable: bool,
 ) -> None:
-    database_path, engine, clock = cli_database
+    _, engine, clock = cli_database
     bootstrap_code, bootstrap_stdout, _ = _run(_bootstrap_arguments())
     assert bootstrap_code == 0
     operator_token = _token(bootstrap_stdout)
@@ -728,9 +826,16 @@ def test_agent_short_write_is_failed_delivery_with_revoked_credential(
         assert actions.count("auth.credential.create") == 1
         assert actions.count("auth.grant.add") == 2
         assert actions.count("auth.credential.revoke") == 1
+        assert (
+            connection.scalar(
+                select(AgentTokenValue.credential_id).where(
+                    AgentTokenValue.credential_id == credential.id
+                )
+            )
+            is None
+        )
         with pytest.raises(AuthenticationError, match="Invalid or inactive credential"):
             AuthenticationService(repository, clock=lambda: 3_000_000).authenticate(attempted_token)
-    assert attempted_token.encode() not in database_path.read_bytes()
 
 
 def test_short_write_without_integer_count_is_failed_local_delivery(

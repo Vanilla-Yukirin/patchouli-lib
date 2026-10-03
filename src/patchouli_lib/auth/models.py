@@ -5,6 +5,7 @@ from sqlalchemy import (
     CheckConstraint,
     ForeignKeyConstraint,
     Index,
+    Integer,
     LargeBinary,
     String,
     Text,
@@ -17,6 +18,7 @@ from patchouli_lib.library.models import NAME_MAX_LENGTH, OPAQUE_ID_LENGTH
 from patchouli_lib.models import Base
 
 SELECTOR_LENGTH = 22
+RAW_TOKEN_LENGTH = 71
 KIND_MAX_LENGTH = 16
 ACTION_MAX_LENGTH = 100
 REQUEST_ID_MAX_LENGTH = 100
@@ -157,6 +159,32 @@ class Credential(Base):
     rotated_to_credential_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
 
 
+class AgentTokenValue(Base):
+    """Separately stored raw value for newly issued Agent credentials only.
+
+    Authentication queries intentionally select ``Credential`` alone. This table
+    must be queried only after management authorization and active-state checks.
+    """
+
+    __tablename__ = "auth_agent_token_values"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["credential_id"],
+            ["auth_credentials.id"],
+            name="fk_auth_agent_token_values_credential",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "typeof(token_value) = 'text' AND length(token_value) = 71 "
+            "AND substr(token_value, 1, 5) = 'plb1.'",
+            name="ck_auth_agent_token_values_format",
+        ),
+    )
+
+    credential_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    token_value: Mapped[str] = mapped_column(String(RAW_TOKEN_LENGTH), nullable=False)
+
+
 class SectionGrant(Base):
     __tablename__ = "auth_section_grants"
     __table_args__ = (
@@ -195,17 +223,91 @@ class SectionGrant(Base):
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
+class CredentialLibraryPolicy(Base):
+    """Explicit opt-in to Library grants; absence retains legacy Section policy."""
+
+    __tablename__ = "auth_credential_library_policies"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["credential_id", "caller_id", "home_library_id"],
+            ["auth_credentials.id", "auth_credentials.caller_id", "auth_credentials.library_id"],
+            name="fk_auth_credential_library_policies_exact_credential",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("mode = 'library_grants'", name="ck_auth_credential_library_policies_mode"),
+        CheckConstraint(
+            "typeof(created_at) = 'integer' AND created_at >= 0",
+            name="ck_auth_credential_library_policies_created_at",
+        ),
+    )
+
+    credential_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    caller_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    home_library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class CredentialLibraryGrant(Base):
+    """Read and write are independent per target Library and exact credential."""
+
+    __tablename__ = "auth_credential_library_grants"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["credential_id", "caller_id", "home_library_id"],
+            [
+                "auth_credential_library_policies.credential_id",
+                "auth_credential_library_policies.caller_id",
+                "auth_credential_library_policies.home_library_id",
+            ],
+            name="fk_auth_credential_library_grants_exact_policy",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["target_library_id"],
+            ["libraries.id"],
+            name="fk_auth_credential_library_grants_target_library",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "action IN ('read', 'write')", name="ck_auth_credential_library_grants_action"
+        ),
+        CheckConstraint(
+            "typeof(created_at) = 'integer' AND created_at >= 0",
+            name="ck_auth_credential_library_grants_created_at",
+        ),
+        Index(
+            "ix_auth_credential_library_grants_target_action",
+            "target_library_id",
+            "action",
+        ),
+    )
+
+    credential_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    caller_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    home_library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    target_library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    action: Mapped[str] = mapped_column(String(5), primary_key=True)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
 class AuditEvent(Base):
     __tablename__ = "auth_audit_events"
     __table_args__ = (
         ForeignKeyConstraint(
-            ["actor_credential_id", "actor_caller_id", "library_id"],
+            ["actor_credential_id", "actor_caller_id", "actor_home_library_id"],
             [
                 "auth_credentials.id",
                 "auth_credentials.caller_id",
                 "auth_credentials.library_id",
             ],
             name="fk_auth_audit_actor_credential_caller_library_credentials",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["library_id"],
+            ["libraries.id"],
+            name="fk_auth_audit_events_target_library",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
@@ -260,10 +362,20 @@ class AuditEvent(Base):
             name="ck_auth_audit_events_metadata",
         ),
         Index("ix_auth_audit_events_library_request_id", "library_id", "request_id"),
+        Index(
+            "ix_auth_audit_events_actor_recent",
+            "actor_home_library_id",
+            "actor_caller_id",
+            "outcome",
+            # SQLite can scan both trailing keys backward for DESC ordering.
+            "occurred_at",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
     library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+    actor_home_library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
     actor_caller_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
     actor_credential_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
     target_caller_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
@@ -277,6 +389,148 @@ class AuditEvent(Base):
     policy_version_before: Mapped[int | None] = mapped_column(BigInteger)
     policy_version_after: Mapped[int | None] = mapped_column(BigInteger)
     occurred_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class AdminStructureAuditEvent(Base):
+    """A completed structure write by a password-authenticated web session.
+
+    This actor is deliberately separate from a bearer credential. Only a
+    one-way fingerprint of the random session identifier is persisted.
+    """
+
+    __tablename__ = "admin_structure_audit_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id"],
+            ["libraries.id"],
+            name="fk_admin_structure_audit_library",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["section_id", "library_id"],
+            ["sections.id", "sections.library_id"],
+            name="fk_admin_structure_audit_section",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["book_id", "section_id", "library_id"],
+            ["books.id", "books.section_id", "books.library_id"],
+            name="fk_admin_structure_audit_book",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'",
+            name="ck_admin_structure_audit_id",
+        ),
+        CheckConstraint(
+            "typeof(session_fingerprint) = 'blob' AND length(session_fingerprint) = 32",
+            name="ck_admin_structure_audit_session_fingerprint",
+        ),
+        CheckConstraint(
+            "(action = 'library.create' AND section_id IS NULL AND book_id IS NULL) "
+            "OR (action = 'section.create' AND section_id IS NOT NULL AND book_id IS NULL) "
+            "OR (action = 'book.create' AND section_id IS NOT NULL AND book_id IS NOT NULL)",
+            name="ck_admin_structure_audit_action_resource",
+        ),
+        CheckConstraint(
+            "length(request_id) BETWEEN 5 AND 100 AND request_id = trim(request_id) "
+            "AND occurred_at >= 0",
+            name="ck_admin_structure_audit_metadata",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    session_fingerprint: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    action: Mapped[str] = mapped_column(String(ACTION_MAX_LENGTH), nullable=False)
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+    section_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
+    book_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
+    request_id: Mapped[str] = mapped_column(String(REQUEST_ID_MAX_LENGTH), nullable=False)
+    occurred_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class MasterAuditEvent(Base):
+    """Immutable, non-secret record of a successful master-session action."""
+
+    __tablename__ = "admin_master_audit_events"
+    __table_args__ = (
+        CheckConstraint(
+            "length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'",
+            name="ck_admin_master_audit_id",
+        ),
+        CheckConstraint(
+            "length(identity_id) = 32 AND identity_id NOT GLOB '*[^0-9a-f]*'",
+            name="ck_admin_master_audit_identity",
+        ),
+        CheckConstraint(
+            "session_generation >= 1 AND occurred_at >= 0",
+            name="ck_admin_master_audit_clock",
+        ),
+        CheckConstraint(
+            "typeof(session_fingerprint) = 'blob' AND length(session_fingerprint) = 32",
+            name="ck_admin_master_audit_session_fingerprint",
+        ),
+        CheckConstraint(
+            "length(action) BETWEEN 1 AND 100 AND action = trim(action) "
+            "AND action NOT GLOB '*[^!-~]*'",
+            name="ck_admin_master_audit_action",
+        ),
+        CheckConstraint(
+            "length(target_type) BETWEEN 1 AND 100 AND target_type = trim(target_type) "
+            "AND target_type NOT GLOB '*[^a-z_]*'",
+            name="ck_admin_master_audit_target_type",
+        ),
+        CheckConstraint(
+            "length(target_id) BETWEEN 1 AND 200 AND target_id = trim(target_id) "
+            "AND target_id NOT GLOB '*[^!-~]*'",
+            name="ck_admin_master_audit_target_id",
+        ),
+        CheckConstraint(
+            "action != 'auth.agent_token.reveal' OR "
+            "(target_type = 'credential' AND length(target_id) = 32 "
+            "AND target_id NOT GLOB '*[^0-9a-f]*')",
+            name="ck_admin_master_audit_reveal_target",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    identity_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+    session_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    session_fingerprint: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    action: Mapped[str] = mapped_column(String(ACTION_MAX_LENGTH), nullable=False)
+    target_type: Mapped[str] = mapped_column(String(ACTION_MAX_LENGTH), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(RESOURCE_ID_MAX_LENGTH), nullable=False)
+    occurred_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class MasterIdentity(Base):
+    """The one human administrator, separate from operator bearer callers."""
+
+    __tablename__ = "admin_master_identity"
+    __table_args__ = (
+        CheckConstraint("slot = 1", name="ck_admin_master_identity_singleton"),
+        CheckConstraint(
+            "length(identity_id) = 32 AND identity_id NOT GLOB '*[^0-9a-f]*'",
+            name="ck_admin_master_identity_id",
+        ),
+        CheckConstraint(
+            "typeof(token_verifier) = 'text' AND length(token_verifier) BETWEEN 1 AND 256 "
+            "AND token_verifier LIKE 'pbkdf2_sha256$%'",
+            name="ck_admin_master_identity_verifier",
+        ),
+        CheckConstraint(
+            "session_generation >= 1 AND created_at >= 0 AND updated_at >= created_at",
+            name="ck_admin_master_identity_state",
+        ),
+        UniqueConstraint("identity_id", name="uq_admin_master_identity_id"),
+    )
+
+    slot: Mapped[int] = mapped_column(Integer, primary_key=True)
+    identity_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    token_verifier: Mapped[str] = mapped_column(String(256), nullable=False)
+    session_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
 class BootstrapMarker(Base):
@@ -323,4 +577,14 @@ class BootstrapMarker(Base):
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
-__all__ = ["AuditEvent", "BootstrapMarker", "Caller", "Credential", "SectionGrant"]
+__all__ = [
+    "AgentTokenValue",
+    "AdminStructureAuditEvent",
+    "MasterAuditEvent",
+    "AuditEvent",
+    "BootstrapMarker",
+    "Caller",
+    "Credential",
+    "MasterIdentity",
+    "SectionGrant",
+]

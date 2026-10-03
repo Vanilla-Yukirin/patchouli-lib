@@ -341,6 +341,22 @@ def retrieval_scope(retrieval_engine: Engine) -> RetrievalScope:
             content=b"# Hidden\n",
         )
 
+        # create_all() does not install Alembic's legacy mirror/seal triggers.
+        # Materialize their committed result for the retrieval fixture.
+        connection.exec_driver_sql(
+            "INSERT INTO revision_files "
+            "(library_id, page_uid, revision_id, revision_number, filename, "
+            "content_bytes, size_bytes, content_sha256) "
+            "SELECT library_id, page_uid, revision_id, revision_number, 'content.md', "
+            "content_md, content_size_bytes, content_sha256 FROM revisions"
+        )
+        for table in ("revision_file_seals", "revision_file_seal_guards"):
+            connection.exec_driver_sql(
+                f"INSERT INTO {table} "
+                "(library_id, page_uid, revision_id, revision_number) "
+                "SELECT library_id, page_uid, revision_id, revision_number FROM revisions"
+            )
+
     return RetrievalScope(
         library_id=LIBRARY_ID,
         query_section_id=QUERY_SECTION_ID,

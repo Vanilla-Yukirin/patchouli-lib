@@ -172,7 +172,11 @@ def validated_caller(
         or grant is None
     ):
         raise RuntimeError("Synthetic authorization check failed.")
-    return TransactionValidatedCaller(library_id=library_id, caller_id=caller_id)
+    return TransactionValidatedCaller(
+        library_id=library_id,
+        actor_home_library_id=caller.library_id,
+        caller_id=caller_id,
+    )
 
 
 def request_for(

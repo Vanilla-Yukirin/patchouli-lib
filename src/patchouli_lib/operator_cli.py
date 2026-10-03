@@ -9,7 +9,7 @@ from typing import NoReturn, TextIO
 from uuid import uuid4
 
 from pydantic import ValidationError
-from sqlalchemy import Engine
+from sqlalchemy import Engine, select
 
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
@@ -22,6 +22,7 @@ from patchouli_lib.auth.schemas import (
 from patchouli_lib.auth.service import utc_microseconds
 from patchouli_lib.config import Settings
 from patchouli_lib.database import build_engine, immediate_transaction
+from patchouli_lib.library.models import Library
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import LibraryStructureSeed
 from patchouli_lib.library.service import LibrarySeedService
@@ -36,6 +37,9 @@ _TOKEN_INPUT_LIMIT = 256
 _MICROSECONDS_PER_SECOND = 1_000_000
 _SAFE_FAILURE_MESSAGE = "Operator command failed."
 _SAFE_INPUT_MESSAGE = "Invalid operator command input."
+_NEW_LIBRARY_OPT_IN_MESSAGE = (
+    "Library name not found in a non-empty database; pass --create-new-library to create one."
+)
 _RECOVERY_DELIVERY_MESSAGE = (
     "Credential output failed. Run local operator recovery again before continuing."
 )
@@ -46,6 +50,10 @@ _UNCONFIRMED_DELIVERY_MESSAGE = (
 
 
 class _CliInputError(ValueError):
+    pass
+
+
+class _NewLibraryOptInRequired(_CliInputError):
     pass
 
 
@@ -84,6 +92,7 @@ class _RedactingArgumentParser(argparse.ArgumentParser):
 @dataclass(frozen=True, slots=True)
 class _BootstrapCommand:
     library_name: str
+    create_new_library: bool
     section_name: str
     section_description: str
     book_name: str
@@ -171,6 +180,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_help(bootstrap)
     bootstrap.add_argument("--library-name", required=True)
+    bootstrap.add_argument(
+        "--create-new-library",
+        action="store_true",
+        help="explicitly permit a new Library when the database already contains one",
+    )
     bootstrap.add_argument("--section-name", required=True)
     bootstrap.add_argument("--section-description", default="")
     bootstrap.add_argument("--book-name", required=True)
@@ -235,6 +249,7 @@ def _parse_command(
     if command == "bootstrap":
         return _BootstrapCommand(
             library_name=library_name,
+            create_new_library=_namespace_value(namespace, "create_new_library", bool),
             section_name=_namespace_value(namespace, "section_name", str),
             section_description=_namespace_value(namespace, "section_description", str),
             book_name=_namespace_value(namespace, "book_name", str),
@@ -320,19 +335,25 @@ def _require_library(repository: LibraryRepository, name: str) -> str:
 def _bootstrap(engine: Engine, command: _BootstrapCommand) -> _SecretDelivery:
     now = utc_microseconds()
     expires_at = _expires_at(now, command.credential_ttl_seconds)
+    seed = LibraryStructureSeed(
+        library_name=command.library_name,
+        section_name=command.section_name,
+        section_description=command.section_description,
+        book_name=command.book_name,
+        book_summary=command.book_summary,
+    )
     with immediate_transaction(engine) as connection:
+        library_repository = LibraryRepository(connection)
+        if (
+            not command.create_new_library
+            and library_repository.find_library_by_name(seed.library_name) is None
+            and connection.scalar(select(Library.id).limit(1)) is not None
+        ):
+            raise _NewLibraryOptInRequired
         structure = LibrarySeedService(
-            LibraryRepository(connection),
+            library_repository,
             clock=lambda: now,
-        ).seed(
-            LibraryStructureSeed(
-                library_name=command.library_name,
-                section_name=command.section_name,
-                section_description=command.section_description,
-                book_name=command.book_name,
-                book_summary=command.book_summary,
-            )
-        )
+        ).seed(seed)
         result = OperatorBootstrapService(
             AuthRepository(connection),
             clock=lambda: now,
@@ -570,6 +591,9 @@ def main(
         if delivery is None:
             return 0
         return _deliver_secret(engine, delivery, output_stream, error_stream)
+    except _NewLibraryOptInRequired:
+        error_stream.write(f"{_NEW_LIBRARY_OPT_IN_MESSAGE}\n")
+        return 2
     except (ValidationError, _CliInputError):
         error_stream.write(f"{_SAFE_INPUT_MESSAGE}\n")
         return 2

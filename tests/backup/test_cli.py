@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import sqlite3
 from collections.abc import Mapping, Sequence
+from contextlib import closing
 from io import StringIO
 from pathlib import Path
 from typing import Any
 
 import pytest
+from alembic import command
 from sqlalchemy import Engine
 
 from patchouli_lib import backup_cli
 from patchouli_lib.backup import (
+    BACKUP_FILENAME,
+    MANIFEST_FILENAME,
     BackupArtifactIdentity,
     BackupCancelledError,
     BackupOperationError,
@@ -19,6 +25,36 @@ from patchouli_lib.backup import (
     validate_database,
     verify_backup_bundle,
 )
+from patchouli_lib.backup.manifest import (
+    ACTOR_HOME_SCHEMA_REVISION,
+    AGENT_TOKEN_VALUES_SCHEMA_REVISION,
+    AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
+    CALLER_PAGE_MOVE_SCHEMA_REVISION,
+    FILE_SET_SCHEMA_REVISION,
+    INTERMEDIATE_SCHEMA_REVISION,
+    LEGACY_SCHEMA_REVISION,
+    LIBRARY_DESCRIPTION_SCHEMA_REVISION,
+    LIBRARY_POLICY_SCHEMA_REVISION,
+    LIFECYCLE_SCHEMA_REVISION,
+    MASTER_AUDIT_SCHEMA_REVISION,
+    MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
+    MASTER_IDENTITY_SCHEMA_REVISION,
+    MASTER_LIFECYCLE_SCHEMA_REVISION,
+    MASTER_OCCURRENCE_SCHEMA_REVISION,
+    MASTER_PAGE_DELETE_SCHEMA_REVISION,
+    OCCURRENCE_SCHEMA_REVISION,
+    PAGE_MOVE_SCHEMA_REVISION,
+    PAGE_TITLE_SCHEMA_REVISION,
+    PREVIOUS_SCHEMA_REVISION,
+    REQUEST_LOG_SCHEMA_REVISION,
+    SEARCH_INDEX_SCHEMA_REVISION,
+    SUPPORTED_SCHEMA_REVISION,
+    TAG_SCHEMA_REVISION,
+    BackupManifestV1,
+)
+
+from .conftest import _config
+from .test_service import _legacy_bundle_with_binary_file
 
 APP_VERSION = "0.1.0a0"
 IDENTITY = BackupArtifactIdentity(
@@ -115,7 +151,7 @@ def test_create_reads_database_url_only_from_environment_and_emits_safe_json(
         "artifact_digest": IDENTITY.digest,
         "byte_size": metadata["byte_size"],
         "operation": "create",
-        "schema_revision": "20260813_0006",
+        "schema_revision": SUPPORTED_SCHEMA_REVISION,
         "sha256": metadata["sha256"],
         "state": "created",
     }
@@ -198,13 +234,333 @@ def test_restore_creates_only_a_new_inactive_destination(
     assert destination.read_bytes() == original
 
 
+def test_legacy_verify_and_restore_require_explicit_exact_revision(
+    complete_engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = tmp_path / "legacy-bundle"
+    _legacy_bundle_with_binary_file(complete_engine, bundle, monkeypatch)
+    before = {item.name: item.read_bytes() for item in bundle.iterdir()}
+    destination = tmp_path / "legacy-restored.sqlite"
+
+    for arguments in (
+        ["verify", "--bundle", str(bundle)],
+        ["restore", "--bundle", str(bundle), "--destination", str(destination)],
+    ):
+        code, output, error = _run(arguments)
+        assert code == backup_cli.ExitCode.VALIDATION_FAILED
+        assert output == ""
+        assert error == "Backup artifact validation failed.\n"
+    assert not destination.exists()
+
+    verify_code, verify_output, verify_error = _run(
+        [
+            "verify",
+            "--bundle",
+            str(bundle),
+            "--schema-revision",
+            LEGACY_SCHEMA_REVISION,
+            "--format",
+            "json",
+        ]
+    )
+    assert verify_code == backup_cli.ExitCode.SUCCESS
+    assert verify_error == ""
+    assert json.loads(verify_output)["schema_revision"] == LEGACY_SCHEMA_REVISION
+    assert {item.name: item.read_bytes() for item in bundle.iterdir()} == before
+
+    restore_code, restore_output, restore_error = _run(
+        [
+            "restore",
+            "--bundle",
+            str(bundle),
+            "--destination",
+            str(destination),
+            "--schema-revision",
+            LEGACY_SCHEMA_REVISION,
+            "--format",
+            "json",
+        ]
+    )
+    assert restore_code == backup_cli.ExitCode.SUCCESS
+    assert restore_error == ""
+    assert json.loads(restore_output)["schema_revision"] == LEGACY_SCHEMA_REVISION
+    assert validate_database(
+        destination, schema_revision=LEGACY_SCHEMA_REVISION
+    ).schema_revision == (LEGACY_SCHEMA_REVISION)
+    assert destination.read_bytes() == (bundle / "database.sqlite").read_bytes()
+
+
+def test_tag_schema_bundle_requires_explicit_revision_for_verify_and_restore(
+    complete_engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_database = complete_engine.url.database
+    assert source_database is not None
+    source_path = Path(source_database)
+    command.downgrade(_config(source_path, monkeypatch), TAG_SCHEMA_REVISION)
+
+    bundle = tmp_path / "tag-schema-bundle"
+    bundle.mkdir()
+    database = bundle / BACKUP_FILENAME
+    with closing(sqlite3.connect(source_path)) as source:
+        journal_mode = source.execute("PRAGMA journal_mode").fetchone()[0]
+        with closing(sqlite3.connect(database)) as destination:
+            source.backup(destination)
+            destination.execute("PRAGMA journal_mode = DELETE")
+            destination.commit()
+    data = database.read_bytes()
+    manifest = BackupManifestV1(
+        schema_version=1,
+        backup_filename=BACKUP_FILENAME,
+        byte_size=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        created_at="2026-08-13T12:34:56.123456Z",
+        app_version=APP_VERSION,
+        schema_revision=TAG_SCHEMA_REVISION,
+        sqlite_version=sqlite3.sqlite_version,
+        source_journal_mode=journal_mode,
+        artifact_identity=IDENTITY.identity,
+        artifact_digest=IDENTITY.digest,
+    )
+    (bundle / MANIFEST_FILENAME).write_bytes(manifest.canonical_bytes())
+    destination_path = tmp_path / "tag-schema-restored.sqlite"
+
+    for arguments in (
+        ["verify", "--bundle", str(bundle)],
+        ["restore", "--bundle", str(bundle), "--destination", str(destination_path)],
+    ):
+        code, output, error = _run(arguments)
+        assert code == backup_cli.ExitCode.VALIDATION_FAILED
+        assert output == ""
+        assert error == "Backup artifact validation failed.\n"
+    assert not destination_path.exists()
+
+    code, output, error = _run(
+        ["verify", "--bundle", str(bundle), "--schema-revision", TAG_SCHEMA_REVISION]
+    )
+    assert code == backup_cli.ExitCode.SUCCESS
+    assert error == ""
+    assert f"schema_revision={TAG_SCHEMA_REVISION}\n" in output
+    code, output, error = _run(
+        [
+            "restore",
+            "--bundle",
+            str(bundle),
+            "--destination",
+            str(destination_path),
+            "--schema-revision",
+            TAG_SCHEMA_REVISION,
+        ]
+    )
+    assert code == backup_cli.ExitCode.SUCCESS
+    assert error == ""
+    assert f"schema_revision={TAG_SCHEMA_REVISION}\n" in output
+    assert validate_database(
+        destination_path, schema_revision=TAG_SCHEMA_REVISION
+    ).schema_revision == (TAG_SCHEMA_REVISION)
+    assert destination_path.read_bytes() == data
+
+
+@pytest.mark.parametrize(
+    "schema_revision",
+    (
+        SUPPORTED_SCHEMA_REVISION,
+        CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        PAGE_MOVE_SCHEMA_REVISION,
+        MASTER_OCCURRENCE_SCHEMA_REVISION,
+        MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
+        MASTER_PAGE_DELETE_SCHEMA_REVISION,
+        SEARCH_INDEX_SCHEMA_REVISION,
+        REQUEST_LOG_SCHEMA_REVISION,
+        PAGE_TITLE_SCHEMA_REVISION,
+        AUDIT_ACTOR_INDEX_SCHEMA_REVISION,
+        LIBRARY_DESCRIPTION_SCHEMA_REVISION,
+        MASTER_LIFECYCLE_SCHEMA_REVISION,
+        MASTER_AUDIT_SCHEMA_REVISION,
+        ACTOR_HOME_SCHEMA_REVISION,
+        MASTER_IDENTITY_SCHEMA_REVISION,
+        AGENT_TOKEN_VALUES_SCHEMA_REVISION,
+        LIBRARY_POLICY_SCHEMA_REVISION,
+        FILE_SET_SCHEMA_REVISION,
+        LIFECYCLE_SCHEMA_REVISION,
+        OCCURRENCE_SCHEMA_REVISION,
+        TAG_SCHEMA_REVISION,
+        INTERMEDIATE_SCHEMA_REVISION,
+        PREVIOUS_SCHEMA_REVISION,
+        LEGACY_SCHEMA_REVISION,
+    ),
+)
+def test_cli_accepts_current_and_historical_exact_revision_choices(
+    tmp_path: Path, schema_revision: str
+) -> None:
+    missing_bundle = tmp_path / "missing-bundle"
+    destination = tmp_path / "uncreated-restored.sqlite"
+    for arguments in (
+        ["verify", "--bundle", str(missing_bundle)],
+        ["restore", "--bundle", str(missing_bundle), "--destination", str(destination)],
+    ):
+        code, output, error = _run([*arguments, "--schema-revision", schema_revision])
+        assert code == backup_cli.ExitCode.VALIDATION_FAILED
+        assert output == ""
+        assert error == "Backup artifact validation failed.\n"
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize(
+    "schema_revision",
+    (
+        CALLER_PAGE_MOVE_SCHEMA_REVISION,
+        PAGE_MOVE_SCHEMA_REVISION,
+        MASTER_OCCURRENCE_SCHEMA_REVISION,
+        SEARCH_INDEX_SCHEMA_REVISION,
+        MASTER_LIFECYCLE_SCHEMA_REVISION,
+        MASTER_AUDIT_SCHEMA_REVISION,
+        ACTOR_HOME_SCHEMA_REVISION,
+        MASTER_IDENTITY_SCHEMA_REVISION,
+        AGENT_TOKEN_VALUES_SCHEMA_REVISION,
+        LIBRARY_POLICY_SCHEMA_REVISION,
+    ),
+)
+def test_cli_verifies_and_restores_recent_historical_bundle_with_explicit_revision(
+    complete_engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    schema_revision: str,
+) -> None:
+    source_database = complete_engine.url.database
+    assert source_database is not None
+    source_path = Path(source_database)
+    command.downgrade(_config(source_path, monkeypatch), schema_revision)
+
+    bundle = tmp_path / "recent-historical-bundle"
+    bundle.mkdir()
+    database = bundle / BACKUP_FILENAME
+    with closing(sqlite3.connect(source_path)) as source:
+        journal_mode = source.execute("PRAGMA journal_mode").fetchone()[0]
+        with closing(sqlite3.connect(database)) as destination:
+            source.backup(destination)
+            destination.execute("PRAGMA journal_mode = DELETE")
+            destination.commit()
+    data = database.read_bytes()
+    manifest = BackupManifestV1(
+        schema_version=1,
+        backup_filename=BACKUP_FILENAME,
+        byte_size=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        created_at="2026-09-29T12:34:56.123456Z",
+        app_version=APP_VERSION,
+        schema_revision=schema_revision,
+        sqlite_version=sqlite3.sqlite_version,
+        source_journal_mode=journal_mode,
+        artifact_identity=IDENTITY.identity,
+        artifact_digest=IDENTITY.digest,
+    )
+    (bundle / MANIFEST_FILENAME).write_bytes(manifest.canonical_bytes())
+    restored = tmp_path / "recent-historical-restored.sqlite"
+
+    for arguments in (
+        ["verify", "--bundle", str(bundle)],
+        ["restore", "--bundle", str(bundle), "--destination", str(restored)],
+    ):
+        code, output, error = _run(arguments)
+        assert code == backup_cli.ExitCode.VALIDATION_FAILED
+        assert output == ""
+        assert error == "Backup artifact validation failed.\n"
+    assert not restored.exists()
+
+    verify_code, verify_output, verify_error = _run(
+        ["verify", "--bundle", str(bundle), "--schema-revision", schema_revision]
+    )
+    assert verify_code == backup_cli.ExitCode.SUCCESS
+    assert verify_error == ""
+    assert f"schema_revision={schema_revision}\n" in verify_output
+
+    restore_code, restore_output, restore_error = _run(
+        [
+            "restore",
+            "--bundle",
+            str(bundle),
+            "--destination",
+            str(restored),
+            "--schema-revision",
+            schema_revision,
+            "--format",
+            "json",
+        ]
+    )
+    assert restore_code == backup_cli.ExitCode.SUCCESS
+    assert restore_error == ""
+    assert json.loads(restore_output)["activation_authorized"] is False
+    assert (
+        validate_database(restored, schema_revision=schema_revision).schema_revision
+        == schema_revision
+    )
+    assert restored.read_bytes() == data
+
+
+@pytest.mark.parametrize("command", ["verify", "restore"])
+def test_wrong_explicit_revision_cannot_validate_current_bundle(
+    complete_engine: Engine,
+    tmp_path: Path,
+    command: str,
+) -> None:
+    bundle = tmp_path / f"wrong-schema-{command}"
+    _create_bundle(complete_engine, bundle)
+    destination = tmp_path / "wrong-schema-restored.sqlite"
+    arguments = [
+        command,
+        "--bundle",
+        str(bundle),
+        "--schema-revision",
+        LEGACY_SCHEMA_REVISION,
+    ]
+    if command == "restore":
+        arguments.extend(("--destination", str(destination)))
+
+    code, output, error = _run(arguments)
+
+    assert code == backup_cli.ExitCode.VALIDATION_FAILED
+    assert output == ""
+    assert error == "Backup artifact validation failed.\n"
+    assert not destination.exists()
+
+
+def test_explicit_current_revision_matches_default(
+    complete_engine: Engine,
+    tmp_path: Path,
+) -> None:
+    bundle = tmp_path / "current-schema"
+    _create_bundle(complete_engine, bundle)
+    code, output, error = _run(
+        ["verify", "--bundle", str(bundle), "--schema-revision", SUPPORTED_SCHEMA_REVISION]
+    )
+    assert code == backup_cli.ExitCode.SUCCESS
+    assert error == ""
+    assert f"schema_revision={SUPPORTED_SCHEMA_REVISION}\n" in output
+
+
 @pytest.mark.parametrize(
     "arguments",
     [
         [],
         ["create", "--database-url", "sqlite:///argv-secret.sqlite"],
+        ["create", "--schema-revision", "20260929_0007"],
         ["verify", "--bundle", "relative-bundle", "extra-private-value"],
+        ["verify", "--bundle", "relative-bundle", "--schema-revision", "forged"],
+        ["verify", "--bundle", "relative-bundle", "--schema-revision"],
         ["restore", "--bundle", "relative", "--destination"],
+        [
+            "restore",
+            "--bundle",
+            "relative-bundle",
+            "--destination",
+            "relative.sqlite",
+            "--schema-revision",
+            "20260813_0006",
+        ],
         [
             "create",
             "--bundle",
@@ -386,7 +742,7 @@ def test_restore_output_failure_preserves_inactive_verifiable_destination(
     assert stderr == "Backup command output failed.\n"
     assert destination.is_file()
     report = validate_database(destination)
-    assert report.schema_revision == "20260813_0006"
+    assert report.schema_revision == SUPPORTED_SCHEMA_REVISION
     assert destination.read_bytes() == (bundle / "database.sqlite").read_bytes()
 
 
@@ -476,7 +832,13 @@ def test_help_does_not_read_runtime_configuration_and_handles_output_failure(
     assert exit_code == backup_cli.ExitCode.SUCCESS
     assert "restore" in stdout
     assert "--destination" in stdout
+    assert "--schema-revision" in stdout
     assert stderr == ""
+
+    create_code, create_stdout, create_stderr = _run(["create", "--help"])
+    assert create_code == backup_cli.ExitCode.SUCCESS
+    assert create_stderr == ""
+    assert "--schema-revision" not in create_stdout
 
     broken = _BrokenOutput("short")
     broken_code, broken_stdout, broken_stderr = _run(["--help"], stdout=broken)

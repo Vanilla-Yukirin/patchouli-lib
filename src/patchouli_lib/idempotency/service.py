@@ -33,7 +33,8 @@ class IdempotencyService:
     """Resolve and record replay state inside one caller-owned write transaction.
 
     The caller must first revalidate the active caller, presented credential, and
-    exact Section authorization in the same short ``BEGIN IMMEDIATE`` transaction.
+    current target-Library authorization (or a legacy exact Section grant) in
+    the same short ``BEGIN IMMEDIATE`` transaction.
     This service never authenticates, mutates content, emits audit rows, or commits.
     """
 
@@ -66,6 +67,7 @@ class IdempotencyService:
             stored = self._repository.add(
                 NewIdempotencyRecord(
                     library_id=caller.library_id,
+                    actor_home_library_id=caller.actor_home_library_id,
                     caller_id=caller.caller_id,
                     **request.model_dump(),
                     **response.model_dump(),

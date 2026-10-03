@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass
@@ -22,7 +24,7 @@ from retrieval_read.conftest import (
 from retrieval_read.conftest import (
     retrieval_scope as retrieval_scope_fixture,
 )
-from sqlalchemy import Engine
+from sqlalchemy import Engine, delete, insert, select
 from starlette.requests import Request
 from starlette.routing import Route
 
@@ -32,6 +34,7 @@ from patchouli_lib.api.contracts import PROTECTED_CACHE_CONTROL
 from patchouli_lib.api.errors import PROBLEM_MEDIA_TYPE, install_api_exception_handlers
 from patchouli_lib.api.request_ids import REQUEST_ID_HEADER, RequestIDMiddleware
 from patchouli_lib.api.retrieval_routes import _perform_read, create_retrieval_router
+from patchouli_lib.auth.models import CredentialLibraryGrant, CredentialLibraryPolicy
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
     CallerKind,
@@ -42,7 +45,11 @@ from patchouli_lib.auth.schemas import (
 )
 from patchouli_lib.auth.tokens import generate_token
 from patchouli_lib.content import page_current_etag
+from patchouli_lib.content.models import Page
 from patchouli_lib.database import immediate_transaction
+from patchouli_lib.library.repository import LibraryRepository
+from patchouli_lib.library.schemas import LibraryStructureSeed, NewBook, NewSection
+from patchouli_lib.library.service import LibrarySeedService
 from patchouli_lib.retrieval.cursor import CursorCodec
 from patchouli_lib.retrieval.repository import RetrievalRepository
 
@@ -75,6 +82,15 @@ def retrieval_api(
     engine_iterator = engine_factory(tmp_path)
     retrieval_engine = next(engine_iterator)
     retrieval_scope = scope_factory(retrieval_engine)
+    # create_all() does not run Alembic's 0013 backfill for this synthetic fixture.
+    with immediate_transaction(retrieval_engine) as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO revision_file_sets "
+            "(library_id, page_uid, revision_id, revision_number, storage_format, "
+            "file_count, total_size_bytes, snapshot_sha256) "
+            "SELECT library_id, page_uid, revision_id, revision_number, "
+            "'legacy_markdown', 1, content_size_bytes, NULL FROM revisions"
+        )
     with retrieval_engine.connect() as connection:
         credential = RetrievalRepository(connection).get_credential(
             retrieval_scope.library_id,
@@ -159,7 +175,7 @@ def _assert_problem(response: Any, status: int, code: str) -> None:
     _assert_protected(response)
 
 
-def test_router_exposes_exactly_the_five_non_search_get_routes(
+def test_router_exposes_exactly_the_non_search_get_routes(
     retrieval_api: RetrievalApi,
 ) -> None:
     router = create_retrieval_router(
@@ -174,12 +190,23 @@ def test_router_exposes_exactly_the_five_non_search_get_routes(
     }
 
     assert inventory == {
+        ("/api/v1/libraries/{library_id}/sections/{section_id}/pages", ("GET",)),
+        ("/api/v1/libraries/{library_id}/pages/{page_id}", ("GET",)),
         ("/api/v1/sections", ("GET",)),
         ("/api/v1/sections/{section_id}/books", ("GET",)),
         ("/api/v1/sections/{section_id}/pages", ("GET",)),
         ("/api/v1/sections/{section_id}/pages/{page_id}", ("GET",)),
         (
             "/api/v1/sections/{section_id}/pages/{page_id}/revisions/{revision_number}",
+            ("GET",),
+        ),
+        (
+            "/api/v1/sections/{section_id}/pages/{page_id}/revisions/{revision_number}/files",
+            ("GET",),
+        ),
+        (
+            "/api/v1/sections/{section_id}/pages/{page_id}/revisions/"
+            "{revision_number}/files/{filename:path}",
             ("GET",),
         ),
     }
@@ -204,6 +231,241 @@ def test_sections_use_deterministic_signed_pagination(retrieval_api: RetrievalAp
     )
     assert [item["section_id"] for item in second.json()["items"]] == [SECOND_QUERY_SECTION_ID]
     assert second.json()["next_cursor"] is None
+
+
+def _discovery_target(fixture: RetrievalApi) -> tuple[str, str]:
+    ids = iter(("01" * 16, "02" * 16, "03" * 16))
+    with immediate_transaction(fixture.engine) as connection:
+        repository = LibraryRepository(connection)
+        target = LibrarySeedService(
+            repository, id_factory=lambda: next(ids), clock=lambda: 1_000_000
+        ).seed(
+            LibraryStructureSeed(
+                library_name="Synthetic Discovery Library",
+                section_name="Synthetic First Section",
+                book_name="Synthetic First Book",
+            )
+        )
+        repository.add_section(
+            NewSection(
+                id="05" * 16,
+                library_id=target.library.id,
+                name="Synthetic Second Section",
+                created_at=1_000_000,
+                updated_at=1_000_000,
+            )
+        )
+        repository.add_book(
+            NewBook(
+                id="04" * 16,
+                library_id=target.library.id,
+                section_id=target.section.id,
+                name="Synthetic Second Book",
+                created_at=1_000_000,
+                updated_at=1_000_000,
+            )
+        )
+    return target.library.id, target.section.id
+
+
+def _discovery_policy(
+    fixture: RetrievalApi,
+    library_id: str,
+    actions: tuple[str, ...],
+    *,
+    credential_id: str = "d" * 32,
+) -> None:
+    with immediate_transaction(fixture.engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryPolicy),
+            {
+                "credential_id": credential_id,
+                "caller_id": CALLER_ID,
+                "home_library_id": fixture.scope.library_id,
+                "mode": "library_grants",
+                "created_at": 1_000_000,
+            },
+        )
+        for action in actions:
+            connection.execute(
+                insert(CredentialLibraryGrant),
+                {
+                    "credential_id": credential_id,
+                    "caller_id": CALLER_ID,
+                    "home_library_id": fixture.scope.library_id,
+                    "target_library_id": library_id,
+                    "action": action,
+                    "created_at": 1_000_000,
+                },
+            )
+
+
+@pytest.mark.parametrize("collection", ["sections", "books"])
+def test_explicit_home_library_normalizes_cursor_and_preserves_response(
+    retrieval_api: RetrievalApi, collection: str
+) -> None:
+    path = (
+        "/api/v1/sections"
+        if collection == "sections"
+        else f"/api/v1/sections/{retrieval_api.scope.query_section_id}/books"
+    )
+    first = _get(retrieval_api, path, params={"limit": 1})
+    explicit = _get(
+        retrieval_api, path, params={"limit": 1, "library_id": retrieval_api.scope.library_id}
+    )
+    assert first.status_code == explicit.status_code == 200
+    assert first.json() == explicit.json()
+    cursor = first.json()["next_cursor"]
+    omitted_next = _get(retrieval_api, path, params={"limit": 1, "cursor": cursor})
+    explicit_next = _get(
+        retrieval_api,
+        path,
+        params={"limit": 1, "cursor": cursor, "library_id": retrieval_api.scope.library_id},
+    )
+    assert omitted_next.status_code == explicit_next.status_code == 200
+    assert omitted_next.json() == explicit_next.json()
+
+
+@pytest.mark.parametrize("collection", ["sections", "books"])
+def test_cross_library_discovery_is_bounded_target_bound_and_reauthorizes(
+    retrieval_api: RetrievalApi, collection: str
+) -> None:
+    library_id, section_id = _discovery_target(retrieval_api)
+    _discovery_policy(retrieval_api, library_id, ("read",))
+    path = (
+        "/api/v1/sections" if collection == "sections" else f"/api/v1/sections/{section_id}/books"
+    )
+    first = _get(retrieval_api, path, params={"library_id": library_id, "limit": 1})
+    assert first.status_code == 200
+    assert first.json()["items"] == (
+        [{"section_id": section_id, "name": "Synthetic First Section"}]
+        if collection == "sections"
+        else [{"section_id": section_id, "book_id": "03" * 16, "title": "Synthetic First Book"}]
+    )
+    _assert_protected(first)
+    cursor = first.json()["next_cursor"]
+    second = _get(
+        retrieval_api, path, params={"library_id": library_id, "limit": 1, "cursor": cursor}
+    )
+    assert second.status_code == 200
+    assert len(second.json()["items"]) == 1
+    assert second.json()["next_cursor"] is None
+    assert second.json()["items"] != first.json()["items"]
+    for changed_target in (None, retrieval_api.scope.library_id, "ff" * 16):
+        params: dict[str, QueryValue] = {"limit": 1, "cursor": cursor}
+        if changed_target is not None:
+            params["library_id"] = changed_target
+        _assert_problem(_get(retrieval_api, path, params=params), 400, "invalid_cursor")
+    # Read on the target never grants read on the caller's home Library.
+    _assert_problem(_get(retrieval_api, "/api/v1/sections"), 403, "insufficient_scope")
+    if collection == "books":
+        _assert_problem(
+            _get(
+                retrieval_api,
+                f"/api/v1/sections/{retrieval_api.scope.query_section_id}/books",
+                params={"library_id": library_id},
+            ),
+            404,
+            "resource_not_found",
+        )
+    with immediate_transaction(retrieval_api.engine) as connection:
+        connection.execute(
+            delete(CredentialLibraryGrant).where(
+                CredentialLibraryGrant.credential_id == "d" * 32,
+                CredentialLibraryGrant.target_library_id == library_id,
+                CredentialLibraryGrant.action == "read",
+            )
+        )
+    _assert_problem(
+        _get(retrieval_api, path, params={"library_id": library_id, "limit": 1, "cursor": cursor}),
+        403,
+        "insufficient_scope",
+    )
+
+
+@pytest.mark.parametrize("policy", ["legacy", "none", "write"])
+def test_library_discovery_denies_legacy_missing_read_and_write_only(
+    retrieval_api: RetrievalApi, policy: str
+) -> None:
+    library_id, section_id = _discovery_target(retrieval_api)
+    if policy != "legacy":
+        _discovery_policy(retrieval_api, library_id, () if policy == "none" else ("write",))
+    for target in (library_id, "ff" * 16):
+        for path in ("/api/v1/sections", f"/api/v1/sections/{section_id}/books"):
+            response = _get(retrieval_api, path, params={"library_id": target})
+            _assert_problem(response, 403, "insufficient_scope")
+            assert "Synthetic First" not in response.text
+
+
+def test_discovery_cursor_cannot_cross_credentials_of_same_caller(
+    retrieval_api: RetrievalApi,
+) -> None:
+    library_id, _ = _discovery_target(retrieval_api)
+    _discovery_policy(retrieval_api, library_id, ("read",))
+    issued = generate_token()
+    with immediate_transaction(retrieval_api.engine) as connection:
+        AuthRepository(connection).add_credential(
+            NewCredential(
+                id="e" * 32,
+                library_id=retrieval_api.scope.library_id,
+                caller_id=CALLER_ID,
+                selector=issued.selector,
+                token_version=issued.version,
+                verifier=issued.verifier,
+                expires_at=10_000_000,
+                created_at=1_000_000,
+                updated_at=1_000_000,
+            )
+        )
+    _discovery_policy(retrieval_api, library_id, ("read",), credential_id="e" * 32)
+    first = _get(retrieval_api, "/api/v1/sections", params={"library_id": library_id, "limit": 1})
+    other = RetrievalApi(
+        retrieval_api.engine, retrieval_api.scope, issued.value, retrieval_api.cursor_codec
+    )
+    _assert_problem(
+        _get(
+            other,
+            "/api/v1/sections",
+            params={"library_id": library_id, "limit": 1, "cursor": first.json()["next_cursor"]},
+        ),
+        400,
+        "invalid_cursor",
+    )
+
+
+@pytest.mark.parametrize("collection", ["sections", "books"])
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"library_id": ""},
+        {"library_id": "A" * 32},
+        {"library_id": "invalid"},
+        {"library_id": "  " + "1" * 32},
+        [("library_id", "1" * 32), ("library_id", "1" * 32)],
+        {"library_id": "1" * 32, "extra": "value"},
+    ],
+)
+def test_discovery_library_parameter_is_strict_and_unambiguous(
+    retrieval_api: RetrievalApi, collection: str, params: QueryParams
+) -> None:
+    path = (
+        "/api/v1/sections"
+        if collection == "sections"
+        else f"/api/v1/sections/{retrieval_api.scope.query_section_id}/books"
+    )
+    _assert_problem(_get(retrieval_api, path, params=params), 422, "request_validation_failed")
+
+
+def test_library_selector_does_not_expand_page_list_parameters(retrieval_api: RetrievalApi) -> None:
+    _assert_problem(
+        _get(
+            retrieval_api,
+            f"/api/v1/sections/{retrieval_api.scope.query_section_id}/pages",
+            params={"library_id": retrieval_api.scope.library_id},
+        ),
+        422,
+        "request_validation_failed",
+    )
 
 
 def test_book_and_page_lists_are_current_only_and_have_exact_citations(
@@ -234,10 +496,16 @@ def test_current_and_history_reads_require_page_read_and_return_exact_body(
     assert current.status_code == 200
     assert current.json()["revision"]["content"] == scope.current_content
     assert current.json()["citation"]["revision_number"] == 2
+    with retrieval_api.engine.connect() as connection:
+        stored = connection.execute(
+            select(Page.occurred_at, Page.updated_at).where(Page.page_uid == scope.first_page_uid)
+        ).one()
     assert current.headers["ETag"] == page_current_etag(
         scope.first_page_uid,
         scope.second_revision_id,
         2,
+        stored[0],
+        stored[1],
     )
 
     historical = _get(retrieval_api, f"{current_path}/revisions/1")
@@ -246,6 +514,191 @@ def test_current_and_history_reads_require_page_read_and_return_exact_body(
     assert historical.json()["citation"]["revision_id"] == scope.first_revision_id
     assert historical.json()["page"]["current_revision_number"] == 2
     assert "ETag" not in historical.headers
+
+
+def test_revision_file_manifest_and_download_are_exact_and_not_cacheable(
+    retrieval_api: RetrievalApi,
+) -> None:
+    scope = retrieval_api.scope
+    base = (
+        f"/api/v1/sections/{scope.query_section_id}/pages/{scope.first_page_id}/revisions/1/files"
+    )
+    listing = _get(retrieval_api, base)
+    assert listing.status_code == 200
+    assert listing.json()["page_id"] == scope.first_page_id
+    assert listing.json()["revision_id"] == scope.first_revision_id
+    assert listing.json()["revision_number"] == 1
+    assert listing.json()["files"] == [
+        {
+            "filename": "content.md",
+            "size_bytes": len(scope.historical_content.encode()),
+            "content_sha256": hashlib.sha256(scope.historical_content.encode()).hexdigest(),
+        }
+    ]
+    assert scope.historical_content not in listing.text
+    _assert_protected(listing)
+
+    download = _get(retrieval_api, f"{base}/content.md")
+    assert download.status_code == 200
+    assert download.content == scope.historical_content.encode()
+    assert download.headers["Content-Type"] == "application/octet-stream"
+    assert download.headers["Content-Disposition"] == (
+        "attachment; filename=\"download\"; filename*=UTF-8''content.md"
+    )
+    assert download.headers["X-Content-Type-Options"] == "nosniff"
+    _assert_protected(download)
+
+
+def test_file_set_is_rejected_by_legacy_routes_after_authorization(
+    retrieval_api: RetrievalApi,
+) -> None:
+    scope = retrieval_api.scope
+    binary = b"\x00\xff"
+    with immediate_transaction(retrieval_api.engine) as connection:
+        connection.exec_driver_sql(
+            "DELETE FROM revision_file_sets WHERE revision_id = ?",
+            (scope.second_revision_id,),
+        )
+        connection.exec_driver_sql(
+            "UPDATE revisions SET content_md = NULL, content_size_bytes = NULL, "
+            "content_sha256 = NULL WHERE revision_id = ?",
+            (scope.second_revision_id,),
+        )
+        connection.exec_driver_sql(
+            "DELETE FROM revision_files WHERE revision_id = ?",
+            (scope.second_revision_id,),
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO revision_file_sets "
+            "(library_id, page_uid, revision_id, revision_number, storage_format, "
+            "file_count, total_size_bytes, snapshot_sha256) "
+            "VALUES (?, ?, ?, 2, 'file_set_v1', 1, ?, ?)",
+            (
+                scope.library_id,
+                scope.first_page_uid,
+                scope.second_revision_id,
+                len(binary),
+                b"s" * 32,
+            ),
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO revision_files "
+            "(library_id, page_uid, revision_id, revision_number, filename, "
+            "content_bytes, size_bytes, content_sha256) VALUES (?, ?, ?, 2, ?, ?, ?, ?)",
+            (
+                scope.library_id,
+                scope.first_page_uid,
+                scope.second_revision_id,
+                "artifact.bin",
+                binary,
+                len(binary),
+                hashlib.sha256(binary).digest(),
+            ),
+        )
+
+    page_path = f"/api/v1/sections/{scope.query_section_id}/pages/{scope.first_page_id}"
+    for path in (
+        page_path,
+        f"{page_path}/revisions/2",
+        f"{page_path}/revisions/2/files",
+        f"{page_path}/revisions/2/files/artifact.bin",
+    ):
+        response = _get(retrieval_api, path)
+        _assert_problem(response, 409, "revision_format_unsupported")
+        assert "artifact.bin" not in response.text
+        assert "ETag" not in response.headers
+
+    historical = _get(retrieval_api, f"{page_path}/revisions/1")
+    assert historical.status_code == 200
+    assert historical.json()["revision"]["content"] == scope.historical_content
+
+    with TestClient(_app(retrieval_api), raise_server_exceptions=False) as client:
+        unauthenticated = client.get(page_path)
+    _assert_problem(unauthenticated, 401, "authentication_required")
+    forbidden = _get(
+        retrieval_api,
+        f"/api/v1/sections/{scope.second_query_section_id}/pages/{scope.first_page_id}",
+    )
+    _assert_problem(forbidden, 403, "insufficient_scope")
+    hidden = _get(
+        retrieval_api,
+        f"/api/v1/sections/{scope.hidden_section_id}/pages/{scope.first_page_id}",
+    )
+    _assert_problem(hidden, 404, "resource_not_found")
+
+
+def test_missing_revision_manifest_is_a_sanitized_persistence_failure(
+    retrieval_api: RetrievalApi,
+) -> None:
+    scope = retrieval_api.scope
+    with immediate_transaction(retrieval_api.engine) as connection:
+        connection.exec_driver_sql(
+            "DELETE FROM revision_file_sets WHERE revision_id = ?",
+            (scope.second_revision_id,),
+        )
+    page_path = f"/api/v1/sections/{scope.query_section_id}/pages/{scope.first_page_id}"
+    for path in (
+        page_path,
+        f"{page_path}/revisions/2",
+        f"{page_path}/revisions/2/files",
+        f"{page_path}/revisions/2/files/content.md",
+    ):
+        response = _get(retrieval_api, path)
+        _assert_problem(response, 500, "internal_error")
+        assert scope.current_content not in response.text
+        assert "ETag" not in response.headers
+
+
+@pytest.mark.parametrize("suffix", ["missing.md", "Content.md", "..%2Fsecret", "%0D%0Aevil", "CON"])
+def test_revision_file_download_rejects_unknown_or_unsafe_name(
+    retrieval_api: RetrievalApi,
+    suffix: str,
+) -> None:
+    scope = retrieval_api.scope
+    base = (
+        f"/api/v1/sections/{scope.query_section_id}/pages/{scope.first_page_id}"
+        f"/revisions/1/files/{suffix}"
+    )
+    response = _get(retrieval_api, base)
+    if suffix in {"missing.md", "Content.md", "%0D%0Aevil"}:
+        _assert_problem(response, 404, "resource_not_found")
+    else:
+        _assert_problem(response, 422, "request_validation_failed")
+    assert scope.historical_content not in response.text
+
+
+def test_revision_file_routes_preserve_auth_scope_and_tombstone_boundaries(
+    retrieval_api: RetrievalApi,
+) -> None:
+    scope = retrieval_api.scope
+    page_base = f"/api/v1/sections/{scope.query_section_id}/pages/{scope.first_page_id}"
+    file_base = f"{page_base}/revisions/1/files"
+    with TestClient(_app(retrieval_api), raise_server_exceptions=False) as client:
+        unauthenticated = client.get(file_base)
+        malformed = client.get(f"{file_base}/..%2Fsecret")
+    _assert_problem(unauthenticated, 401, "authentication_required")
+    _assert_problem(malformed, 401, "authentication_required")
+
+    deleted = _get(
+        retrieval_api,
+        f"/api/v1/sections/{scope.query_section_id}/pages/"
+        f"{scope.deleted_page_id}/revisions/1/files",
+    )
+    hidden = _get(
+        retrieval_api,
+        f"/api/v1/sections/{scope.hidden_section_id}/pages/"
+        f"{scope.hidden_page_id}/revisions/1/files/content.md",
+    )
+    _assert_problem(deleted, 404, "resource_not_found")
+    _assert_problem(hidden, 404, "resource_not_found")
+
+    readable_without_query = _get(
+        retrieval_api,
+        f"/api/v1/sections/{scope.read_section_id}/pages/"
+        f"{scope.read_page_id}/revisions/1/files/content.md",
+    )
+    assert readable_without_query.status_code == 200
+    assert readable_without_query.content == b"# Read only\n"
 
 
 @pytest.mark.parametrize(
@@ -517,5 +970,136 @@ def test_grant_removal_between_authentication_and_read_is_rechecked(
     response = _get(
         retrieval_api,
         f"/api/v1/sections/{retrieval_api.scope.query_section_id}/pages",
+    )
+    _assert_problem(response, 403, "insufficient_scope")
+
+
+def test_read_uses_one_real_sqlite_snapshot_for_grant_and_page(
+    retrieval_api: RetrievalApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scope = retrieval_api.scope
+    page_path = f"/api/v1/sections/{scope.query_section_id}/pages/{scope.first_page_id}"
+    with retrieval_api.engine.connect() as connection:
+        assert connection.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one() == "wal"
+
+    original_actions = RetrievalRepository.section_actions
+    observed_transactions: list[bool] = []
+
+    def actions_then_revoke_and_delete(
+        repository: RetrievalRepository,
+        library_id: str,
+        caller_id: str,
+        section_id: str,
+    ) -> tuple[SectionAction, ...]:
+        actions = original_actions(repository, library_id, caller_id, section_id)
+        raw = repository._connection.connection.driver_connection
+        assert isinstance(raw, sqlite3.Connection)
+        observed_transactions.append(raw.in_transaction)
+        with immediate_transaction(retrieval_api.engine) as writer:
+            assert AuthRepository(writer).remove_grant(
+                scope.library_id, CALLER_ID, scope.query_section_id, SectionAction.PAGE_READ
+            )
+            writer.exec_driver_sql(
+                "UPDATE pages SET deleted_at = 4000000, updated_at = 4000000 "
+                "WHERE library_id = ? AND page_uid = ?",
+                (scope.library_id, scope.first_page_uid),
+            )
+        return actions
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(RetrievalRepository, "section_actions", actions_then_revoke_and_delete)
+        response = _get(retrieval_api, page_path)
+    assert observed_transactions == [True]
+    assert response.status_code == 200
+    assert response.json()["revision"]["content"] == scope.current_content
+    _assert_problem(_get(retrieval_api, page_path), 403, "insufficient_scope")
+
+
+def test_opted_in_library_grant_and_body_share_one_sqlite_snapshot(
+    retrieval_api: RetrievalApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scope = retrieval_api.scope
+    credential_id = "d" * 32
+    with immediate_transaction(retrieval_api.engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryPolicy),
+            {
+                "credential_id": credential_id,
+                "caller_id": CALLER_ID,
+                "home_library_id": scope.library_id,
+                "mode": "library_grants",
+                "created_at": 1_000_000,
+            },
+        )
+        connection.execute(
+            insert(CredentialLibraryGrant),
+            {
+                "credential_id": credential_id,
+                "caller_id": CALLER_ID,
+                "home_library_id": scope.library_id,
+                "target_library_id": scope.library_id,
+                "action": "read",
+                "created_at": 1_000_000,
+            },
+        )
+    with retrieval_api.engine.connect() as connection:
+        assert connection.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one() == "wal"
+
+    original_policy = RetrievalRepository.get_library_policy
+    observed_transactions: list[bool] = []
+
+    def policy_then_revoke_and_delete(repository: RetrievalRepository, **kwargs: Any) -> Any:
+        policy = original_policy(repository, **kwargs)
+        raw = repository._connection.connection.driver_connection
+        assert isinstance(raw, sqlite3.Connection)
+        observed_transactions.append(raw.in_transaction)
+        with immediate_transaction(retrieval_api.engine) as writer:
+            writer.exec_driver_sql(
+                "DELETE FROM auth_credential_library_grants "
+                "WHERE credential_id = ? AND target_library_id = ? AND action = 'read'",
+                (credential_id, scope.library_id),
+            )
+            writer.exec_driver_sql(
+                "UPDATE pages SET deleted_at = 4000000, updated_at = 4000000 "
+                "WHERE library_id = ? AND page_uid = ?",
+                (scope.library_id, scope.first_page_uid),
+            )
+        return policy
+
+    page_path = f"/api/v1/sections/{scope.query_section_id}/pages/{scope.first_page_id}"
+    with monkeypatch.context() as patcher:
+        patcher.setattr(RetrievalRepository, "get_library_policy", policy_then_revoke_and_delete)
+        response = _get(retrieval_api, page_path)
+    assert observed_transactions == [True]
+    assert response.status_code == 200
+    assert response.json()["revision"]["content"] == scope.current_content
+    _assert_problem(_get(retrieval_api, page_path), 403, "insufficient_scope")
+
+
+def test_revision_file_download_rechecks_page_read_grant_after_authentication(
+    retrieval_api: RetrievalApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_authenticate = retrieval_routes_module._authenticate
+
+    async def authenticate_then_remove(*args: Any, **kwargs: Any) -> Any:
+        context = await original_authenticate(*args, **kwargs)
+        with immediate_transaction(retrieval_api.engine) as connection:
+            assert AuthRepository(connection).remove_grant(
+                retrieval_api.scope.library_id,
+                CALLER_ID,
+                retrieval_api.scope.query_section_id,
+                SectionAction.PAGE_READ,
+            )
+        return context
+
+    monkeypatch.setattr(retrieval_routes_module, "_authenticate", authenticate_then_remove)
+    scope = retrieval_api.scope
+    response = _get(
+        retrieval_api,
+        f"/api/v1/sections/{scope.query_section_id}/pages/{scope.first_page_id}"
+        "/revisions/1/files/content.md",
     )
     _assert_problem(response, 403, "insufficient_scope")

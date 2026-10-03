@@ -15,6 +15,7 @@ class LibrarySchema(BaseModel):
 class NewLibrary(LibrarySchema):
     id: OpaqueId
     name: ResourceName
+    description: BoundedText = ""
     created_at: TimestampMicros
     updated_at: TimestampMicros
 
@@ -52,10 +53,44 @@ class BookRecord(NewBook):
 
 class LibraryStructureSeed(LibrarySchema):
     library_name: ResourceName
+    library_description: BoundedText = ""
     section_name: ResourceName
     section_description: BoundedText = ""
     book_name: ResourceName
     book_summary: BoundedText = ""
+
+
+class CreateLibraryInput(LibrarySchema):
+    name: ResourceName
+    description: BoundedText = ""
+
+
+class UpdateLibraryInput(LibrarySchema):
+    name: ResourceName
+    description: BoundedText
+    expected_updated_at: TimestampMicros
+
+
+class CreateSectionInput(LibrarySchema):
+    name: ResourceName
+    description: BoundedText = ""
+
+
+class UpdateSectionInput(LibrarySchema):
+    name: ResourceName
+    description: BoundedText
+    expected_updated_at: TimestampMicros
+
+
+class CreateBookInput(LibrarySchema):
+    name: ResourceName
+    summary: BoundedText = ""
+
+
+class UpdateBookInput(LibrarySchema):
+    name: ResourceName
+    summary: BoundedText
+    expected_updated_at: TimestampMicros
 
 
 class CreatedResources(LibrarySchema):

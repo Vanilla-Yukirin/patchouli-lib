@@ -1,0 +1,249 @@
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Iterator
+from html import escape, unescape
+from pathlib import Path
+from typing import Any
+
+import pytest
+from fastapi.routing import APIRoute, iter_route_contexts
+from fastapi.testclient import TestClient
+
+from patchouli_lib.admin.interface_guide import api_guide
+from patchouli_lib.admin.passwords import hash_password
+from patchouli_lib.api.agent_skill_routes import SkillBundle
+from patchouli_lib.api.auth_contracts import CapabilitiesResponse
+from patchouli_lib.api.errors import ProblemDetails
+from patchouli_lib.api.search_routes_v2 import SearchResponse
+from patchouli_lib.app import create_app
+from patchouli_lib.auth.models import Caller
+from patchouli_lib.config import Settings
+from patchouli_lib.retrieval.file_set_read import FileSetRevisionManifestView
+from patchouli_lib.search.query_v2 import SearchQueryV2Wire
+from patchouli_lib.tags.schemas import TagCollection
+
+_ORIGIN = "https://admin.example.invalid"
+_PASSWORD = "synthetic guide password"
+
+
+@pytest.fixture
+def admin_client(tmp_path: Path) -> Iterator[TestClient]:
+    settings = Settings.model_validate(
+        {
+            "environment": "test",
+            "database_url": f"sqlite:///{(tmp_path / 'guide.db').as_posix()}",
+            "admin_password_hash": hash_password(
+                _PASSWORD,
+                salt_factory=lambda size: b"s" * size,
+                iterations=300_000,
+            ),
+            "admin_session_signing_secret": "s" * 32,
+        }
+    )
+    app = create_app(settings)
+    Caller.metadata.create_all(app.state.engine)
+    with TestClient(app, base_url=_ORIGIN, follow_redirects=False) as client:
+        yield client
+
+
+def _login(client: TestClient) -> None:
+    response = client.post(
+        "/admin/login",
+        data={"password": _PASSWORD},
+        headers={"Origin": _ORIGIN},
+    )
+    assert response.status_code == 303
+
+
+def _preview(html: str, identifier: str) -> dict[str, Any]:
+    match = re.search(rf'<pre data-preview="{re.escape(identifier)}">(.*?)</pre>', html, re.DOTALL)
+    assert match is not None
+    value = json.loads(unescape(match.group(1)))
+    assert isinstance(value, dict)
+    return value
+
+
+def _directory_routes(html: str) -> set[tuple[str, str]]:
+    entries = re.findall(
+        r"<strong>(GET|POST|PUT|PATCH|DELETE)</strong> <code>(/api/v1/[^<]+)</code>",
+        html,
+    )
+    assert len(entries) == len(set(entries))
+    return set(entries)
+
+
+def test_interface_pages_are_session_protected_and_remain_read_only(
+    admin_client: TestClient,
+) -> None:
+    for path in ("/admin/guide", "/admin/agent", "/admin/mcp"):
+        unauthenticated = admin_client.get(path)
+        assert unauthenticated.status_code == 303
+        assert unauthenticated.headers["location"] == "/admin/login"
+
+    _login(admin_client)
+    for path in ("/admin/guide", "/admin/agent", "/admin/mcp"):
+        response = admin_client.get(path)
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store, max-age=0"
+        assert response.headers["content-security-policy"].startswith("default-src 'none'")
+        assert response.text.count("<form ") == 1  # Existing logout form only.
+        assert 'action="/api/' not in response.text
+        assert "fetch(" not in response.text
+        assert "plb1." not in response.text
+
+
+def test_api_directory_and_synthetic_examples_match_reviewed_wire_shapes(
+    admin_client: TestClient,
+) -> None:
+    _login(admin_client)
+    response = admin_client.get("/admin/guide?lang=zh-CN")
+    assert response.headers["content-language"] == "zh-CN"
+    assert "合成响应，非实时数据" in response.text
+    assert "管理登录 Cookie 不能代替它" in response.text
+    assert "需要检索配置" in response.text
+    assert "/api/v1/sections/{section_id}/books/{book_id}/pages" in response.text
+    assert (
+        "/api/v1/libraries/{library_id}/sections/{section_id}/books/{book_id}/pages"
+        in response.text
+    )
+    assert "单份 Markdown 也用此接口" in response.text
+    assert "/file-revisions" in response.text
+    assert "/api/v1/libraries/{library_id}/tags/{tag_id}/pages" in response.text
+    assert "当前页面搜索（需先重建索引）" in response.text
+
+    capabilities = _preview(response.text, "capabilities-preview")
+    parsed_capabilities = CapabilitiesResponse.model_validate(capabilities)
+    assert parsed_capabilities.api_versions == ("v1",)
+    assert parsed_capabilities.features == (
+        "archive",
+        "file-sets",
+        "page-lifecycle",
+        "page-move",
+        "tags",
+    )
+    assert parsed_capabilities.limits.file_set is not None
+
+    search_error = _preview(response.text, "search-preview")
+    parsed_problem = ProblemDetails.model_validate(search_error)
+    assert parsed_problem.status == 503
+    assert parsed_problem.code == "search_unavailable"
+    request_example = SearchQueryV2Wire.model_validate(_preview(response.text, "search-v2-preview"))
+    assert request_example.keywords == ["示例", "example"]
+    success_example = SearchResponse.model_validate(
+        _preview(response.text, "search-success-preview")
+    )
+    assert success_example.items[0].match_sources[0].kind == "title"
+
+    file_set = FileSetRevisionManifestView.model_validate(
+        _preview(response.text, "file-set-preview")
+    )
+    assert file_set.page_id == "example-page"
+    assert file_set.files[0].filename == "content.md"
+    tags = TagCollection.model_validate(_preview(response.text, "tags-preview"))
+    assert tags.items[0].page_count == 1
+
+
+@pytest.mark.parametrize("retrieval_available", [False, True])
+def test_api_directory_matches_registered_v1_routes(retrieval_available: bool) -> None:
+    values: dict[str, object] = {
+        "environment": "test",
+        "database_url": "sqlite:///:memory:",
+        "admin_enabled": False,
+    }
+    if retrieval_available:
+        values["retrieval_cursor_signing_secret"] = "synthetic-retrieval-secret-1234567890"
+    app = create_app(Settings.model_validate(values))
+    registered = {
+        (method, route.path_format)
+        for context in iter_route_contexts(app.routes)
+        if isinstance(route := context.route, APIRoute) and route.path_format.startswith("/api/v1/")
+        for method in route.methods or ()
+        if method in {"GET", "POST", "PUT", "PATCH", "DELETE"}
+    }
+    directory = _directory_routes(api_guide("zh-CN", retrieval_available=retrieval_available))
+    assert directory == registered
+    assert ("POST", "/api/v1/sections/{section_id}/search") not in directory
+    assert ("POST", "/api/v1/search") in directory
+    if retrieval_available:
+        assert ("GET", "/api/v1/sections") in directory
+    else:
+        assert ("GET", "/api/v1/sections") not in directory
+
+
+def test_skill_guide_shows_only_packaged_manifest_and_escaped_fixed_files(
+    admin_client: TestClient,
+) -> None:
+    _login(admin_client)
+    response = admin_client.get("/admin/agent?file=../private")
+    assert response.status_code == 200
+    assert "本地打包数据" not in response.text  # Default language is English.
+    assert "Packaged data — not a live HTTP response" in response.text
+    assert "../private" not in response.text
+    assert 'href="/connect"' in response.text
+
+    bundle = SkillBundle()
+    manifest = _preview(response.text, "skill-manifest-preview")
+    assert manifest == {"version": bundle.version, "files": bundle.file_entries}
+    for path, contents in bundle.contents.items():
+        assert f"<summary><code>{escape(path)}</code></summary>" in response.text
+        assert escape(contents.decode("utf-8")) in response.text
+
+
+@pytest.mark.parametrize("locale", ("en", "zh-CN"))
+def test_agent_guide_explains_search_without_claiming_index_readiness(
+    admin_client: TestClient, locale: str
+) -> None:
+    _login(admin_client)
+    response = admin_client.get(f"/admin/agent?lang={locale}")
+    assert response.status_code == 200
+    assert "POST /api/v1/search" in response.text
+    assert "503" in response.text
+    assert "真实搜索尚未提供" not in response.text
+    assert "Real search is not yet" not in response.text
+
+
+def test_mcp_inventory_and_synthetic_structured_content(
+    admin_client: TestClient,
+) -> None:
+    _login(admin_client)
+    response = admin_client.get("/admin/mcp?lang=zh-CN")
+    assert "MCP 工具名称" in response.text
+    assert "合成响应，非实时数据" in response.text
+    assert "连接旧服务时后两个字段为未知" in response.text
+    for name in (
+        "capabilities",
+        "whoami",
+        "sections_list",
+        "books_list",
+        "pages_search",
+        "page_current",
+        "page_revision",
+        "archive_create",
+        "archive_revise",
+    ):
+        assert f"<code>{name}</code>" in response.text
+
+    success = _preview(response.text, "mcp-success-preview")
+    assert success["ok"] is True
+    assert set(success) == {"ok", "data", "metadata"}
+    assert success["data"]["name"] == "Example Agent"
+    assert success["data"]["description"] == "Synthetic integration example"
+    assert success["data"]["policy_mode"] == "library_grants"
+    assert success["data"]["library_grants"] == [
+        {"library_id": "example-library", "actions": ["read"]}
+    ]
+    assert success["data"]["grants"] == []
+    assert success["metadata"]["etag"] is None
+
+    unavailable = _preview(response.text, "mcp-error-preview")
+    assert unavailable == {
+        "ok": False,
+        "error": {
+            "category": "service",
+            "code": "search_unavailable",
+            "message": "service is temporarily unavailable",
+            "request_id": "req_00000000000000000000000000000000",
+        },
+    }

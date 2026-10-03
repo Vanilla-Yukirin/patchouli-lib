@@ -1,137 +1,64 @@
 ---
 name: patchouli-agent
-description: 使用随附的 PatchouliLib CLI 或 stdio MCP 适配器诊断调用方访问权限、发现获授的 Section 和 Book、明确归档或修订 Markdown、执行限定 Section 的搜索，并取得准确 Revision 引用。适用于 Agent 需要操作 PatchouliLib，但不应自行实现 HTTP、身份验证、重试或幂等逻辑的场景。
+description: 通过标准 HTTP 接入 PatchouliLib，验证设备身份、下载受保护 Skill，并按实际能力安全读取或上传 Page 文件集。
 ---
 
 # Patchouli Agent 使用指南
 
-只使用已安装的 `patchouli` CLI 或已连接的 `patchouli-mcp` 工具。两者都是同一类型化
-客户端和操作日志之上的展示层。
+首选标准 HTTP；不要求安装专用 CLI 或 MCP。先读[本机输入设备 Token](references/local-token.md)
+和[标准 HTTP 接口](references/http.md)。用户没有设备 Token 时，指导其在管理后台签发
+或复制。**不要让用户把 Token 发到模型聊天，也不要把 Token 放进接入提示词。**
 
-## 守住边界
+在本机交互式输入 Token，用 Bearer 请求头调用 `GET /api/v1/auth/whoami` 和
+`GET /api/v1/capabilities`。核对身份、说明、有效期、目标 Library 的实际权限与服务
+实际公布的能力。随后按受保护的 Skill manifest 下载列出的全部文件，逐项核对字节数
+和 SHA-256，再依当前 Agent 环境的规则安装。已有本地 Skill 如被修改，先比较差异，
+不要静默覆盖。目标服务未公布或未实现的能力不可猜测。
 
-- 绝不自行实现或调用原始 HTTP、授权头、multipart 正文、重试循环、幂等键或凭据
-  生命周期操作。
-- 绝不索要 bearer 凭据，也不把它放入 argv、MCP 参数、提示词、配置档、受跟踪配置、
-  输出或日志。使用已有的操作系统机密存储记录，或受控的 `PATCHOULI_TOKEN` 进程注入。
-- 使用现有的非机密配置档，不要虚构部署设置。
-- 将 Section、Book、Page、Revision、游标和操作 ID 视为不透明值。从经过验证的输出
-  中复制，不要从中解析时间、顺序、身份或授权。
-- 不要在普通诊断中包含搜索查询、元数据、Source 定位值或 Markdown。CLI 调用应通过
-  受支持的文件或 stdin 选项提供敏感值；MCP 只传递文档规定的内存字段。
+`whoami.policy_mode` 为 `library_grants` 时，只按每个目标 Library 明示的 `read` 和
+`write` 判断；两者独立，写入不隐含读取。`legacy_section` 时继续按旧 Section
+授权，绝不自动扩大为整库权限。`operator` 是管理员身份；不要为了弥补 Agent 权限
+不足而换用管理员凭据。旧服务缺少新版身份字段时标记权限模式未知，先核对实际契约。
 
-## 只选用一个接口
+## 内容操作
 
-- 如果宿主已经提供相连的 MCP 工具，优先使用这些工具。
-- 否则使用 `patchouli --output json ...`，并且只解析稳定的 stdout 封装；stderr
-  只作为诊断信息。
-- 不要在 MCP 会话中调用 CLI，也不要创建另一个客户端。
+- 先从已授权列表确认 Section、Book 与现有 Page；这些 ID 和 Revision、ETag 都是
+  不透明值，不从标题、路径或 ID 字面猜测身份。Section／Book 列表可按 HTTP 参考
+  的可选 `library_id` 发现有 `read` 授权的目标库；省略仍限归属库，旧 Section 模式
+  不跨库。要发现目标库的 Page，使用显式 Library／Section 的新列表；已知稳定
+  Page ID 时可按 Library 查询其当前 Section／Book，再使用返回的准确文件集路径。
+  旧 Page 列表仍限归属库，新路径也不能绕过目标库或旧 Section 的读授权。
+  仅有 `write` 时由管理员或其他已授权来源提供并核实目标 ID，绝不猜造。目标服务
+  未实现新选择器时不可把旧列表结果当作跨库发现。新建 Page 前必须已有目标 Book。
+- 用户要上传时，先把完整内容准备为本机文件，再按[统一文件集 HTTP 流程](references/http.md)
+  提交：单份 Markdown 也是一个 `file`，多文件是同一请求中的多个 `file`。新建必须
+  使用幂等键；修订还需当前 Page 的强 `If-Match`，提交的是整组文件快照而非补丁。
+- 结果不确定时，只有保留原幂等键、目标、元数据和全部原始字节，才可原样重试。
+  参数变化或明确的条件冲突应重新读取状态并由用户决定，不自动覆盖。有读取权限时
+  按响应中的准确 Page／Revision 清单和文件哈希回读核对；仅有写入权限时须交由
+  另一获授权身份或管理侧验收，并如实报告自己无法回读。需要时在本机记录 Page ID。
+  不用全库同哈希查询代替准确回读。只有本次上传专门生成的临时副本，才可在准确
+  回读确认后清理；尚未完成核验时保留以便重试，用户原始文件绝不自动删除。
+- 旧单 Markdown Archive 写入是兼容路径，新客户端优先统一文件集。目标服务若尚未
+  公布文件集能力，不能盲调新接口；是否改用旧接口应先说明其单文件限制。
+- 整理 Page 归属时，服务需公布 `page-move`，设备需拥有该 Library 的写权限。
+  按 [HTTP 移动流程](references/http.md)提交准确源／目标、当前 ETag 与幂等键；
+  只在同库内移动，不复制文件或创建新 Page。原成功重试不能改写为新的移动目标。
+- 软删除或恢复 Page 时，服务需公布 `page-lifecycle`，设备需有目标 Library 的写权限；
+  使用库明确的稳定 Page ID 路径、强 `If-Match`、`Idempotency-Key` 与空正文。
+  WRITE 不包含 READ；成功后保留原请求用于重试，不能把恢复当成文件内容重传。
+- 目标服务的能力响应含 `search` 时，按[标准 HTTP 搜索契约](references/http.md)
+  调用跨知识库当前 Page 搜索。索引未重建或不完整会明确返回 `search_unavailable`；
+  用 POST 正文中的不透明游标续页，失效时从第一页重搜；摘录是规范化索引文本，
+  需要原文时读取准确 Revision。不可把列表浏览或静态示例冒充真实搜索，也不要继续
+  调用旧单 Section 搜索入口。
 
-## 访问内容前先诊断
+## 凭据与报告边界
 
-使用 CLI 时运行：
+Token 只放在本机受控输入、进程内存或用户选择的本机机密存储。不得写入 URL、
+命令行参数、模型工具参数、受跟踪文件或日志；不要在普通诊断里回显正文、搜索词、
+Source 定位值或 Token。报告操作结果、准确引用和必要的非机密请求 ID；用户未要求
+展示内容时不附上正文。CLI/MCP 若已存在，只是兼容选择，不是接入前置条件。
 
-```text
-patchouli --output json doctor
-patchouli --output json capabilities
-patchouli --output json whoami
-```
-
-使用 MCP 时调用 `capabilities` 和 `whoami`；只有同时安装 CLI 时才使用 CLI 的
-`doctor`。兼容性检查或身份验证失败，或缺少 Section 授权时停止。根据任务需要，
-确认所选 Section 对搜索有 `section:query`，对当前或准确 Revision 读取有
-`page:read`，对创建或修订有 `archive:write`。不要扩大作用域或换用管理身份。
-
-## 发现不透明作用域
-
-先列出获授 Section，再列出所选 Section 中的 Book：
-
-```text
-patchouli --output json sections list
-patchouli --output json books list --section <section-id>
-```
-
-对应的 MCP 工具是 `sections_list` 和 `books_list`。创建归档要求 Book 已经存在，
-绝不能隐式创建。
-
-## 搜索并取得准确引用
-
-只搜索一个明确的 Section：
-
-```text
-patchouli --output json section search --section SECTION_ID --query-file QUERY_FILE
-```
-
-对应的 MCP 工具是 `section_search`，参数为 `section_id`、`query`，以及可选的
-`limit` 或不透明 `cursor`。不要声称支持跨 Section 搜索、原始全文语法或特定提供方
-的语义搜索。
-
-使用所选结果中的 `section_id`、`page_id` 和 `revision_number` 获取不可变 Revision：
-
-```text
-patchouli --output json page revision --section SECTION_ID --page PAGE_ID --revision REVISION_NUMBER
-```
-
-对应的 MCP 工具是 `page_revision`。返回经过验证、包含全部五个字段的准确引用：
-`section_id`、`page_id`、`revision_id`、`revision_number` 和相对 `href`。不要用
-当前 Page 引用替代它。
-
-## 明确创建归档
-
-使用 `archive create` 或 MCP `archive_create`，绝不能假定为 upsert。CLI 元数据必须
-是 UTF-8 JSON 对象，格式类似以下合成示例：
-
-```json
-{
-  "title": "Synthetic archive",
-  "occurred_at": "2026-08-11T09:15:00Z",
-  "source": {"kind": "conversation"}
-}
-```
-
-分别提供元数据和完整 Markdown 输入来调用 CLI：
-
-```text
-patchouli --output json archive create --section SECTION_ID --book BOOK_ID --metadata-file METADATA_FILE --content-file MARKDOWN_FILE
-```
-
-对 MCP `archive_create`，传入 `section_id`、`book_id`、`title`、`occurred_at`、
-`source_kind`、可选的 `source_locator` 和完整 `content`。绝不要传入凭据、端点、
-本地文件名、日志位置或幂等键。
-
-客户端会在变更前持久化准备受权限限制的操作日志。保留返回的非机密
-`operation_id`。遇到结果不确定的失败后，只重放完全相同的 CLI 命令并添加
-`--operation-id OPERATION_ID`，或重放完全相同的 MCP 工具输入并添加
-`operation_id`。省略操作 ID 会开始新操作。只要路由、元数据、内容字节、调用方，
-或配置档中服务 endpoint 的 origin（源站）不是完全相同，就必须开始新操作。
-不要声称可以跨设备恢复，也不要按标题、Source 定位值、时间戳或内容对另一个键去重。
-如果结果丢失且调用方没有收到操作 ID，
-应停止：随附接口不能发现日志项，再次写入可能产生重复内容。
-
-## 明确修订归档
-
-先获取当前 Page 及其强 ETag：
-
-```text
-patchouli --output json page current --section SECTION_ID --page PAGE_ID
-```
-
-然后追加完整 Revision，绝不提交补丁：
-
-```text
-patchouli --output json archive revise --section SECTION_ID --page PAGE_ID --if-match STRONG_ETAG --metadata-file METADATA_FILE --content-file MARKDOWN_FILE
-```
-
-对应的 MCP 工具是 `page_current` 和 `archive_revise`；传入 `if_match`、
-`source_kind`、可选的 `source_locator` 和完整 `content`。原样保留 ETag，包括它的
-强引号。请求归档 Revision 前，确认所取得的 Page 属于归档类型。
-
-收到明确的 412 或 428 响应时，Revision 没有被应用。不要重放失败操作，也不要悄然
-改变输入后重试。重新获取当前状态、审查它，再用新的强 ETag 有意开始新操作。只有
-结果不确定、且原操作 ID 和每项原参数仍可用时，才进行原样重放。报告最终的准确引用。
-
-## 安全报告
-
-返回操作结果、存在时可安全公开的请求 ID、用于可恢复写入的非机密操作 ID，以及
-准确引用。除非用户明确要求查看非机密内容本身，绝不回显查询文字、元数据、内容、
-Source 定位值、凭据材料、幂等键或部署细节。
+本仓库开发分支的接口不等于目标服务已经合并或部署；始终以实际能力响应和请求结果
+为准。真实资料导入、部署及权限扩大必须遵守当前任务授权。

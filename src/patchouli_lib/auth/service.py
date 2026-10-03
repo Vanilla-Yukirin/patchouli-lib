@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from patchouli_lib.auth.library_policy import LegacySectionPolicy, LibraryAction
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
     MAX_RFC3339_TIMESTAMP_MICROSECONDS,
@@ -24,6 +25,7 @@ from patchouli_lib.auth.tokens import (
     parse_token,
     verify_token,
 )
+from patchouli_lib.request_log.identity import note_authenticated_identity
 
 IdFactory = Callable[[], str]
 Clock = Callable[[], int]
@@ -59,7 +61,7 @@ class CredentialPersistenceError(RuntimeError):
 
 
 class CredentialIssuer:
-    """Create one-time credentials without storing or replaying their raw value."""
+    """Issue credentials; only new Agent values are stored for later reveal."""
 
     def __init__(
         self,
@@ -80,20 +82,24 @@ class CredentialIssuer:
             raise AuthenticationError
 
         issued = generate_token()
+        credential = NewCredential(
+            id=self._id_factory(),
+            library_id=caller.library_id,
+            caller_id=caller.id,
+            selector=issued.selector,
+            token_version=issued.version,
+            verifier=issued.verifier,
+            expires_at=expires_at,
+            created_at=created_at,
+            updated_at=created_at,
+        )
         try:
-            stored = self._repository.add_credential(
-                NewCredential(
-                    id=self._id_factory(),
-                    library_id=caller.library_id,
-                    caller_id=caller.id,
-                    selector=issued.selector,
-                    token_version=issued.version,
-                    verifier=issued.verifier,
-                    expires_at=expires_at,
-                    created_at=created_at,
-                    updated_at=created_at,
+            if caller.kind is CallerKind.AGENT:
+                stored = self._repository.add_agent_credential_with_value(
+                    credential, token_value=issued.value
                 )
-            )
+            else:
+                stored = self._repository.add_credential(credential)
         except SQLAlchemyError:
             pass
         else:
@@ -150,10 +156,12 @@ class AuthenticationService:
         ):
             stored = self._repository.touch_credential_last_used(stored, used_at=now)
 
-        return AuthenticatedCaller(
+        authenticated = AuthenticatedCaller(
             caller=caller,
             credential=credential_metadata(stored),
         )
+        note_authenticated_identity(authenticated)
+        return authenticated
 
     def require_operator(self, token_value: str, *, library_id: str) -> AuthenticatedCaller:
         authenticated = self.authenticate(token_value)
@@ -173,18 +181,37 @@ class AuthenticationService:
         action: SectionAction,
     ) -> AuthenticatedCaller:
         authenticated = self.authenticate(token_value)
-        if (
-            authenticated.caller.library_id != library_id
-            or authenticated.caller.kind is not CallerKind.AGENT
-        ):
+        if authenticated.caller.kind is not CallerKind.AGENT:
             raise AuthorizationError
-        grant = self._repository.get_grant(
-            library_id,
-            authenticated.caller.id,
-            section_id,
-            action,
+        policy = self._repository.get_library_policy(
+            credential_id=authenticated.credential.id,
+            caller_id=authenticated.caller.id,
+            home_library_id=authenticated.caller.library_id,
+            target_library_id=library_id,
+            active_at=self._clock(),
         )
-        if grant is None:
+        if policy is None:
+            raise AuthenticationError
+        if isinstance(policy, LegacySectionPolicy):
+            if authenticated.caller.library_id != library_id:
+                raise AuthorizationError
+            grant = self._repository.get_grant(
+                library_id,
+                authenticated.caller.id,
+                section_id,
+                action,
+            )
+            if grant is None:
+                raise AuthorizationError
+            return authenticated
+
+        if action in (SectionAction.QUERY, SectionAction.PAGE_READ):
+            library_action = LibraryAction.READ
+        elif action is SectionAction.ARCHIVE_WRITE:
+            library_action = LibraryAction.WRITE
+        else:
+            raise AuthorizationError
+        if not policy.allows(library_action):
             raise AuthorizationError
         return authenticated
 

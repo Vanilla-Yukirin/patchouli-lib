@@ -1,4 +1,4 @@
-from sqlalchemy import Connection, insert, select
+from sqlalchemy import Connection, insert, select, update
 
 from patchouli_lib.library.models import Book, Library, Section
 from patchouli_lib.library.schemas import (
@@ -32,6 +32,18 @@ class LibraryRepository:
         self._connection.execute(insert(Library), values)
         return LibraryRecord.model_validate(values)
 
+    def update_library_metadata(self, library: LibraryRecord, *, expected_updated_at: int) -> bool:
+        result = self._connection.execute(
+            update(Library)
+            .where(Library.id == library.id, Library.updated_at == expected_updated_at)
+            .values(
+                name=library.name,
+                description=library.description,
+                updated_at=library.updated_at,
+            )
+        )
+        return result.rowcount == 1
+
     def get_section(self, library_id: str, section_id: str) -> SectionRecord | None:
         statement = select(Section.__table__).where(
             Section.library_id == library_id,
@@ -52,6 +64,22 @@ class LibraryRepository:
         values = section.model_dump()
         self._connection.execute(insert(Section), values)
         return SectionRecord.model_validate(values)
+
+    def update_section_metadata(self, section: SectionRecord, *, expected_updated_at: int) -> bool:
+        result = self._connection.execute(
+            update(Section)
+            .where(
+                Section.id == section.id,
+                Section.library_id == section.library_id,
+                Section.updated_at == expected_updated_at,
+            )
+            .values(
+                name=section.name,
+                description=section.description,
+                updated_at=section.updated_at,
+            )
+        )
+        return result.rowcount == 1
 
     def get_book(self, library_id: str, section_id: str, book_id: str) -> BookRecord | None:
         statement = select(Book.__table__).where(
@@ -80,3 +108,21 @@ class LibraryRepository:
         values = book.model_dump()
         self._connection.execute(insert(Book), values)
         return BookRecord.model_validate(values)
+
+    def update_book_metadata(
+        self,
+        book: BookRecord,
+        *,
+        expected_updated_at: int,
+    ) -> bool:
+        result = self._connection.execute(
+            update(Book)
+            .where(
+                Book.id == book.id,
+                Book.library_id == book.library_id,
+                Book.section_id == book.section_id,
+                Book.updated_at == expected_updated_at,
+            )
+            .values(name=book.name, summary=book.summary, updated_at=book.updated_at)
+        )
+        return result.rowcount == 1

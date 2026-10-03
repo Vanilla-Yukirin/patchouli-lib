@@ -215,10 +215,7 @@ def test_stdin_cannot_be_shared_by_token_and_sensitive_input(tmp_path: Path) -> 
     result = invoke_cli(
         [
             "--token-stdin",
-            "section",
             "search",
-            "--section",
-            "sec_synthetic",
             "--query-stdin",
         ],
         handler=handler,
@@ -273,11 +270,16 @@ def test_local_value_error_keyboard_interrupt_and_internal_failure_are_distinct(
     [
         ("create", b"not-json", "valid UTF-8 JSON object"),
         ("create", b"[]", "JSON object"),
-        ("create", b'{"source":{"kind":"conversation"}}', "requires exactly"),
+        ("create", b'{"source":{"kind":"conversation"}}', "requires title"),
         (
             "create",
             b'{"title":1,"occurred_at":"2026-08-11T09:15:00Z","source":{"kind":"conversation"}}',
-            "must be strings",
+            "title must be a string",
+        ),
+        (
+            "create",
+            b'{"title":"Synthetic","occurred_at":null,"source":{"kind":"conversation"}}',
+            "occurred_at must be a string",
         ),
         (
             "create",

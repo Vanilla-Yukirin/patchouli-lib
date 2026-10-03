@@ -5,7 +5,7 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import inspect, text
 
-from patchouli_lib.database import build_engine
+from patchouli_lib.database import CURRENT_SCHEMA_REVISION, build_engine
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
@@ -61,7 +61,7 @@ def _assert_upgraded_schema(database_url: str) -> None:
             assert first.exec_driver_sql("PRAGMA foreign_key_check").all() == []
             assert second.exec_driver_sql("PRAGMA foreign_key_check").all() == []
             revision = first.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert revision == "20260813_0006"
+            assert revision == CURRENT_SCHEMA_REVISION
     finally:
         engine.dispose()
 

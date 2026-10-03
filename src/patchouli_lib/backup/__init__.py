@@ -16,6 +16,7 @@ from patchouli_lib.backup.errors import (
 )
 from patchouli_lib.backup.manifest import (
     BACKUP_FILENAME,
+    FILE_SET_SCHEMA_REVISION,
     MANIFEST_FILENAME,
     MANIFEST_SCHEMA_VERSION,
     SUPPORTED_SCHEMA_REVISION,
@@ -34,6 +35,7 @@ from patchouli_lib.backup.validation import DatabaseValidationReport, validate_d
 
 __all__ = [
     "BACKUP_FILENAME",
+    "FILE_SET_SCHEMA_REVISION",
     "MANIFEST_FILENAME",
     "MANIFEST_SCHEMA_VERSION",
     "SUPPORTED_SCHEMA_REVISION",

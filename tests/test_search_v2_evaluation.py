@@ -1,0 +1,315 @@
+"""Small, deterministic checks for the offline-only search-v2 experiment."""
+
+from __future__ import annotations
+
+import json
+import os
+import runpy
+import sqlite3
+import subprocess
+import sys
+from collections.abc import Callable
+from contextlib import closing
+from dataclasses import replace
+from pathlib import Path
+from typing import Any, cast
+
+import pytest
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+EVALUATOR = REPOSITORY_ROOT / "scripts" / "evaluate_search_v2.py"
+SHORT_LITERAL_QUERIES = (
+    "english_substring",
+    "emoji",
+    "punctuation",
+    "symbol_boundary",
+    "mixed_han_symbols",
+)
+_MODULE = runpy.run_path(str(EVALUATOR), run_name="search_v2_evaluation_for_test")
+evaluate = cast(Callable[[int, int], dict[str, Any]], _MODULE["evaluate"])
+generate_corpus = cast(Callable[[int, int], tuple[Any, ...]], _MODULE["generate_corpus"])
+evaluation_queries = cast(Callable[[int], tuple[Any, ...]], _MODULE["evaluation_queries"])
+literal_oracle = cast(Callable[[tuple[Any, ...], Any], frozenset[str]], _MODULE["literal_oracle"])
+
+
+def _query(report: dict[str, Any], name: str) -> dict[str, Any]:
+    return next(item for item in report["queries"] if item["name"] == name)
+
+
+@pytest.fixture(scope="module")
+def report() -> dict[str, Any]:
+    # More than the obsolete 256-candidate Alpha cap, yet cheap for CI.
+    return evaluate(330, 512)
+
+
+def test_corpus_is_deterministic_diverse_and_keeps_history_outside_current_text() -> None:
+    first = generate_corpus(96, 1_024)
+    assert first == generate_corpus(96, 1_024)
+    assert len(first) == 96
+    assert all(len(doc.body.encode("utf-8")) == 1_024 for doc in first)
+    assert {doc.library_id for doc in first} == {"library-0", "library-1", "library-2"}
+    assert len({doc.section_id for doc in first}) == 12
+    assert len({doc.book_id for doc in first}) == 24
+    terms = {token for doc in first for token in doc.body.split() if token.startswith("topic")}
+    assert len(terms) > 500
+    assert any(doc.old_body is not None for doc in first)
+    assert any(doc.deleted for doc in first)
+    assert all("旧版独有标记" not in doc.body for doc in first)
+    assert first[4].text_files == (("notes.txt", "多文件文本独有信号"),)
+    assert first[4].binary_files[0][0] == "binary-needle.bin"
+    assert first[4].binary_files[0][1].decode("utf-8") == "二进制隐匿密文"
+    assert first[4].tags[-1] == ("same-name-library-1", "跨库同名")
+    assert first[5].tags[-1] == ("same-name-library-2", "跨库同名")
+    assert first[4].library_id != first[5].library_id
+    with pytest.raises(ValueError):
+        generate_corpus(20_000, 10 * 1_024)
+    with pytest.raises(ValueError):
+        generate_corpus(8_000, 10 * 1_024)
+
+
+def test_independent_oracle_uses_literal_page_membership_not_candidate_rank() -> None:
+    documents = generate_corpus(96, 1_024)
+    authorized = next(query for query in evaluation_queries(96) if query.name == "sentinel")
+    assert literal_oracle(documents, authorized) == frozenset({"page-00000", "page-00001"})
+    all_libraries = replace(authorized, libraries=("library-0", "library-1", "library-2"))
+    assert literal_oracle(documents, all_libraries) == frozenset(
+        {"page-00000", "page-00001", "page-00002"}
+    )
+    old_only = next(query for query in evaluation_queries(96) if query.name == "old_revision_only")
+    assert literal_oracle(documents, old_only) == frozenset()
+    disjoint = next(
+        query for query in evaluation_queries(96) if query.name == "disjoint_keywords_or"
+    )
+    assert literal_oracle(documents, disjoint) == frozenset({"page-00000", "page-00004"})
+    text_file = next(query for query in evaluation_queries(96) if query.name == "text_file")
+    assert literal_oracle(documents, text_file) == frozenset({"page-00004"})
+    binary_content = next(
+        query for query in evaluation_queries(96) if query.name == "binary_bytes_not_text"
+    )
+    assert literal_oracle(documents, binary_content) == frozenset()
+    tags = next(query for query in evaluation_queries(96) if query.name == "tags_any_only")
+    assert literal_oracle(documents, tags) == literal_oracle(
+        documents, replace(tags, tags_any=(("library-0", "tag-1"),))
+    ) | literal_oracle(documents, replace(tags, tags_any=(("library-1", "tag-2"),)))
+    same_id = next(
+        query for query in evaluation_queries(96) if query.name == "same_bare_tag_id_scoped"
+    )
+    assert "page-00000" in literal_oracle(documents, same_id)
+    assert "page-00005" not in literal_oracle(documents, same_id)
+    assert all(
+        document.library_id == "library-0"
+        for document in documents
+        if document.page_id in literal_oracle(documents, same_id)
+    )
+    same_name = next(
+        query
+        for query in evaluation_queries(96)
+        if query.name == "same_tag_name_distinct_ids_scoped"
+    )
+    assert literal_oracle(documents, same_name) == frozenset({"page-00004"})
+    before = next(query for query in evaluation_queries(96) if query.name == "time_before_only")
+    assert "page-00060" not in literal_oracle(documents, before)
+    assert "page-00058" in literal_oracle(documents, before)
+    for name in SHORT_LITERAL_QUERIES:
+        query = next(item for item in evaluation_queries(96) if item.name == name)
+        assert literal_oracle(documents, query) == frozenset({"page-00003"})
+
+
+def test_two_text_files_keep_literal_boundaries_through_update_and_rebuild(
+    tmp_path: Path,
+) -> None:
+    documents = generate_corpus(96, 1_024)
+    target = replace(
+        documents[4],
+        text_files=(("left.txt", "qzabc"), ("right.txt", "qzdef")),
+    )
+    documents = (*documents[:4], target, *documents[5:])
+    query_type = cast(Any, _MODULE["Query"])
+    create_authority = cast(
+        Callable[[sqlite3.Connection, tuple[Any, ...]], None], _MODULE["_create_authority"]
+    )
+    index_documents = cast(Callable[[sqlite3.Connection], float], _MODULE["_index_documents"])
+    candidate_search = cast(
+        Callable[[sqlite3.Connection, Any], tuple[tuple[str, ...], int]],
+        _MODULE["_candidate_search"],
+    )
+    update_one = cast(Callable[[sqlite3.Connection], float], _MODULE["_update_one_current_page"])
+    left = query_type("left_file", (target.library_id,), ("qzabc",))
+    right = query_type("right_file", (target.library_id,), ("qzdef",))
+    joined = query_type("cross_file_only", (target.library_id,), ("qzabcqzdef",))
+
+    def assert_literal_results(connection: sqlite3.Connection) -> None:
+        for query in (left, right):
+            actual, candidates = candidate_search(connection, query)
+            assert candidates >= 1
+            assert actual == (target.page_id,)
+            assert frozenset(actual) == literal_oracle(documents, query)
+        # A three-character gram in the right file makes this a plausible FTS
+        # candidate. The whole literal exists only if two file bodies are
+        # improperly concatenated, so the independent oracle and exact rank
+        # must both reject it.
+        actual, candidates = candidate_search(connection, joined)
+        assert candidates >= 1
+        assert actual == ()
+        assert literal_oracle(documents, joined) == frozenset()
+
+    with closing(sqlite3.connect(tmp_path / "file-boundaries.sqlite3")) as connection:
+        create_authority(connection, documents)
+        index_documents(connection)
+        assert_literal_results(connection)
+        update_one(connection)
+        assert_literal_results(connection)
+        with connection:
+            connection.execute("DELETE FROM search_index")
+        index_documents(connection)
+        assert_literal_results(connection)
+
+
+def test_caller_text_is_encoded_before_fts_compilation() -> None:
+    compile_keyword = cast(Callable[[tuple[str, ...]], str], _MODULE["_keyword_match"])
+    compiled = compile_keyword(('NEAR("secret") OR title:admin*',))
+    assert "NEAR" not in compiled
+    assert "title:" not in compiled
+    assert "*" not in compiled
+    assert compiled.startswith('"')
+    with pytest.raises(ValueError):
+        compile_keyword(("",))
+
+
+def test_normalized_duplicate_keywords_do_not_increase_experimental_rank() -> None:
+    query_type = cast(Any, _MODULE["Query"])
+    rank = cast(Callable[..., tuple[int, str] | None], _MODULE["_candidate_rank"])
+    distinct = query_type("distinct", ("library-0",), ("Straße", "共同主题"))
+    repeated = replace(
+        distinct,
+        keywords=("Straße", "STRASSE", "共同主题", "共同主题"),
+    )
+    fields: tuple[str, str, str, str, str, set[tuple[str, str]]] = (
+        "page-00000",
+        "Straße 共同主题",
+        "",
+        "[]",
+        "[]",
+        set(),
+    )
+    assert rank(*fields, distinct) == rank(*fields, repeated)
+
+
+def test_all_queries_have_complete_membership_and_manual_sentinels(report: dict[str, Any]) -> None:
+    assert report["mode"] == "offline_search_v2_candidate"
+    assert report["evaluation_passed"] is True
+    assert report["status"].startswith("Proposed; evaluation only")
+    assert report["provenance"].startswith("CC0-1.0 original deterministic synthetic text")
+    assert report["page_count"] == 330
+    assert report["body_bytes_per_page"] == 512
+    assert report["pages_with_extra_text_files"] > 10
+    assert report["pages_with_binary_files"] > 10
+    assert report["binary_payload_rows"] == report["pages_with_binary_files"]
+    assert report["binary_payload_bytes"] > 0
+    assert report["indexed_current_undeleted_pages"] == (
+        report["page_count"] - report["deleted_count"]
+    )
+    assert report["occurred_at_unit"] == "synthetic microseconds since UTC epoch"
+    assert all(query["complete_membership"] is True for query in report["queries"])
+    assert all(query["new_connection_agrees"] is True for query in report["queries"])
+    assert all(query["top_k_contains_no_duplicates"] is True for query in report["queries"])
+    assert all(
+        query["hand_labelled_top_k"] is True
+        for query in report["queries"]
+        if query["hand_labelled_top_k"] is not None
+    )
+    assert _query(report, "broad_all")["candidate_count"] > 256
+    assert _query(report, "wide_keywords_or")["candidate_count"] > 256
+    assert (
+        _query(report, "keywords_or_with_duplicates")["top_k_page_ids"]
+        == _query(report, "keywords_or")["top_k_page_ids"]
+    )
+    assert _query(report, "disjoint_keywords_or")["top_k_page_ids"] == [
+        "page-00000",
+        "page-00004",
+    ]
+    assert _query(report, "text_file")["top_k_page_ids"] == ["page-00004"]
+    assert _query(report, "file_name")["top_k_page_ids"] == ["page-00004"]
+    assert _query(report, "binary_bytes_not_text")["matched_count"] == 0
+    assert (
+        _query(report, "broad_all")["matched_count"]
+        == report["page_count"] - report["deleted_count"]
+    )
+    assert _query(report, "tags_and_time_only")["matched_count"] > 0
+    assert _query(report, "tags_any_only")["matched_count"] > 0
+    assert _query(report, "same_bare_tag_id_scoped")["matched_count"] > 0
+    assert _query(report, "same_tag_name_distinct_ids_scoped")["top_k_page_ids"] == ["page-00004"]
+    assert _query(report, "time_before_only")["matched_count"] > 0
+    assert _query(report, "old_revision_only")["matched_count"] == 0
+    assert _query(report, "deleted_only")["matched_count"] == 0
+    assert _query(report, "deleted_only")["candidate_count"] == 0
+    assert _query(report, "no_match")["matched_count"] == 0
+    for name in SHORT_LITERAL_QUERIES:
+        query = _query(report, name)
+        assert query["oracle_count"] == 1
+        assert query["candidate_count"] >= 1
+        assert query["top_k_page_ids"] == ["page-00003"]
+    assert all(query["query_plan"] for query in report["queries"])
+
+
+def test_auth_update_rebuild_and_measurement_caveats(report: dict[str, Any]) -> None:
+    probe = report["unauthorized_high_relevance_probe"]
+    assert probe["authorized_count"] > probe["top_k_size"] == 20
+    assert probe["higher_ranked_unauthorized_count"] == 25
+    assert probe["unfiltered_top_k_all_unauthorized"] is True
+    assert probe["complete_set_stable"] is True
+    assert probe["top_k_stable"] is True
+    assert probe["candidate_count_stable"] is True
+    assert probe["passed"] is True
+    assert report["current_revision_update_replaces_old_match"] is True
+    assert report["rebuild_matches_updated_projection"] is True
+    assert report["build_ms"] > 0
+    assert report["update_ms"] > 0
+    assert report["rebuild_ms"] > 0
+    assert report["build_measurement_scope"].startswith("Fetch authority rows")
+    assert report["rebuild_measurement_scope"].startswith("Delete FTS rows")
+    environment = report["measurement_environment"]
+    assert environment["processes"] == 1
+    assert environment["database"].startswith("disposable local SQLite")
+    assert report["sizes_after_build"]["database_bytes"] > 0
+    assert report["estimated_fts_growth_bytes"] > 0
+    assert report["short_literal_terms_version"].startswith("non-Han-codepoint-1-2-3")
+    assert "not an exact index-only size" in report["index_size_method"]
+    for kind, samples in (("warm_connection_latency", 5), ("new_connection_latency", 1)):
+        for percentile in ("p50_ms", "p95_ms", "p99_ms", "worst_ms"):
+            assert report[kind][percentile] >= 0
+        assert report[kind]["sample_count"] == len(report["queries"]) * samples
+    assert "new connection is not an OS-cold measurement" in report["limitations"]
+    assert "binary payload bytes are excluded" in report["limitations"]
+    assert "not established" in report["limitations"]
+
+
+def test_cli_json_contains_no_production_success_claim() -> None:
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "1"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(EVALUATOR),
+            "--pages",
+            "48",
+            "--body-bytes",
+            "512",
+            "--format",
+            "json",
+        ],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+        timeout=30,
+    )
+    parsed = json.loads(result.stdout)
+    assert parsed["page_count"] == 48
+    assert parsed["evaluation_passed"] is True
+    assert parsed["unauthorized_high_relevance_probe"]["authorized_count"] > 20
+    assert parsed["status"] == (
+        "Proposed; evaluation only; no production API, migration, or deployment"
+    )

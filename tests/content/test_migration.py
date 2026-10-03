@@ -7,13 +7,16 @@ from sqlalchemy import insert, inspect, select, text, update
 
 from patchouli_lib.content.models import Page, PageSource, Revision
 from patchouli_lib.content.schemas import MarkdownContent, NewRevision
-from patchouli_lib.database import build_engine, immediate_transaction
+from patchouli_lib.database import CURRENT_SCHEMA_REVISION, build_engine, immediate_transaction
 
 from .helpers import insert_page_graph, page_graph_values, seed_library_structure
 
 CONTENT_TABLES = {
     "pages",
     "revisions",
+    "revision_files",
+    "revision_file_seals",
+    "revision_file_seal_guards",
     "page_identifier_registry",
     "page_id_collision_counters",
     "page_revision_append_guards",
@@ -117,6 +120,21 @@ def test_page_content_migration_upgrade_check_downgrade_upgrade(
         assert source_revision["options"].get("ondelete") == "RESTRICT"
         assert inspector.get_unique_constraints("page_sources") == []
 
+        seal_foreign_keys = {
+            item["name"]: item for item in inspector.get_foreign_keys("revision_file_seals")
+        }
+        assert seal_foreign_keys["fk_revision_file_seals_exact_revision"]["referred_table"] == (
+            "revisions"
+        )
+        seal_guard_foreign_keys = {
+            item["name"]: item for item in inspector.get_foreign_keys("revision_file_seal_guards")
+        }
+        assert seal_guard_foreign_keys["fk_revision_file_seal_guards_exact_seal"]["options"] == {
+            "ondelete": "RESTRICT",
+            "deferrable": True,
+            "initially": "DEFERRED",
+        }
+
         guard_foreign_keys = {
             item["name"]: item for item in inspector.get_foreign_keys("page_revision_append_guards")
         }
@@ -161,7 +179,42 @@ def test_page_content_migration_upgrade_check_downgrade_upgrade(
                 "trg_revisions_create_append_guard",
                 "trg_revisions_immutable_delete",
                 "trg_revisions_immutable_update",
+                "trg_revisions_mirror_content_file",
+                "trg_revisions_require_file_seal",
                 "trg_revisions_sequential_insert",
+                "trg_search_revisions_insert",
+                "trg_search_revisions_update",
+                "trg_search_revisions_update_old",
+                "trg_search_revisions_delete",
+            }
+            file_seal_triggers = set(
+                first.execute(
+                    text(
+                        "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                        "AND tbl_name IN ('revision_files', 'revision_file_seals', "
+                        "'revision_file_seal_guards')"
+                    )
+                ).scalars()
+            )
+            assert file_seal_triggers == {
+                "trg_revision_files_no_update",
+                "trg_revision_files_no_delete",
+                "trg_revision_files_no_replace",
+                "trg_revision_files_legacy_sealed_insert",
+                "trg_revision_files_auto_seal_legacy",
+                "trg_revision_file_seals_validate_insert",
+                "trg_revision_file_seals_no_update",
+                "trg_revision_file_seals_no_delete",
+                "trg_revision_file_seal_guards_no_update",
+                "trg_revision_file_seal_guards_no_delete",
+                "trg_search_revision_files_insert",
+                "trg_search_revision_files_update",
+                "trg_search_revision_files_update_old",
+                "trg_search_revision_files_delete",
+                "trg_search_revision_file_seals_insert",
+                "trg_search_revision_file_seals_update",
+                "trg_search_revision_file_seals_update_old",
+                "trg_search_revision_file_seals_delete",
             }
             content_triggers = set(
                 first.execute(
@@ -179,14 +232,48 @@ def test_page_content_migration_upgrade_check_downgrade_upgrade(
                 "trg_page_identifier_registry_stable",
                 "trg_page_revision_append_guards_no_update",
                 "trg_page_revision_append_guards_safe_delete",
+                "trg_page_occurrence_corrections_validate_insert",
+                "trg_page_occurrence_corrections_no_update",
+                "trg_page_occurrence_corrections_no_delete",
+                "trg_page_occurrence_guards_validate_insert",
+                "trg_page_occurrence_guards_no_update",
+                "trg_page_occurrence_guards_safe_delete",
+                "trg_page_occurrence_guards_master_audit",
+                "trg_page_lifecycle_events_validate_insert",
+                "trg_page_lifecycle_events_no_update",
+                "trg_page_lifecycle_events_no_delete",
+                "trg_page_lifecycle_guards_validate_insert",
+                "trg_page_lifecycle_guards_no_update",
+                "trg_page_lifecycle_guards_safe_delete",
+                "trg_page_lifecycle_guards_master_audit",
+                "trg_page_title_events_validate_insert",
+                "trg_page_title_events_no_update",
+                "trg_page_title_events_no_delete",
+                "trg_page_move_guards_validate_insert",
+                "trg_page_move_guards_no_update",
+                "trg_page_move_guards_safe_delete",
+                "trg_page_move_events_validate_insert",
+                "trg_page_move_events_no_update",
+                "trg_page_move_events_no_delete",
+                "trg_pages_move_require_guard",
+                "trg_pages_move_record",
                 "trg_pages_canonical_identifier_on_insert",
+                "trg_pages_title_require_audit",
+                "trg_pages_title_record",
+                "trg_pages_occurrence_require_guard",
+                "trg_pages_occurrence_record",
+                "trg_pages_lifecycle_initial_live",
+                "trg_pages_lifecycle_require_guard",
+                "trg_pages_lifecycle_record",
+                "trg_pages_lifecycle_no_content_while_deleted",
+                "trg_pages_updated_at_monotonic",
                 "trg_pages_clear_append_guard",
                 "trg_pages_current_revision_advance",
                 "trg_pages_initial_revision_number",
                 "trg_pages_stable_identity",
             }
             assert first.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == (
-                "20260813_0006"
+                CURRENT_SCHEMA_REVISION
             )
     finally:
         engine.dispose()

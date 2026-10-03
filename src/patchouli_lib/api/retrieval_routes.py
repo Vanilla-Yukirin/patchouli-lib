@@ -5,12 +5,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from functools import partial
 from typing import Any, Final, TypeVar
+from urllib.parse import quote
 
 import anyio
 from fastapi import APIRouter, Request
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import Engine
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 from patchouli_lib.api.authentication import (
     AuthenticatedRequestContext,
@@ -30,6 +31,7 @@ from patchouli_lib.api.errors import (
 )
 from patchouli_lib.api.request_ids import REQUEST_ID_HEADER, get_request_id
 from patchouli_lib.auth.service import Clock, utc_microseconds
+from patchouli_lib.content.file_manifest import normalize_file_name
 from patchouli_lib.identifiers import InvalidPageIdError, InvalidRevisionNumberError
 from patchouli_lib.library.schemas import OpaqueId
 from patchouli_lib.retrieval.cursor import CursorBinding, CursorCodec, InvalidCursorError
@@ -37,8 +39,11 @@ from patchouli_lib.retrieval.repository import RetrievalRepository
 from patchouli_lib.retrieval.schemas import (
     CurrentPageRead,
     KeysetPage,
+    LibraryPageMetadata,
     PageDocument,
     ReadWindow,
+    RevisionFileManifestView,
+    RevisionFileRead,
 )
 from patchouli_lib.retrieval.service import (
     RetrievalAuthenticationError,
@@ -46,6 +51,7 @@ from patchouli_lib.retrieval.service import (
     RetrievalNotFoundError,
     RetrievalPersistenceError,
     RetrievalService,
+    RetrievalUnsupportedFormatError,
 )
 
 _SECTIONS_ROUTE: Final = "sections.list"
@@ -85,10 +91,15 @@ def _invalid_cursor_problem() -> ApplicationProblem:
     )
 
 
-def _pagination_parameters(request: Request) -> PaginationParameters:
+def _pagination_parameters(
+    request: Request,
+    *,
+    allow_library_id: bool = False,
+) -> PaginationParameters:
+    allowed_names = _PAGINATION_NAMES | {"library_id"} if allow_library_id else _PAGINATION_NAMES
     values: dict[str, list[str]] = {}
     for name, value in request.query_params.multi_items():
-        if name not in _PAGINATION_NAMES:
+        if name not in allowed_names:
             raise _validation_problem()
         values.setdefault(name, []).append(value)
     if any(len(items) != 1 for items in values.values()):
@@ -112,6 +123,16 @@ def _validate_section_id(section_id: str) -> str:
         raise _validation_problem() from None
 
 
+def _target_library_id(request: Request, context: AuthenticatedRequestContext) -> str:
+    value = request.query_params.get("library_id")
+    if value is None:
+        return context.authenticated.caller.library_id
+    try:
+        return _OPAQUE_ID_ADAPTER.validate_python(value, strict=True)
+    except ValidationError:
+        raise _validation_problem() from None
+
+
 def _validate_revision_number(revision_number: str) -> int:
     if (
         not revision_number
@@ -129,6 +150,15 @@ def _validate_revision_number(revision_number: str) -> int:
     return parsed
 
 
+def _validate_filename(filename: str) -> str:
+    try:
+        if normalize_file_name(filename) != filename:
+            raise ValueError("File name is not normalized.")
+    except (TypeError, ValueError, UnicodeError):
+        raise _validation_problem() from None
+    return filename
+
+
 def _binding(
     context: AuthenticatedRequestContext,
     *,
@@ -137,15 +167,24 @@ def _binding(
     limit: int,
     filters_identity: bytes,
     sort_identity: bytes,
+    library_id: str | None = None,
 ) -> CursorBinding:
     caller = context.authenticated.caller
+    query_identity = _NO_QUERY
+    if library_id is not None:
+        # Canonical hex IDs bind the normalized target and exact credential.
+        # The opaque cursor's format and version remain unchanged.
+        query_identity = (
+            f"home:{caller.library_id};library:{library_id};"
+            f"credential:{context.authenticated.credential.id}"
+        ).encode("ascii")
     return CursorBinding(
         caller_id=caller.id,
         policy_version=caller.policy_version,
         section_id=section_id,
         route_identity=route_identity,
         limit=limit,
-        query_identity=_NO_QUERY,
+        query_identity=query_identity,
         filters_identity=filters_identity,
         sort_identity=sort_identity,
     )
@@ -174,19 +213,33 @@ def _perform_read[ResultT](
     clock: Clock,
 ) -> ResultT:
     try:
-        with engine.connect() as connection, connection.begin():
-            service = RetrievalService(
-                RetrievalRepository(connection),
-                context.authenticated,
-                clock=clock,
-            )
-            return operation(service)
+        with engine.connect() as connection:
+            # SQLAlchemy's transaction marker alone does not issue a pysqlite
+            # BEGIN before SELECT. Keep policy/grant and content checks in one
+            # real SQLite read snapshot, including when the operation raises.
+            connection.exec_driver_sql("BEGIN")
+            try:
+                service = RetrievalService(
+                    RetrievalRepository(connection),
+                    context.authenticated,
+                    clock=clock,
+                )
+                return operation(service)
+            finally:
+                connection.rollback()
     except RetrievalAuthenticationError:
         raise invalid_token() from None
     except RetrievalAuthorizationError:
         raise insufficient_scope() from None
     except RetrievalNotFoundError:
         raise resource_not_found() from None
+    except RetrievalUnsupportedFormatError:
+        raise ApplicationProblem(
+            status_code=409,
+            code="revision_format_unsupported",
+            title="Revision format not supported",
+            detail="This read route cannot represent the requested Revision format.",
+        ) from None
     except (InvalidPageIdError, InvalidRevisionNumberError):
         raise _validation_problem() from None
     except RetrievalPersistenceError:
@@ -248,13 +301,29 @@ def _json_response(
     )
 
 
+def _file_response(request: Request, file: RevisionFileRead) -> Response:
+    encoded_filename = quote(file.filename, safe="")
+    return Response(
+        content=file.content,
+        media_type="application/octet-stream",
+        headers={
+            REQUEST_ID_HEADER: get_request_id(request),
+            "Cache-Control": PROTECTED_CACHE_CONTROL,
+            "Content-Disposition": (
+                f"attachment; filename=\"download\"; filename*=UTF-8''{encoded_filename}"
+            ),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 def create_retrieval_router(
     engine: Engine,
     *,
     cursor_codec: CursorCodec,
     clock: Clock = utc_microseconds,
 ) -> APIRouter:
-    """Create five protected, non-search read routes.
+    """Create protected, non-search read routes.
 
     The caller supplies the cursor codec so key management remains outside this
     target-neutral router.
@@ -263,10 +332,53 @@ def create_retrieval_router(
     router = APIRouter(prefix=API_V1_PREFIX)
     authenticate = BearerAuthentication(engine, clock=clock)
 
+    @router.get("/libraries/{library_id}/sections/{section_id}/pages")
+    async def list_library_pages(
+        library_id: str,
+        section_id: str,
+        request: Request,
+    ) -> JSONResponse:
+        context = await _authenticate(authenticate, request)
+        scoped_library = _validate_section_id(library_id)
+        scoped_section = _validate_section_id(section_id)
+        pagination = _pagination_parameters(request)
+
+        def operation(service: RetrievalService) -> PaginatedResponse[LibraryPageMetadata]:
+            binding = service.library_page_cursor_binding(
+                scoped_library,
+                scoped_section,
+                limit=pagination.limit,
+            )
+            window = _read_window(pagination, cursor_codec=cursor_codec, binding=binding)
+            page = service.list_library_pages(scoped_library, scoped_section, window)
+            return _collection(page, cursor_codec=cursor_codec, binding=binding)
+
+        response = await _read(engine, context, operation, clock=clock)
+        return _json_response(request, response)
+
+    @router.get("/libraries/{library_id}/pages/{page_id}")
+    async def get_library_page(
+        library_id: str,
+        page_id: str,
+        request: Request,
+    ) -> JSONResponse:
+        context = await _authenticate(authenticate, request)
+        scoped_library = _validate_section_id(library_id)
+        if request.query_params:
+            raise _validation_problem()
+        metadata = await _read(
+            engine,
+            context,
+            lambda service: service.get_library_page(scoped_library, page_id),
+            clock=clock,
+        )
+        return _json_response(request, metadata)
+
     @router.get("/sections")
     async def list_sections(request: Request) -> JSONResponse:
         context = await _authenticate(authenticate, request)
-        pagination = _pagination_parameters(request)
+        pagination = _pagination_parameters(request, allow_library_id=True)
+        library_id = _target_library_id(request, context)
         binding = _binding(
             context,
             section_id=None,
@@ -274,12 +386,13 @@ def create_retrieval_router(
             limit=pagination.limit,
             filters_identity=_SECTION_FILTERS,
             sort_identity=_SECTION_SORT,
+            library_id=library_id,
         )
         window = _read_window(pagination, cursor_codec=cursor_codec, binding=binding)
         page = await _read(
             engine,
             context,
-            lambda service: service.list_sections(window),
+            lambda service: service.list_sections(window, library_id=library_id),
             clock=clock,
         )
         response = _collection(page, cursor_codec=cursor_codec, binding=binding)
@@ -289,7 +402,8 @@ def create_retrieval_router(
     async def list_books(section_id: str, request: Request) -> JSONResponse:
         context = await _authenticate(authenticate, request)
         validated_section_id = _validate_section_id(section_id)
-        pagination = _pagination_parameters(request)
+        pagination = _pagination_parameters(request, allow_library_id=True)
+        library_id = _target_library_id(request, context)
         binding = _binding(
             context,
             section_id=validated_section_id,
@@ -297,12 +411,13 @@ def create_retrieval_router(
             limit=pagination.limit,
             filters_identity=_BOOK_FILTERS,
             sort_identity=_BOOK_SORT,
+            library_id=library_id,
         )
         window = _read_window(pagination, cursor_codec=cursor_codec, binding=binding)
         page = await _read(
             engine,
             context,
-            lambda service: service.list_books(validated_section_id, window),
+            lambda service: service.list_books(validated_section_id, window, library_id=library_id),
             clock=clock,
         )
         response = _collection(page, cursor_codec=cursor_codec, binding=binding)
@@ -370,6 +485,52 @@ def create_retrieval_router(
             clock=clock,
         )
         return _json_response(request, document)
+
+    @router.get(
+        "/sections/{section_id}/pages/{page_id}/revisions/{revision_number}/files",
+    )
+    async def list_revision_files(
+        section_id: str,
+        page_id: str,
+        revision_number: str,
+        request: Request,
+    ) -> JSONResponse:
+        context = await _authenticate(authenticate, request)
+        validated_section_id = _validate_section_id(section_id)
+        validated_revision_number = _validate_revision_number(revision_number)
+        manifest: RevisionFileManifestView = await _read(
+            engine,
+            context,
+            lambda service: service.list_revision_files(
+                validated_section_id, page_id, validated_revision_number
+            ),
+            clock=clock,
+        )
+        return _json_response(request, manifest)
+
+    @router.get(
+        "/sections/{section_id}/pages/{page_id}/revisions/{revision_number}/files/{filename:path}",
+    )
+    async def download_revision_file(
+        section_id: str,
+        page_id: str,
+        revision_number: str,
+        filename: str,
+        request: Request,
+    ) -> Response:
+        context = await _authenticate(authenticate, request)
+        validated_section_id = _validate_section_id(section_id)
+        validated_revision_number = _validate_revision_number(revision_number)
+        validated_filename = _validate_filename(filename)
+        file: RevisionFileRead = await _read(
+            engine,
+            context,
+            lambda service: service.get_revision_file(
+                validated_section_id, page_id, validated_revision_number, validated_filename
+            ),
+            clock=clock,
+        )
+        return _file_response(request, file)
 
     return router
 

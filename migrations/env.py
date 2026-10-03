@@ -2,13 +2,18 @@ from logging.config import fileConfig
 
 from alembic import context
 
+from patchouli_lib.admin import file_set_receipts as master_file_set_models
+from patchouli_lib.admin import move_receipts as master_move_models
 from patchouli_lib.auth import models as auth_models
 from patchouli_lib.config import Settings
 from patchouli_lib.content import models as content_models
+from patchouli_lib.content import page_move_models
 from patchouli_lib.database import build_engine
 from patchouli_lib.idempotency import models as idempotency_models
 from patchouli_lib.library import models as library_models
 from patchouli_lib.models import Base
+from patchouli_lib.request_log import models as request_log_models
+from patchouli_lib.tags import models as tag_models
 
 config = context.config
 
@@ -25,7 +30,27 @@ if content_models.Page.metadata is not Base.metadata:
     raise RuntimeError("Content models must use the shared SQLAlchemy metadata.")
 if idempotency_models.IdempotencyRecord.metadata is not Base.metadata:
     raise RuntimeError("Idempotency models must use the shared SQLAlchemy metadata.")
+if tag_models.Tag.metadata is not Base.metadata:
+    raise RuntimeError("Tag models must use the shared SQLAlchemy metadata.")
+if request_log_models.RequestLogRecord.metadata is not Base.metadata:
+    raise RuntimeError("Request log models must use the shared SQLAlchemy metadata.")
+if master_file_set_models.MasterFileSetReceiptRow.metadata is not Base.metadata:
+    raise RuntimeError("Master file-set models must use the shared SQLAlchemy metadata.")
 target_metadata = Base.metadata
+if master_move_models.MasterMoveReceiptRow.metadata is not Base.metadata:
+    raise RuntimeError("Master move models must use the shared SQLAlchemy metadata.")
+if page_move_models.PageMoveEvent.metadata is not Base.metadata:
+    raise RuntimeError("Page move models must use the shared SQLAlchemy metadata.")
+
+
+def _include_object(
+    _object: object, name: str | None, type_: str, reflected: bool, _compare_to: object
+) -> bool:
+    # Search-v2 is a raw-SQL/FTS5 projection owned by its exact migration.
+    # Alembic autogenerate cannot represent the virtual table or its shadows.
+    return not (
+        reflected and type_ == "table" and isinstance(name, str) and name.startswith("search_")
+    )
 
 
 def run_migrations_offline() -> None:
@@ -35,6 +60,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         render_as_batch=True,
+        include_object=_include_object,
     )
 
     with context.begin_transaction():
@@ -50,6 +76,7 @@ def run_migrations_online() -> None:
                 connection=connection,
                 target_metadata=target_metadata,
                 render_as_batch=True,
+                include_object=_include_object,
             )
 
             with context.begin_transaction():

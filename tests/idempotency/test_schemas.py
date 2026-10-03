@@ -123,11 +123,22 @@ def test_secret_safe_repr_and_validation_error_hide_sensitive_values() -> None:
 
 
 def test_validated_caller_context_is_stable_caller_not_credential() -> None:
-    context = TransactionValidatedCaller(library_id=LIBRARY_A, caller_id=CALLER_A)
-    assert context.model_dump() == {"library_id": LIBRARY_A, "caller_id": CALLER_A}
+    context = TransactionValidatedCaller(
+        library_id=LIBRARY_A, actor_home_library_id=LIBRARY_A, caller_id=CALLER_A
+    )
+    assert context.model_dump() == {
+        "library_id": LIBRARY_A,
+        "actor_home_library_id": LIBRARY_A,
+        "caller_id": CALLER_A,
+    }
     with pytest.raises(ValidationError):
         TransactionValidatedCaller.model_validate(
-            {"library_id": LIBRARY_A, "caller_id": CALLER_A, "credential_id": "d" * 32}
+            {
+                "library_id": LIBRARY_A,
+                "actor_home_library_id": LIBRARY_A,
+                "caller_id": CALLER_A,
+                "credential_id": "d" * 32,
+            }
         )
 
 

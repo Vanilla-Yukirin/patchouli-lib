@@ -12,6 +12,7 @@ from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import NewCredential, NewSectionGrant, SectionAction
 from patchouli_lib.auth.service import AuthorizationError
 from patchouli_lib.auth.tokens import generate_token
+from patchouli_lib.content.file_set_service import FileSetRevisionService
 from patchouli_lib.content.models import (
     Page,
     PageIdCollisionCounter,
@@ -20,6 +21,7 @@ from patchouli_lib.content.models import (
     PageSource,
     Revision,
 )
+from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import (
     AppendArchiveRevisionCommand,
     ArchiveIdempotencyKey,
@@ -27,6 +29,7 @@ from patchouli_lib.content.schemas import (
     ArchiveMutationSuccess,
     ArchiveSourceInput,
     CreateArchiveCommand,
+    NewPageSource,
 )
 from patchouli_lib.content.service import (
     ArchiveNotFoundError,
@@ -35,6 +38,9 @@ from patchouli_lib.content.service import (
     ArchivePreconditionRequiredError,
     ArchiveService,
     ArchiveTransactionRequiredError,
+    ArchiveUnsupportedRevisionFormatError,
+    legacy_page_current_etag,
+    page_current_etag,
 )
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.idempotency.models import IdempotencyRecord
@@ -56,6 +62,27 @@ from .conftest import OPERATION_TIME, ArchiveScope
 from .helpers import seed_library_structure
 
 OCCURRED_AT = OPERATION_TIME - 876_544
+
+
+def test_page_etag_v2_binds_revision_occurrence_and_logical_update_time() -> None:
+    uid = b"x" * 16
+    revision = "rev_" + "a" * 32
+    baseline = page_current_etag(uid, revision, 1, OCCURRED_AT, OPERATION_TIME)
+    assert baseline.startswith('"page-v2-')
+    assert (
+        len(
+            {
+                baseline,
+                page_current_etag(b"y" * 16, revision, 1, OCCURRED_AT, OPERATION_TIME),
+                page_current_etag(uid, "rev_" + "b" * 32, 1, OCCURRED_AT, OPERATION_TIME),
+                page_current_etag(uid, revision, 2, OCCURRED_AT, OPERATION_TIME),
+                page_current_etag(uid, revision, 1, OCCURRED_AT + 1, OPERATION_TIME),
+                page_current_etag(uid, revision, 1, OCCURRED_AT, OPERATION_TIME + 1),
+                legacy_page_current_etag(uid, revision, 1),
+            }
+        )
+        == 7
+    )
 
 
 def _create_command(
@@ -177,12 +204,44 @@ def test_create_archive_persists_exact_atomic_graph_and_safe_replay(
         assert result.source.revision_number == 1
         assert result.citation.revision_id == result.revision.revision_id
         assert result.response.response_status == 201
-        assert result.response.response_etag.startswith('"page-v1-')
+        assert result.response.response_etag.startswith('"page-v2-')
         assert result.response.response_location == (
             f"/api/v1/sections/{archive_scope.section_id}/pages/{result.page.page_id}"
         )
         assert result.response.response_location != result.citation.href
         wire = json.loads(result.response.response_body)
+        assert "occurrence_notice" not in wire
+        legacy_shape = {
+            "page": {
+                "section_id": archive_scope.section_id,
+                "book_id": archive_scope.book_id,
+                "page_id": result.page.page_id,
+                "title": command.title,
+                "type": "archive",
+                "occurred_at": canonical_utc_wire(OCCURRED_AT),
+                "current_revision_id": result.revision.revision_id,
+                "current_revision_number": 1,
+            },
+            "revision": {
+                "page_id": result.page.page_id,
+                "revision_id": result.revision.revision_id,
+                "revision_number": 1,
+                "created_at": canonical_utc_wire(OPERATION_TIME),
+                "content_type": "text/markdown;charset=utf-8",
+                "content_sha256": result.revision.content_sha256.hex(),
+                "content": command.content_md.decode("utf-8"),
+            },
+            "citation": {
+                "section_id": archive_scope.section_id,
+                "page_id": result.page.page_id,
+                "revision_id": result.revision.revision_id,
+                "revision_number": 1,
+                "href": result.citation.href,
+            },
+        }
+        assert result.response.response_body == json.dumps(
+            legacy_shape, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
         assert wire["revision"]["content"] == command.content_md.decode("utf-8")
         assert wire["revision"]["content_type"] == "text/markdown;charset=utf-8"
         assert wire["citation"]["href"].endswith("/revisions/1")
@@ -212,6 +271,62 @@ def test_create_archive_persists_exact_atomic_graph_and_safe_replay(
         assert replay.response.response_body == result.response.response_body
         assert replay.response.presentation_headers()["Idempotency-Replayed"] == "true"
         assert _counts(connection) == (1, 1, 1, 1, 1, 1)
+
+
+def test_missing_occurrence_uses_one_transaction_time_and_replays_original_result(
+    content_engine: Engine,
+    archive_scope: ArchiveScope,
+) -> None:
+    explicit = _create_command(archive_scope)
+    omitted = explicit.model_copy(update={"occurred_at": None})
+    key = _key("default-occurrence")
+    assert ArchiveService._create_fingerprint(explicit) != ArchiveService._create_fingerprint(
+        omitted
+    )
+    with immediate_transaction(content_engine) as connection:
+        created = _service(connection).create_archive(archive_scope.token.value, omitted, key)
+        assert isinstance(created, ArchiveMutationSuccess)
+        assert created.page.occurred_at == OPERATION_TIME
+        assert created.page.created_at == OPERATION_TIME
+        assert created.revision.created_at == OPERATION_TIME
+        assert created.page.id_timestamp_micros == (OPERATION_TIME // 1_000) * 1_000
+        body = json.loads(created.response.response_body)
+        assert body["page"]["occurred_at"] == canonical_utc_wire(OPERATION_TIME)
+        assert body["occurrence_notice"] == {
+            "source": "server_utc",
+            "warning_code": "occurred_at_defaulted",
+        }
+
+    with immediate_transaction(content_engine) as connection:
+        replay = ArchiveService(
+            connection,
+            clock=lambda: OPERATION_TIME + 1_000_000,
+        ).create_archive(
+            archive_scope.token.value,
+            omitted.model_copy(update={"request_id": f"req_{'f' * 32}"}),
+            key,
+        )
+        assert isinstance(replay, ArchiveMutationReplay)
+        assert replay.response.response_body == created.response.response_body
+        assert replay.body.page.occurred_at == canonical_utc_wire(OPERATION_TIME)
+        assert replay.body.occurrence_notice is not None
+        assert _counts(connection) == (1, 1, 1, 1, 1, 1)
+
+    with (
+        immediate_transaction(content_engine) as connection,
+        pytest.raises(IdempotencyConflictError, match="different request"),
+    ):
+        _service(connection).create_archive(archive_scope.token.value, explicit, key)
+
+
+@pytest.mark.parametrize("invalid", ["2026-08-13T10:00:01Z", True, 253_402_300_800_000_000])
+def test_present_invalid_occurrence_is_not_defaulted(
+    archive_scope: ArchiveScope, invalid: object
+) -> None:
+    values = _create_command(archive_scope).model_dump()
+    values["occurred_at"] = invalid
+    with pytest.raises(ValidationError):
+        CreateArchiveCommand.model_validate(values)
 
 
 def test_same_key_changed_semantics_conflicts_without_second_mutation(
@@ -394,6 +509,8 @@ def test_revision_preconditions_append_once_keep_old_and_replay_after_advance(
         assert isinstance(revised, ArchiveMutationSuccess)
         assert revised.page.current_revision_number == 2
         assert revised.revision.revision_number == 2
+        assert revised.page.updated_at > created.page.updated_at
+        assert revised.revision.created_at == revised.page.updated_at
         assert revised.source.revision_id == revised.revision.revision_id
         assert revised.source.revision_number == 2
         assert revised.source.kind == revise.source.kind
@@ -442,6 +559,168 @@ def test_revision_preconditions_append_once_keep_old_and_replay_after_advance(
         assert isinstance(create_replay, ArchiveMutationReplay)
         assert create_replay.body.page.current_revision_number == 1
         assert create_replay.response.response_etag == created.response.response_etag
+
+
+def test_legacy_revision_route_refuses_current_file_set_without_losing_replay(
+    content_engine: Engine,
+    archive_scope: ArchiveScope,
+) -> None:
+    with immediate_transaction(content_engine) as connection:
+        created = _create_once(connection, archive_scope)
+    previous = AppendArchiveRevisionCommand(
+        library_id=archive_scope.library_id,
+        section_id=archive_scope.section_id,
+        page_id=created.page.page_id,
+        expected_etag=created.response.response_etag,
+        source=ArchiveSourceInput(kind="synthetic legacy revision"),
+        content_md=b"# Legacy second revision\n",
+        request_id=f"req_{'1' * 32}",
+    )
+    replay_key = _key("legacy-before-file-set")
+    with immediate_transaction(content_engine) as connection:
+        previous_result = _service(
+            connection,
+            revision_ids=iter((f"rev_{'e' * 32}",)),
+            opaque_ids=iter(("7" * 32, "8" * 32)),
+        ).append_revision(archive_scope.token.value, previous, replay_key)
+        assert isinstance(previous_result, ArchiveMutationSuccess)
+        file_set_revision_id = f"rev_{'f' * 32}"
+        file_set = FileSetRevisionService(connection).append_existing_page(
+            library_id=archive_scope.library_id,
+            page_id=created.page.page_id,
+            expected_etag=previous_result.response.response_etag,
+            files=(("content.md", b"# Multi-file revision\n"), ("figure.bin", b"\x00\xff")),
+            revision_id=file_set_revision_id,
+            revision_at=OPERATION_TIME + 2,
+            source=NewPageSource(
+                library_id=archive_scope.library_id,
+                source_id="9" * 32,
+                page_uid=created.page.page_uid,
+                revision_id=file_set_revision_id,
+                revision_number=3,
+                kind="synthetic file set",
+                created_at=OPERATION_TIME + 2,
+            ),
+        )
+        assert file_set.changed
+        baseline = _counts(connection)
+
+    fresh = previous.model_copy(
+        update={
+            "expected_etag": file_set.etag,
+            "content_md": b"# Legacy replacement\n",
+            "request_id": f"req_{'2' * 32}",
+        }
+    )
+    with immediate_transaction(content_engine) as connection:
+        replayed = _service(connection).append_revision(
+            archive_scope.token.value, previous, replay_key
+        )
+        assert isinstance(replayed, ArchiveMutationReplay)
+        assert replayed.response.response_body == previous_result.response.response_body
+        with pytest.raises(IdempotencyConflictError):
+            _service(connection).append_revision(archive_scope.token.value, fresh, replay_key)
+        with pytest.raises(ArchivePreconditionFailedError):
+            _service(connection).append_revision(
+                archive_scope.token.value,
+                fresh.model_copy(update={"expected_etag": previous_result.response.response_etag}),
+                _key("stale-after-file-set"),
+            )
+        with pytest.raises(ArchivePreconditionRequiredError):
+            _service(connection).append_revision(
+                archive_scope.token.value,
+                fresh.model_copy(update={"expected_etag": None}),
+                _key("missing-etag-after-file-set"),
+            )
+        with pytest.raises(ArchiveUnsupportedRevisionFormatError):
+            _service(connection).append_revision(
+                archive_scope.token.value, fresh, _key("fresh-after-file-set")
+            )
+        assert _counts(connection) == baseline
+        current = ContentRepository(connection).get_page(
+            archive_scope.library_id, created.page.page_id
+        )
+        assert current is not None
+        assert current.current_revision_id == file_set_revision_id
+        assert current.current_revision_number == 3
+
+
+def test_current_revision_format_lookup_fails_closed_on_missing_exact_manifest(
+    content_engine: Engine,
+    archive_scope: ArchiveScope,
+) -> None:
+    with immediate_transaction(content_engine) as connection:
+        created = _create_once(connection, archive_scope)
+    with content_engine.connect() as connection:
+        absent = created.page.model_copy(update={"current_revision_id": f"rev_{'0' * 32}"})
+        with pytest.raises(RuntimeError, match="file-set manifest is missing"):
+            ContentRepository(connection).get_current_revision_storage_format(absent)
+
+
+def test_deleted_page_rejects_fresh_revision_but_replays_prior_success_without_mutation(
+    content_engine: Engine,
+    archive_scope: ArchiveScope,
+) -> None:
+    with immediate_transaction(content_engine) as connection:
+        created = _create_once(connection, archive_scope)
+    command = AppendArchiveRevisionCommand(
+        library_id=archive_scope.library_id,
+        section_id=archive_scope.section_id,
+        page_id=created.page.page_id,
+        expected_etag=created.response.response_etag,
+        source=ArchiveSourceInput(kind="synthetic revision before deletion"),
+        content_md=b"# Revision before deletion\n",
+        request_id=f"req_{'d' * 32}",
+    )
+    replay_key = _key("revision-before-deletion")
+    with immediate_transaction(content_engine) as connection:
+        revised = _service(
+            connection,
+            revision_ids=iter((f"rev_{'d' * 32}",)),
+            opaque_ids=iter(("d" * 32, "e" * 32)),
+        ).append_revision(archive_scope.token.value, command, replay_key)
+        assert isinstance(revised, ArchiveMutationSuccess)
+    with immediate_transaction(content_engine) as connection:
+        page = ContentRepository(connection).get_page(
+            archive_scope.library_id, created.page.page_id
+        )
+        assert page is not None
+        deleted, _ = ContentRepository(connection).transition_page_lifecycle(
+            page,
+            action="delete",
+            actor_caller_id=archive_scope.caller_id,
+            actor_home_library_id=archive_scope.library_id,
+            request_id="req_" + "f" * 32,
+            changed_at=OPERATION_TIME + 1,
+        )
+        baseline = _counts(connection)
+
+    fresh = command.model_copy(
+        update={
+            "expected_etag": revised.response.response_etag,
+            "request_id": f"req_{'e' * 32}",
+        }
+    )
+    with immediate_transaction(content_engine) as connection:
+        replayed = _service(connection).append_revision(
+            archive_scope.token.value, command, replay_key
+        )
+        assert isinstance(replayed, ArchiveMutationReplay)
+        assert replayed.response.response_body == revised.response.response_body
+        assert _counts(connection) == baseline
+    with immediate_transaction(content_engine) as connection:
+        with pytest.raises(ArchiveNotFoundError, match="not found"):
+            _service(connection).append_revision(
+                archive_scope.token.value, fresh, _key("revision-after-deletion")
+            )
+        assert _counts(connection) == baseline
+        current = connection.execute(
+            select(Page.current_revision_id, Page.current_revision_number, Page.deleted_at).where(
+                Page.library_id == archive_scope.library_id,
+                Page.page_uid == created.page.page_uid,
+            )
+        ).one()
+        assert current == (revised.revision.revision_id, 2, deleted.deleted_at)
 
 
 def test_revision_route_section_must_match_page_without_mutation(

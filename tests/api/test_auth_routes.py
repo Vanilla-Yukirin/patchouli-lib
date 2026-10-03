@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -12,11 +12,12 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from sqlalchemy import Engine, event, select
+from sqlalchemy import Engine, delete, event, insert, select
 
 from patchouli_lib.api import auth_routes as auth_routes_module
 from patchouli_lib.api.auth_contracts import (
     DEFAULT_CAPABILITY_CONFIGURATION,
+    FILE_SET_FEATURE,
     CapabilitiesResponse,
     CapabilityConfiguration,
     WhoAmIResponse,
@@ -30,7 +31,12 @@ from patchouli_lib.api.errors import (
     install_api_exception_handlers,
 )
 from patchouli_lib.api.request_ids import REQUEST_ID_HEADER, RequestIDMiddleware
-from patchouli_lib.auth.models import Caller, Credential
+from patchouli_lib.auth.models import (
+    Caller,
+    Credential,
+    CredentialLibraryGrant,
+    CredentialLibraryPolicy,
+)
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
     MAX_RFC3339_TIMESTAMP_MICROSECONDS,
@@ -45,7 +51,7 @@ from patchouli_lib.auth.service import CredentialExpiryError, CredentialIssuer
 from patchouli_lib.auth.tokens import generate_token
 from patchouli_lib.database import build_engine, immediate_transaction
 from patchouli_lib.library.repository import LibraryRepository
-from patchouli_lib.library.schemas import LibraryStructureSeed, NewSection
+from patchouli_lib.library.schemas import LibraryStructureSeed, NewLibrary, NewSection
 from patchouli_lib.library.service import LibrarySeedService
 
 REQUEST_ID = f"req_{'9' * 32}"
@@ -262,6 +268,7 @@ def _build_app(
     fixture: AuthApiFixture,
     *,
     configuration: CapabilityConfiguration = DEFAULT_CAPABILITY_CONFIGURATION,
+    search_ready: Callable[[], bool] | None = None,
 ) -> FastAPI:
     application = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     install_api_exception_handlers(application)
@@ -273,6 +280,7 @@ def _build_app(
         create_auth_router(
             fixture.engine,
             capability_configuration=configuration,
+            search_ready=search_ready,
             clock=fixture.clock,
         )
     )
@@ -371,6 +379,8 @@ def test_router_inventory_and_default_capabilities_match_client_schema(
             "default_page_size": 20,
             "max_page_size": 100,
             "max_query_bytes": 4096,
+            "file_set": None,
+            "search": None,
         },
         "idempotency": {
             "content_mutations": False,
@@ -388,7 +398,7 @@ def test_integrator_capability_configuration_is_explicit_and_immutable(
     auth_api: AuthApiFixture,
 ) -> None:
     configuration = CapabilityConfiguration(
-        features=("archive", "search"),
+        features=("archive",),
         content_mutation_idempotency=True,
         successful_replay_retention="indefinite-alpha",
     )
@@ -399,13 +409,66 @@ def test_integrator_capability_configuration_is_explicit_and_immutable(
         )
 
     parsed = CapabilitiesResponse.model_validate(response.json())
-    assert parsed.features == ("archive", "search")
+    assert parsed.features == ("archive",)
+    assert parsed.limits.file_set is None
+    assert parsed.limits.search is None
     assert parsed.idempotency.content_mutations is True
     assert parsed.idempotency.successful_replay_retention == "indefinite-alpha"
     with pytest.raises(ValidationError):
         configuration.__setattr__("features", ("search",))
     with pytest.raises(ValidationError):
         CapabilityConfiguration(features=("search", "archive"))
+    with pytest.raises(ValidationError, match="Search availability"):
+        CapabilityConfiguration(features=("search",))
+
+
+def test_search_capability_and_limits_follow_index_readiness(auth_api: AuthApiFixture) -> None:
+    ready = False
+    application = _build_app(auth_api, search_ready=lambda: ready)
+    with TestClient(application) as client:
+        before = client.get("/api/v1/capabilities", headers=_authorization(auth_api.agent_token))
+        ready = True
+        after = client.get("/api/v1/capabilities", headers=_authorization(auth_api.agent_token))
+        ready = False
+        again = client.get("/api/v1/capabilities", headers=_authorization(auth_api.agent_token))
+    assert "search" not in before.json()["features"]
+    assert before.json()["limits"]["search"] is None
+    assert "search" in after.json()["features"]
+    assert after.json()["limits"]["search"] == {
+        "max_request_bytes": 96 * 1024,
+        "max_keywords_bytes": 32 * 1024,
+        "max_keywords": 256,
+        "max_tags": 256,
+        "max_libraries": 256,
+    }
+    assert "search" not in again.json()["features"]
+    assert again.json()["limits"]["search"] is None
+
+
+def test_file_set_limits_are_advertised_only_with_explicit_feature(
+    auth_api: AuthApiFixture,
+) -> None:
+    configuration = CapabilityConfiguration(features=("archive", FILE_SET_FEATURE))
+    with TestClient(_build_app(auth_api, configuration=configuration)) as client:
+        response = client.get(
+            "/api/v1/capabilities",
+            headers=_authorization(auth_api.agent_token),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["features"] == ["archive", FILE_SET_FEATURE]
+    assert response.json()["limits"] == {
+        "max_content_bytes": 2 * 1024 * 1024,
+        "default_page_size": 20,
+        "max_page_size": 100,
+        "max_query_bytes": 4096,
+        "file_set": {
+            "max_file_bytes": 16 * 1024 * 1024,
+            "max_page_bytes": 64 * 1024 * 1024,
+            "max_files_per_page": 64,
+        },
+        "search": None,
+    }
 
 
 def test_agent_whoami_is_minimal_deterministic_and_client_parseable(
@@ -426,16 +489,24 @@ def test_agent_whoami_is_minimal_deterministic_and_client_parseable(
         "caller_id",
         "credential_id",
         "kind",
+        "name",
+        "description",
         "expires_at",
         "policy_version",
         "grants",
+        "policy_mode",
+        "library_grants",
     }
     assert payload == {
         "caller_id": auth_api.agent_caller_id,
         "credential_id": auth_api.agent_credential_id,
         "kind": "agent",
+        "name": "Synthetic agent a",
+        "description": "Synthetic route fixture",
         "expires_at": "1970-01-01T00:16:40.000000Z",
         "policy_version": 1,
+        "policy_mode": "legacy_section",
+        "library_grants": [],
         "grants": [
             {
                 "section_id": auth_api.first_section_id,
@@ -447,14 +518,19 @@ def test_agent_whoami_is_minimal_deterministic_and_client_parseable(
             },
         ],
     }
+    wire = WhoAmIResponse.model_validate(payload)
+    assert wire.name == "Synthetic agent a"
+    assert wire.description == "Synthetic route fixture"
+    assert "Synthetic agent a" not in repr(wire)
+    assert "Synthetic route fixture" not in repr(wire)
     client_model = cast(Any, _client_model(monkeypatch, "WhoAmI"))
     parsed = client_model.from_dict(payload)
     assert parsed.caller_id == auth_api.agent_caller_id
+    assert parsed.name == "Synthetic agent a"
+    assert parsed.description == "Synthetic route fixture"
     assert parsed.grants[0].actions == ("page:read", "section:query")
     forbidden = {
         "library_id",
-        "name",
-        "description",
         "selector",
         "verifier",
         "token_version",
@@ -464,6 +540,126 @@ def test_agent_whoami_is_minimal_deterministic_and_client_parseable(
     assert all(term not in response.text.casefold() for term in forbidden)
     assert auth_api.agent_token not in response.text
     assert auth_api.agent_token.split(".")[1] not in response.text
+
+
+def test_whoami_reports_only_current_exact_credential_library_rights(
+    auth_api: AuthApiFixture,
+) -> None:
+    target_library_id = "8" * 32
+    other_credential_id = "9" * 32
+    with immediate_transaction(auth_api.engine) as connection:
+        LibraryRepository(connection).add_library(
+            NewLibrary(
+                id=target_library_id,
+                name="Synthetic Other Library",
+                created_at=500_000,
+                updated_at=500_000,
+            )
+        )
+        other_token = _issue_credential(
+            AuthRepository(connection),
+            library_id=auth_api.library_id,
+            caller_id=auth_api.agent_caller_id,
+            credential_id=other_credential_id,
+            expires_at=1_000_000_000,
+        )
+        connection.execute(
+            insert(CredentialLibraryPolicy),
+            {
+                "credential_id": auth_api.agent_credential_id,
+                "caller_id": auth_api.agent_caller_id,
+                "home_library_id": auth_api.library_id,
+                "mode": "library_grants",
+                "created_at": 2_000_000,
+            },
+        )
+
+    def read(token: str) -> dict[str, Any]:
+        with TestClient(_build_app(auth_api)) as client:
+            response = client.get("/api/v1/auth/whoami", headers=_authorization(token))
+        assert response.status_code == 200
+        assert response.headers["Cache-Control"] == PROTECTED_CACHE_CONTROL
+        return cast(dict[str, Any], response.json())
+
+    # The caller's old Section grants still exist. The opted-in credential
+    # must ignore them while another credential of the same caller stays legacy.
+    first = read(auth_api.agent_token)
+    assert first["policy_mode"] == "library_grants"
+    assert first["grants"] == []
+    assert first["library_grants"] == []
+    assert first["policy_version"] == 1
+    assert auth_api.first_section_id not in str(first)
+    legacy = read(other_token)
+    assert legacy["policy_mode"] == "legacy_section"
+    assert legacy["grants"] == [
+        {"section_id": auth_api.first_section_id, "actions": ["page:read", "section:query"]},
+        {"section_id": auth_api.second_section_id, "actions": ["archive:write", "section:query"]},
+    ]
+    assert legacy["library_grants"] == []
+
+    with immediate_transaction(auth_api.engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryPolicy),
+            {
+                "credential_id": other_credential_id,
+                "caller_id": auth_api.agent_caller_id,
+                "home_library_id": auth_api.library_id,
+                "mode": "library_grants",
+                "created_at": 2_000_000,
+            },
+        )
+    second_opted_in = read(other_token)
+    assert second_opted_in["policy_mode"] == "library_grants"
+    assert second_opted_in["grants"] == []
+    assert second_opted_in["library_grants"] == []
+
+    with immediate_transaction(auth_api.engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryGrant),
+            {
+                "credential_id": auth_api.agent_credential_id,
+                "caller_id": auth_api.agent_caller_id,
+                "home_library_id": auth_api.library_id,
+                "target_library_id": target_library_id,
+                "action": "write",
+                "created_at": 2_000_000,
+            },
+        )
+    write_only = read(auth_api.agent_token)
+    assert write_only["library_grants"] == [{"library_id": target_library_id, "actions": ["write"]}]
+    assert read(other_token)["library_grants"] == []
+
+    with immediate_transaction(auth_api.engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryGrant),
+            {
+                "credential_id": auth_api.agent_credential_id,
+                "caller_id": auth_api.agent_caller_id,
+                "home_library_id": auth_api.library_id,
+                "target_library_id": target_library_id,
+                "action": "read",
+                "created_at": 2_000_000,
+            },
+        )
+    both = read(auth_api.agent_token)
+    assert both["library_grants"] == [
+        {"library_id": target_library_id, "actions": ["read", "write"]}
+    ]
+    assert both["policy_version"] == 1  # caller version is not a Library-grant revision
+
+    with immediate_transaction(auth_api.engine) as connection:
+        connection.execute(
+            delete(CredentialLibraryGrant).where(
+                CredentialLibraryGrant.credential_id == auth_api.agent_credential_id,
+                CredentialLibraryGrant.caller_id == auth_api.agent_caller_id,
+                CredentialLibraryGrant.home_library_id == auth_api.library_id,
+                CredentialLibraryGrant.target_library_id == target_library_id,
+                CredentialLibraryGrant.action == "write",
+            )
+        )
+    assert read(auth_api.agent_token)["library_grants"] == [
+        {"library_id": target_library_id, "actions": ["read"]}
+    ]
 
 
 def test_rfc3339_maximum_expiry_is_issued_and_serialized_by_whoami(
@@ -558,7 +754,11 @@ def test_operator_may_use_diagnostics_but_receives_no_content_grants(
     assert capabilities.status_code == 200
     parsed = WhoAmIResponse.model_validate(whoami.json())
     assert parsed.kind is CallerKind.OPERATOR
+    assert parsed.name == "Synthetic operator b"
+    assert parsed.description == "Synthetic route fixture"
     assert parsed.grants == ()
+    assert parsed.policy_mode == "operator"
+    assert parsed.library_grants == ()
 
 
 def test_missing_credential_uses_authentication_required_problem(

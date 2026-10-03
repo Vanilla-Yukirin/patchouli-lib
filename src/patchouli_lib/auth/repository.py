@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from sqlalchemy import Connection, delete, insert, select, update
 
+from patchouli_lib.auth.library_policy import LibraryAction, LibraryPolicy, resolve_library_policy
 from patchouli_lib.auth.models import (
+    AgentTokenValue,
     AuditEvent,
     BootstrapMarker,
     Caller,
     Credential,
+    CredentialLibraryGrant,
+    CredentialLibraryPolicy,
     SectionGrant,
 )
 from patchouli_lib.auth.schemas import (
@@ -22,7 +28,16 @@ from patchouli_lib.auth.schemas import (
     SectionGrantRecord,
     StoredCredential,
 )
+from patchouli_lib.auth.tokens import InvalidTokenError, parse_token, verify_token
 from patchouli_lib.library.models import Library, Section
+
+
+@dataclass(frozen=True, slots=True)
+class CredentialLibraryGrantSummary:
+    """Current rights for one target Library, never a derived Section grant."""
+
+    library_id: str
+    actions: tuple[LibraryAction, ...]
 
 
 class AuthRepository:
@@ -63,6 +78,29 @@ class AuthRepository:
         self._connection.execute(insert(Caller), values)
         return CallerRecord.model_validate(values)
 
+    def update_agent_metadata(
+        self,
+        library_id: str,
+        caller_id: str,
+        *,
+        name: str,
+        description: str,
+        expected_updated_at: int,
+        updated_at: int,
+    ) -> bool:
+        """CAS only an Agent's display metadata; leave policy and credentials untouched."""
+        result = self._connection.execute(
+            update(Caller)
+            .where(
+                Caller.library_id == library_id,
+                Caller.id == caller_id,
+                Caller.kind == "agent",
+                Caller.updated_at == expected_updated_at,
+            )
+            .values(name=name, description=description, updated_at=updated_at)
+        )
+        return result.rowcount == 1
+
     def disable_caller(
         self,
         library_id: str,
@@ -86,6 +124,16 @@ class AuthRepository:
         result = self._connection.execute(statement)
         if result.rowcount != 1:
             return self.get_caller(library_id, caller_id)
+        self._connection.execute(
+            delete(AgentTokenValue).where(
+                AgentTokenValue.credential_id.in_(
+                    select(Credential.id).where(
+                        Credential.library_id == library_id,
+                        Credential.caller_id == caller_id,
+                    )
+                )
+            )
+        )
         return self.get_caller(library_id, caller_id)
 
     def increment_policy_version(
@@ -127,6 +175,67 @@ class AuthRepository:
         row = self._connection.execute(statement).mappings().one_or_none()
         return None if row is None else StoredCredential.model_validate(row)
 
+    def has_library_grant_policy(
+        self,
+        library_id: str,
+        caller_id: str,
+        credential_id: str,
+    ) -> bool:
+        """Check explicit Library-grant mode for one exact credential identity."""
+        statement = select(CredentialLibraryPolicy.credential_id).where(
+            CredentialLibraryPolicy.home_library_id == library_id,
+            CredentialLibraryPolicy.caller_id == caller_id,
+            CredentialLibraryPolicy.credential_id == credential_id,
+            CredentialLibraryPolicy.mode == "library_grants",
+        )
+        return self._connection.execute(statement).scalar_one_or_none() is not None
+
+    def list_credential_library_grants(
+        self,
+        *,
+        home_library_id: str,
+        caller_id: str,
+        credential_id: str,
+    ) -> tuple[CredentialLibraryGrantSummary, ...]:
+        """List grants for only this exact credential, in deterministic order."""
+
+        statement = (
+            select(CredentialLibraryGrant.target_library_id, CredentialLibraryGrant.action)
+            .where(
+                CredentialLibraryGrant.home_library_id == home_library_id,
+                CredentialLibraryGrant.caller_id == caller_id,
+                CredentialLibraryGrant.credential_id == credential_id,
+            )
+            .order_by(CredentialLibraryGrant.target_library_id, CredentialLibraryGrant.action)
+        )
+        grouped: dict[str, list[LibraryAction]] = {}
+        for library_id, action in self._connection.execute(statement):
+            grouped.setdefault(library_id, []).append(LibraryAction(action))
+        return tuple(
+            CredentialLibraryGrantSummary(library_id=library_id, actions=tuple(actions))
+            for library_id, actions in grouped.items()
+        )
+
+    def get_library_policy(
+        self,
+        *,
+        credential_id: str,
+        caller_id: str,
+        home_library_id: str,
+        target_library_id: str,
+        active_at: int,
+    ) -> LibraryPolicy | None:
+        """Resolve the current policy for one exact active Agent credential."""
+
+        return resolve_library_policy(
+            self._connection,
+            credential_id=credential_id,
+            caller_id=caller_id,
+            home_library_id=home_library_id,
+            target_library_id=target_library_id,
+            active_at=active_at,
+        )
+
     def find_credential_by_selector(self, selector: str) -> StoredCredential | None:
         statement = select(Credential.__table__).where(Credential.selector == selector)
         row = self._connection.execute(statement).mappings().one_or_none()
@@ -136,6 +245,92 @@ class AuthRepository:
         values = credential.model_dump()
         self._connection.execute(insert(Credential), values)
         return StoredCredential.model_validate(values)
+
+    def add_agent_credential_with_value(
+        self, credential: NewCredential, *, token_value: str
+    ) -> StoredCredential:
+        """Persist verifier and revealable Agent value in one savepoint.
+
+        A caller may catch issuance errors and commit its outer transaction.
+        Rolling back this savepoint prevents a verifier-only half-issuance.
+        """
+        try:
+            parsed = parse_token(token_value)
+        except InvalidTokenError:
+            raise ValueError("Agent token value does not match credential.") from None
+        if (
+            parsed.selector != credential.selector
+            or parsed.version != credential.token_version
+            or not verify_token(parsed, credential.verifier)
+        ):
+            raise ValueError("Agent token value does not match credential.")
+        with self._connection.begin_nested():
+            stored = self.add_credential(credential)
+            self._connection.execute(
+                insert(AgentTokenValue),
+                {"credential_id": credential.id, "token_value": token_value},
+            )
+        return stored
+
+    def get_active_agent_token_value(
+        self,
+        library_id: str,
+        caller_id: str,
+        credential_id: str,
+        *,
+        active_at: int,
+    ) -> str | None:
+        """Fetch a raw value only for a currently active Agent credential.
+
+        The management caller must be authenticated separately before using
+        this method. Legacy credentials intentionally return ``None``.
+        """
+        statement = (
+            select(
+                AgentTokenValue.token_value,
+                Credential.selector,
+                Credential.token_version,
+                Credential.verifier,
+            )
+            .join(Credential, Credential.id == AgentTokenValue.credential_id)
+            .join(
+                Caller,
+                (Caller.id == Credential.caller_id) & (Caller.library_id == Credential.library_id),
+            )
+            .where(
+                Credential.id == credential_id,
+                Credential.caller_id == caller_id,
+                Credential.library_id == library_id,
+                Credential.created_at <= active_at,
+                Credential.expires_at > active_at,
+                Credential.revoked_at.is_(None),
+                Credential.rotated_at.is_(None),
+                Caller.kind == "agent",
+                Caller.disabled_at.is_(None),
+            )
+        )
+        row = self._connection.execute(statement).one_or_none()
+        if row is None:
+            return None
+        token_value, selector, token_version, verifier = row
+        if (
+            not isinstance(token_value, str)
+            or not isinstance(selector, str)
+            or type(token_version) is not int
+            or not isinstance(verifier, bytes)
+        ):
+            return None
+        try:
+            parsed = parse_token(token_value)
+        except InvalidTokenError:
+            return None
+        if (
+            parsed.selector != selector
+            or parsed.version != token_version
+            or not verify_token(parsed, verifier)
+        ):
+            return None
+        return token_value
 
     def list_active_credentials(
         self,
@@ -197,7 +392,11 @@ class AuthRepository:
             )
             .values(revoked_at=revoked_at, updated_at=revoked_at)
         )
-        self._connection.execute(statement)
+        result = self._connection.execute(statement)
+        if result.rowcount == 1:
+            self._connection.execute(
+                delete(AgentTokenValue).where(AgentTokenValue.credential_id == credential.id)
+            )
         return self.get_credential(
             credential.library_id,
             credential.caller_id,
@@ -230,6 +429,9 @@ class AuthRepository:
         result = self._connection.execute(statement)
         if result.rowcount != 1:
             return None
+        self._connection.execute(
+            delete(AgentTokenValue).where(AgentTokenValue.credential_id == credential.id)
+        )
         return self.get_credential(
             credential.library_id,
             credential.caller_id,

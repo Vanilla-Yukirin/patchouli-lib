@@ -1,15 +1,11 @@
 from __future__ import annotations
 
 import io
-import os
-import shutil
-import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
-import pytest
 
 from patchouli_cli.main import run
 from patchouli_client import PatchouliClient, RetryPolicy
@@ -28,25 +24,6 @@ class MissingSecretStore:
     def get_token(self, profile: str) -> str | None:
         del profile
         return None
-
-
-@pytest.fixture
-def trusted_tmp_path(tmp_path: Path) -> Iterator[Path]:
-    """Use a path whose Windows ancestors are not writable by sandbox peer accounts."""
-    if os.name != "nt":
-        yield tmp_path
-        return
-    local = os.environ.get("LOCALAPPDATA")
-    if not local:
-        pytest.skip("LOCALAPPDATA is unavailable")
-    parent = Path(local) / "PatchouliLibTests"
-    parent.mkdir(exist_ok=True)
-    path = parent / str(uuid.uuid4())
-    path.mkdir()
-    try:
-        yield path
-    finally:
-        shutil.rmtree(path, ignore_errors=True)
 
 
 def invoke_cli(
@@ -139,6 +116,8 @@ def whoami_body(
         "caller_id": caller_id,
         "credential_id": credential_id,
         "kind": "agent",
+        "name": "Synthetic Agent",
+        "description": "Synthetic client fixture",
         "expires_at": "2027-01-01T00:00:00.000000Z",
         "policy_version": 3,
         "grants": [{"section_id": "sec_synthetic", "actions": ["archive:write"]}],

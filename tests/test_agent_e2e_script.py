@@ -3,7 +3,9 @@ from __future__ import annotations
 import ssl
 import subprocess
 import sys
+import tomllib
 import urllib.request
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -111,7 +113,7 @@ def test_command_failure_does_not_render_command_input_or_output(
             step="Synthetic command",
         )
 
-    assert str(captured.value) == "Synthetic command failed."
+    assert str(captured.value) == "Synthetic command failed (exit 1)."
     assert secret not in str(captured.value)
 
 
@@ -250,3 +252,103 @@ def test_private_file_creation_is_exclusive(tmp_path: Path) -> None:
 
     with pytest.raises(FileExistsError):
         agent_e2e._write_private(target, "replacement")
+
+
+def test_packaged_client_uses_its_own_nonsecret_configuration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    endpoint = "https://127.0.0.1:18443"
+    operator_token = "plb1.synthetic-operator"
+    agent_token = "plb1.synthetic-agent"
+    inherited = tmp_path / "unrelated-config.toml"
+    inherited.write_text("must remain unchanged", encoding="utf-8")
+    monkeypatch.setenv("PATCHOULI_CONFIG_FILE", str(inherited))
+
+    def inspect_first_call(
+        executable: Path,
+        arguments: tuple[str, ...],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        step: str,
+    ) -> dict[str, object]:
+        assert executable == Path("synthetic-cli")
+        assert arguments == ("capabilities",) and step == "Agent capabilities"
+        assert cwd == tmp_path / "client-inputs"
+        config = Path(environment["PATCHOULI_CONFIG_FILE"])
+        assert config == tmp_path / "client-config.toml"
+        text = config.read_text(encoding="utf-8")
+        assert tomllib.loads(text) == {
+            "version": 1,
+            "profiles": {"default": {"endpoint": endpoint, "api_version": "v1"}},
+        }
+        assert operator_token not in text and agent_token not in text
+        assert environment["PATCHOULI_TOKEN"] == agent_token
+        raise agent_e2e.E2EFailure("stop after configuration check")
+
+    monkeypatch.setattr(agent_e2e, "_cli_success", inspect_first_call)
+    with pytest.raises(agent_e2e.E2EFailure, match="stop after configuration check"):
+        agent_e2e._exercise_agent(
+            Path("synthetic-cli"),
+            Path("synthetic-operator-cli"),
+            runtime=tmp_path,
+            endpoint=endpoint,
+            ca_certificate=tmp_path / "synthetic-ca.crt",
+            server_environment={},
+            operator_token=operator_token,
+            agent_token=agent_token,
+        )
+    assert inherited.read_text(encoding="utf-8") == "must remain unchanged"
+
+
+@pytest.mark.parametrize("current_features", [True, False], ids=["current", "old"])
+def test_packaged_agent_requires_exact_current_service_features(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, current_features: bool
+) -> None:
+    features = ["archive", "file-sets", "retrieval", "search", "tags"]
+    if current_features:
+        features = [
+            "archive",
+            "file-sets",
+            "page-lifecycle",
+            "page-move",
+            "retrieval",
+            "search",
+            "tags",
+        ]
+    calls: list[tuple[str, ...]] = []
+
+    def capability_then_stop(
+        executable: Path,
+        arguments: tuple[str, ...],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        step: str,
+    ) -> dict[str, object]:
+        del executable, cwd, environment, step
+        calls.append(arguments)
+        if arguments == ("capabilities",):
+            return {"data": {"features": features}}
+        assert arguments == ("whoami",)
+        raise agent_e2e.E2EFailure("stop after accepted capabilities")
+
+    monkeypatch.setattr(agent_e2e, "_cli_success", capability_then_stop)
+    expected = (
+        "stop after accepted capabilities"
+        if current_features
+        else "Capabilities did not preserve the accepted contract."
+    )
+    with pytest.raises(agent_e2e.E2EFailure) as captured:
+        agent_e2e._exercise_agent(
+            Path("synthetic-cli"),
+            Path("synthetic-operator-cli"),
+            runtime=tmp_path,
+            endpoint="https://127.0.0.1:18443",
+            ca_certificate=tmp_path / "synthetic-ca.crt",
+            server_environment={},
+            operator_token="plb1.synthetic-operator",
+            agent_token="plb1.synthetic-agent",
+        )
+    assert str(captured.value) == expected
+    assert calls == ([("capabilities",), ("whoami",)] if current_features else [("capabilities",)])
