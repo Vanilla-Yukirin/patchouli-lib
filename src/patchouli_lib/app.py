@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager, suppress
 from typing import Annotated, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import Engine
 
@@ -127,8 +128,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     ReadinessEngine = Annotated[Engine, Depends(get_engine)]
 
-    @application.get("/", response_model=ServiceResponse)
-    def service_info() -> ServiceResponse:
+    @application.get(
+        "/",
+        response_model=ServiceResponse,
+        responses={307: {"description": "Redirect to the enabled administration console."}},
+    )
+    def service_info() -> ServiceResponse | RedirectResponse:
+        if resolved_settings.admin_enabled:
+            return RedirectResponse(
+                url="/admin",
+                status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+                headers={"Cache-Control": "no-store, max-age=0"},
+            )
         return ServiceResponse(
             name=resolved_settings.app_name,
             version=__version__,
