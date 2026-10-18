@@ -6,7 +6,10 @@ import pytest
 from patchouli_lib.backup import BackupArtifactIdentity, BackupManifestError
 from patchouli_lib.backup.manifest import (
     BACKUP_FILENAME,
+    LEGACY_SCHEMA_REVISION,
     MANIFEST_SCHEMA_VERSION,
+    REQUEST_LOG_SCHEMA_REVISION,
+    SEARCH_INDEX_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
     BackupManifestV1,
     canonical_utc_timestamp,
@@ -41,6 +44,21 @@ def test_manifest_is_exact_canonical_utf8_json() -> None:
         canonical_utc_timestamp(datetime(2026, 8, 13, 20, 34, 56, 123456, tzinfo=UTC))
         == "2026-08-13T20:34:56.123456Z"
     )
+
+
+@pytest.mark.parametrize(
+    "schema_revision",
+    [REQUEST_LOG_SCHEMA_REVISION, SEARCH_INDEX_SCHEMA_REVISION, SUPPORTED_SCHEMA_REVISION],
+)
+def test_recent_manifests_parse_with_exact_revision_compatibility(
+    schema_revision: str,
+) -> None:
+    expected = BackupManifestV1(**(asdict(manifest()) | {"schema_revision": schema_revision}))
+    assert parse_manifest(expected.canonical_bytes()) == expected
+    require_compatible_manifest(expected, app_version="0.1.0a0", schema_revision=schema_revision)
+    if schema_revision != SUPPORTED_SCHEMA_REVISION:
+        with pytest.raises(BackupManifestError):
+            require_compatible_manifest(expected, app_version="0.1.0a0")
 
 
 @pytest.mark.parametrize(
@@ -99,3 +117,17 @@ def test_artifact_identity_and_app_compatibility_are_exact() -> None:
     require_compatible_manifest(manifest(), app_version="0.1.0a0")
     with pytest.raises(BackupManifestError):
         require_compatible_manifest(manifest(), app_version="0.1.0a1")
+
+
+def test_legacy_manifest_parses_but_requires_explicit_revision() -> None:
+    legacy = BackupManifestV1(**(asdict(manifest()) | {"schema_revision": LEGACY_SCHEMA_REVISION}))
+    assert parse_manifest(legacy.canonical_bytes()) == legacy
+    with pytest.raises(BackupManifestError):
+        require_compatible_manifest(legacy, app_version="0.1.0a0")
+    require_compatible_manifest(
+        legacy, app_version="0.1.0a0", schema_revision=LEGACY_SCHEMA_REVISION
+    )
+    with pytest.raises(BackupManifestError):
+        require_compatible_manifest(
+            manifest(), app_version="0.1.0a0", schema_revision=LEGACY_SCHEMA_REVISION
+        )

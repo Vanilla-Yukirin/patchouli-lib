@@ -11,7 +11,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from threading import Thread
 from typing import Any
-from urllib.request import urlopen
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import ProxyHandler, build_opener
 
 import pytest
 import uvicorn
@@ -19,6 +21,7 @@ from websockets.sync.client import connect
 
 from patchouli_lib.admin.passwords import hash_password
 from patchouli_lib.app import create_app
+from patchouli_lib.auth.models import Caller
 from patchouli_lib.config import Settings
 
 _ADMIN_PASSWORD = "synthetic browser password"
@@ -27,6 +30,7 @@ _ADMIN_PASSWORD_HASH = hash_password(
     salt_factory=lambda size: b"b" * size,
     iterations=300_000,
 )
+_LOCAL_HTTP = build_opener(ProxyHandler({}))
 
 
 def _available_port() -> int:
@@ -80,9 +84,11 @@ def _live_admin(tmp_path: Path) -> Iterator[str]:
             "admin_session_ttl_seconds": 600,
         }
     )
+    application = create_app(settings)
+    Caller.metadata.create_all(application.state.engine)
     server = uvicorn.Server(
         uvicorn.Config(
-            create_app(settings),
+            application,
             host="127.0.0.1",
             port=port,
             log_level="error",
@@ -108,25 +114,112 @@ def _live_admin(tmp_path: Path) -> Iterator[str]:
             pytest.fail("The temporary admin server did not stop.")
 
 
-def _page_target(debug_port: int, origin: str) -> dict[str, Any]:
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
+def _cdp_error(error: Exception) -> str:
+    if isinstance(error, HTTPError):
+        return f"HTTP {error.code}"
+    if isinstance(error, URLError):
+        return f"{type(error).__name__} ({type(error.reason).__name__})"
+    return type(error).__name__
+
+
+def _target_locations(targets: Any, origin: str) -> list[str]:
+    if not isinstance(targets, list):
+        return ["<invalid target list>"]
+    locations = []
+    expected_origin = urlsplit(origin)
+    for target in targets[:5]:
+        if not isinstance(target, dict):
+            locations.append("<invalid target>")
+            continue
+        url = str(target.get("url", ""))
         try:
-            with urlopen(f"http://127.0.0.1:{debug_port}/json/list", timeout=1) as response:
+            parsed = urlsplit(url)
+        except ValueError:
+            locations.append("<invalid URL>")
+            continue
+        if parsed.scheme == expected_origin.scheme and parsed.netloc == expected_origin.netloc:
+            locations.append(
+                "/admin/login" if parsed.path == "/admin/login" else "<other local path>"
+            )
+        elif url == "about:blank":
+            locations.append("about:blank")
+        else:
+            locations.append("<other origin>")
+    return locations
+
+
+def _browser_stderr_signals(path: Path) -> str:
+    try:
+        with path.open("rb") as output:
+            output.seek(0, os.SEEK_END)
+            output.seek(max(0, output.tell() - 16_384))
+            tail = output.read().decode("utf-8", errors="replace").casefold()
+    except OSError:
+        return "<unavailable>"
+    if not tail:
+        return "<empty>"
+    known_signals = (
+        ("devtools listening on", "devtools-listening"),
+        ("address already in use", "port-in-use"),
+        ("failed to create a processsingleton", "profile-start-failed"),
+        ("no usable sandbox", "sandbox-unavailable"),
+        ("error while loading shared libraries", "missing-shared-library"),
+        ("failed to move to new namespace", "namespace-unavailable"),
+        ("segmentation fault", "browser-crashed"),
+    )
+    signals = [label for marker, label in known_signals if marker in tail]
+    return ", ".join(signals) if signals else "<unrecognized output>"
+
+
+def _admin_probe(origin: str) -> str:
+    try:
+        with _LOCAL_HTTP.open(f"{origin}/admin/login", timeout=2) as response:
+            return f"HTTP {response.status}"
+    except OSError as error:
+        return _cdp_error(error)
+
+
+def _page_target(
+    debug_port: int, origin: str, process: subprocess.Popen[bytes], stderr_path: Path
+) -> dict[str, Any]:
+    # Hosted runners can start Chrome before its CDP HTTP endpoint responds.
+    deadline = time.monotonic() + 30
+    last_error = "no response"
+    last_targets: list[str] = []
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            break
+        try:
+            with _LOCAL_HTTP.open(
+                f"http://127.0.0.1:{debug_port}/json/list", timeout=1
+            ) as response:
                 targets = json.load(response)
-        except OSError:
+        except (OSError, ValueError) as error:
+            last_error = _cdp_error(error)
             time.sleep(0.05)
             continue
-        for target in targets:
-            if target.get("type") == "page" and str(target.get("url", "")).startswith(origin):
+        last_error = "responded"
+        last_targets = _target_locations(targets, origin)
+        for target in targets if isinstance(targets, list) else []:
+            if (
+                isinstance(target, dict)
+                and target.get("type") == "page"
+                and str(target.get("url", "")).startswith(origin)
+            ):
                 return dict(target)
         time.sleep(0.05)
-    pytest.fail("The browser did not open the admin page.")
+    exit_status = process.poll()
+    pytest.fail(
+        "The browser did not open the admin page. "
+        f"Chrome: {'running' if exit_status is None else f'exited ({exit_status})'}; "
+        f"admin: {_admin_probe(origin)}; CDP: {last_error}; "
+        f"targets: {last_targets}; stderr signals: {_browser_stderr_signals(stderr_path)}"
+    )
 
 
 class _DevTools:
     def __init__(self, websocket_url: str) -> None:
-        self.connection = connect(websocket_url, open_timeout=5)
+        self.connection = connect(websocket_url, open_timeout=5, proxy=None)
         self.next_id = 1
         self.events: list[dict[str, Any]] = []
 
@@ -170,29 +263,52 @@ def _observed_login_origin(events: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def test_browser_failure_diagnostics_redact_local_details(tmp_path: Path) -> None:
+    stderr_path = tmp_path / "browser-stderr.log"
+    stderr_path.write_text(
+        "DevTools listening on ws://127.0.0.1:12345/devtools/browser/example\n"
+        "Profile /tmp/synthetic private/profile Authorization: Bearer synthetic-secret\n",
+        encoding="utf-8",
+    )
+
+    diagnostic = _browser_stderr_signals(stderr_path)
+    assert diagnostic == "devtools-listening"
+    assert "synthetic-private" not in diagnostic
+    assert "synthetic private" not in diagnostic
+    assert "synthetic-secret" not in diagnostic
+    assert "Bearer" not in diagnostic
+    assert _target_locations(
+        [{"url": "http://127.0.0.1:8765/private/secret?token=synthetic-secret"}],
+        "http://127.0.0.1:8765",
+    ) == ["<other local path>"]
+
+
 def test_real_browser_can_switch_language_and_submit_same_origin_login(tmp_path: Path) -> None:
     browser = _browser_executable()
     debug_port = _available_port()
 
     with _live_admin(tmp_path) as origin:
-        process = subprocess.Popen(
-            [
-                browser,
-                "--headless=new",
-                "--disable-dev-shm-usage",
-                "--disable-extensions",
-                "--no-first-run",
-                "--no-sandbox",
-                f"--remote-debugging-port={debug_port}",
-                f"--user-data-dir={tmp_path / 'browser-profile'}",
-                f"{origin}/admin/login",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        stderr_path = tmp_path / "browser-stderr.log"
+        with stderr_path.open("wb") as stderr_output:
+            process = subprocess.Popen(
+                [
+                    browser,
+                    "--headless=new",
+                    "--disable-dev-shm-usage",
+                    "--disable-extensions",
+                    "--no-first-run",
+                    "--no-sandbox",
+                    "--no-proxy-server",
+                    f"--remote-debugging-port={debug_port}",
+                    f"--user-data-dir={tmp_path / 'browser-profile'}",
+                    f"{origin}/admin/login",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_output,
+            )
         devtools: _DevTools | None = None
         try:
-            target = _page_target(debug_port, origin)
+            target = _page_target(debug_port, origin, process, stderr_path)
             devtools = _DevTools(str(target["webSocketDebuggerUrl"]))
             devtools.command("Network.enable")
             devtools.command("Runtime.enable")
@@ -289,7 +405,16 @@ def test_real_browser_can_switch_language_and_submit_same_origin_login(tmp_path:
 
             assert path == "/admin"
             assert devtools.evaluate("document.documentElement.lang") == "zh-CN"
-            assert devtools.evaluate("document.querySelector('h1')?.textContent") == "管理面板"
+            assert devtools.evaluate("document.querySelector('h1')?.textContent") == "主页"
+            devtools.command("Page.navigate", {"url": f"{origin}/admin/setup"})
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    if devtools.evaluate("document.querySelector('#library_name') !== null"):
+                        break
+                except TimeoutError:
+                    pass
+                time.sleep(0.05)
             setup_help = devtools.evaluate(
                 """
                 (() => {

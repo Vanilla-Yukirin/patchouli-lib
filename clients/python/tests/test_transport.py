@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import cast
 
 import httpx
@@ -11,10 +11,12 @@ from patchouli_client import (
     BearerToken,
     IdempotencyKey,
     OperationKind,
+    ProtocolError,
     RetryPolicy,
     Transport,
     TransportError,
 )
+from patchouli_client.transport import MAX_BOUNDED_ERROR_BYTES, MAX_BOUNDED_SUCCESS_BYTES
 
 _RETRY_FIXTURE = cast(dict[str, object], load_agent_wire_fixture()["retry"])
 ACCEPTED_RETRY_STATUSES = tuple(cast(list[int], _RETRY_FIXTURE["statuses"]))
@@ -54,10 +56,10 @@ def test_read_retries_accepted_transient_statuses(status: int) -> None:
     with _transport(handler) as transport:
         response = transport.send(
             "POST",
-            "/api/v1/sections/sec_synthetic/search",
+            "/api/v1/search",
             token=BearerToken("cred_synthetic_123"),
             operation=OperationKind.READ,
-            json_body={"query": "synthetic", "limit": 20},
+            json_body={"keywords": ["synthetic"], "limit": 20},
         )
 
     assert response.status_code == 200
@@ -395,3 +397,156 @@ def test_transport_rejects_unsafe_base_urls(base_url: str) -> None:
 def test_retry_policy_rejects_unbounded_values(kwargs: dict[str, int]) -> None:
     with pytest.raises(ValueError, match="attempt|backoff"):
         RetryPolicy(**kwargs)  # type: ignore[arg-type]
+
+
+class CountingStream(httpx.SyncByteStream):
+    def __init__(self, *, count: int | None = None) -> None:
+        self.count = count
+        self.bytes_read = 0
+        self.closed = False
+
+    def __iter__(self) -> Iterator[bytes]:
+        while self.count is None or self.bytes_read < self.count:
+            self.bytes_read += 1
+            yield b"x"
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_bounded_success_reads_only_declared_size_plus_one_and_closes() -> None:
+    stream = CountingStream(count=1000)
+    with (
+        _transport(lambda _: httpx.Response(200, stream=stream)) as transport,
+        pytest.raises(ProtocolError, match="byte limit"),
+    ):
+        transport.get_bounded(
+            "/api/v1/libraries/one/file",
+            token=BearerToken("cred_synthetic_123"),
+            max_success_bytes=3,
+        )
+    assert stream.bytes_read == 4
+    assert stream.closed
+
+
+def test_bounded_error_reads_at_most_error_ceiling_plus_one() -> None:
+    stream = CountingStream(count=MAX_BOUNDED_ERROR_BYTES + 100)
+    with (
+        _transport(lambda _: httpx.Response(404, stream=stream)) as transport,
+        pytest.raises(ProtocolError, match="byte limit"),
+    ):
+        transport.get_bounded(
+            "/api/v1/libraries/one/file",
+            token=BearerToken("cred_synthetic_123"),
+            max_success_bytes=3,
+        )
+    assert stream.bytes_read == MAX_BOUNDED_ERROR_BYTES + 1
+    assert stream.closed
+
+
+def test_bounded_read_retries_status_without_reading_body_and_closes_both() -> None:
+    first = CountingStream(count=100)
+    second = CountingStream(count=3)
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return (
+            httpx.Response(503, stream=first)
+            if len(seen) == 1
+            else httpx.Response(200, stream=second)
+        )
+
+    with _transport(handler) as transport:
+        result = transport.get_bounded(
+            "/api/v1/libraries/one/file",
+            token=BearerToken("cred_synthetic_123"),
+            max_success_bytes=3,
+        )
+    assert result.content == b"xxx"
+    assert len(seen) == 2
+    assert all(request.headers["Authorization"] == "Bearer cred_synthetic_123" for request in seen)
+    assert first.bytes_read == 0 and first.closed
+    assert second.bytes_read == 3 and second.closed
+
+
+def test_bounded_read_retries_transient_stream_failure_and_closes() -> None:
+    class FailingStream(httpx.SyncByteStream):
+        def __init__(self) -> None:
+            self.closed = False
+
+        def __iter__(self) -> Iterator[bytes]:
+            yield b"x"
+            raise httpx.ReadError("synthetic failure")
+
+        def close(self) -> None:
+            self.closed = True
+
+    failed = FailingStream()
+    good = CountingStream(count=3)
+    attempts = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(200, stream=failed if attempts == 1 else good)
+
+    with _transport(handler) as transport:
+        result = transport.get_bounded(
+            "/api/v1/libraries/one/file",
+            token=BearerToken("cred_synthetic_123"),
+            max_success_bytes=3,
+        )
+    assert result.content == b"xxx"
+    assert attempts == 2
+    assert failed.closed and good.closed
+
+
+def test_bounded_read_rejects_compression_prebuffering_and_excessive_limit() -> None:
+    gzip_stream = CountingStream(count=10)
+    with (
+        _transport(
+            lambda _: httpx.Response(200, headers={"Content-Encoding": "gzip"}, stream=gzip_stream)
+        ) as transport,
+        pytest.raises(ProtocolError, match="content encoding"),
+    ):
+        transport.get_bounded(
+            "/api/v1/libraries/one/file",
+            token=BearerToken("cred_synthetic_123"),
+            max_success_bytes=3,
+        )
+    assert gzip_stream.bytes_read == 0 and gzip_stream.closed
+    with _transport(lambda _: httpx.Response(200, content=b"abc")) as transport:
+        with pytest.raises(ProtocolError, match="prebuffered"):
+            transport.get_bounded(
+                "/api/v1/libraries/one/file",
+                token=BearerToken("cred_synthetic_123"),
+                max_success_bytes=3,
+            )
+        with pytest.raises(ValueError, match="file-set limit"):
+            transport.get_bounded(
+                "/api/v1/libraries/one/file",
+                token=BearerToken("cred_synthetic_123"),
+                max_success_bytes=MAX_BOUNDED_SUCCESS_BYTES + 1,
+            )
+
+
+def test_bounded_read_does_not_follow_redirect() -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(
+            302,
+            headers={"Location": "https://elsewhere.invalid/"},
+            stream=httpx.ByteStream(b""),
+        )
+
+    with _transport(handler) as transport:
+        response = transport.get_bounded(
+            "/api/v1/libraries/one/file",
+            token=BearerToken("cred_synthetic_123"),
+            max_success_bytes=3,
+        )
+    assert response.status_code == 302
+    assert len(seen) == 1

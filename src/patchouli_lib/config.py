@@ -1,3 +1,4 @@
+import hmac
 from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -25,6 +26,7 @@ class Settings(BaseSettings):
     retrieval_cursor_signing_secret: SecretStr | None = None
     admin_password_hash: SecretStr | None = None
     admin_session_signing_secret: SecretStr | None = None
+    admin_setup_token: SecretStr | None = None
     admin_allow_private_http: bool = False
     admin_session_ttl_seconds: Annotated[int, Field(ge=300, le=86_400)] = 1_800
 
@@ -50,11 +52,14 @@ class Settings(BaseSettings):
     @field_validator(
         "admin_password_hash",
         "admin_session_signing_secret",
+        "admin_setup_token",
         mode="before",
     )
     @classmethod
     def normalize_optional_admin_values(cls, value: object) -> object:
-        return None if value == "" else value
+        if value == "" or isinstance(value, SecretStr) and value.get_secret_value() == "":
+            return None
+        return value
 
     @field_validator("admin_password_hash")
     @classmethod
@@ -62,6 +67,17 @@ class Settings(BaseSettings):
         if value is None:
             return None
         parse_password_hash(value.get_secret_value())
+        return value
+
+    @field_validator("admin_setup_token")
+    @classmethod
+    def require_strong_admin_setup_token(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        length = len(value.get_secret_value().encode("utf-8"))
+        if length < 32 or length > 1_024:
+            message = "The admin setup token must contain 32 to 1024 UTF-8 bytes."
+            raise ValueError(message)
         return value
 
     @field_validator("admin_session_signing_secret")
@@ -83,17 +99,21 @@ class Settings(BaseSettings):
         if self.environment == "production" and self.retrieval_cursor_signing_secret is None:
             message = "The retrieval cursor signing secret is required in production."
             raise ValueError(message)
-        admin_values = (
-            self.admin_password_hash,
-            self.admin_session_signing_secret,
-        )
-        if any(value is not None for value in admin_values) and not all(
-            value is not None for value in admin_values
-        ):
-            message = "Admin password hash and session signing secret must be set together."
+        if self.admin_password_hash is not None and self.admin_session_signing_secret is None:
+            message = "The legacy admin password hash requires a session signing secret."
             raise ValueError(message)
+        if self.admin_setup_token is not None:
+            if self.admin_session_signing_secret is None:
+                message = "The admin setup token requires a session signing secret."
+                raise ValueError(message)
+            if hmac.compare_digest(
+                self.admin_setup_token.get_secret_value().encode("utf-8"),
+                self.admin_session_signing_secret.get_secret_value().encode("utf-8"),
+            ):
+                message = "The admin setup token must differ from the session signing secret."
+                raise ValueError(message)
         return self
 
     @property
     def admin_enabled(self) -> bool:
-        return self.admin_password_hash is not None
+        return self.admin_session_signing_secret is not None

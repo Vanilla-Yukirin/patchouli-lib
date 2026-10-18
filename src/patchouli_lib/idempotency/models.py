@@ -25,9 +25,15 @@ class IdempotencyRecord(Base):
     __tablename__ = "idempotency_records"
     __table_args__ = (
         ForeignKeyConstraint(
-            ["caller_id", "library_id"],
+            ["caller_id", "actor_home_library_id"],
             ["auth_callers.id", "auth_callers.library_id"],
             name="fk_idempotency_records_caller_library_callers",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["library_id"],
+            ["libraries.id"],
+            name="fk_idempotency_records_target_library",
             ondelete="RESTRICT",
         ),
         CheckConstraint(
@@ -129,6 +135,7 @@ class IdempotencyRecord(Base):
         String(OPAQUE_ID_LENGTH),
         primary_key=True,
     )
+    actor_home_library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
     caller_id: Mapped[str] = mapped_column(
         String(OPAQUE_ID_LENGTH),
         primary_key=True,

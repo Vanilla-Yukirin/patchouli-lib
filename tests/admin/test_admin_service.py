@@ -21,6 +21,7 @@ from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import CallerKind, SectionAction
 from patchouli_lib.auth.service import AuthenticationError, AuthenticationService
 from patchouli_lib.database import build_engine
+from patchouli_lib.library.models import Library
 from patchouli_lib.operator.service import ResourceNotFoundError
 
 _LIBRARY_NAME = "Synthetic Admin Library"
@@ -56,6 +57,17 @@ def _bootstrap_input() -> BootstrapInput:
         operator_description="Synthetic operator",
         credential_ttl_seconds=60,
     )
+
+
+def test_bootstrap_can_set_library_description(
+    admin_service: tuple[AdminActionService, Engine],
+) -> None:
+    service, engine = admin_service
+    service.bootstrap(
+        _bootstrap_input().model_copy(update={"library_description": "Synthetic knowledge space"})
+    )
+    with engine.connect() as connection:
+        assert connection.scalar(select(Library.description)) == "Synthetic knowledge space"
 
 
 def test_bootstrap_and_recovery_reuse_existing_domain_transactions(

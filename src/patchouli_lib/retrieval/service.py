@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hmac
+import json
 from collections.abc import Callable
 
 from patchouli_lib.api.contracts import Citation, build_api_v1_path
+from patchouli_lib.auth.library_policy import LegacySectionPolicy, LibraryPolicy
 from patchouli_lib.auth.schemas import (
     AuthenticatedCaller,
     CallerKind,
@@ -14,21 +16,35 @@ from patchouli_lib.auth.schemas import (
 )
 from patchouli_lib.auth.service import Clock, utc_microseconds
 from patchouli_lib.content import page_current_etag
+from patchouli_lib.content.file_manifest import (
+    FileManifest,
+    build_file_manifest,
+    normalize_file_name,
+)
 from patchouli_lib.content.schemas import PageRecord, RevisionRecord
 from patchouli_lib.identifiers import (
     canonical_utc_wire,
     validate_page_id,
     validate_revision_number,
 )
-from patchouli_lib.retrieval.repository import RetrievalRepository, StoredDocument
+from patchouli_lib.retrieval.cursor import CursorBinding
+from patchouli_lib.retrieval.repository import (
+    RetrievalRepository,
+    RetrievalUnsupportedFormatError,
+    StoredDocument,
+)
 from patchouli_lib.retrieval.schemas import (
     BookView,
     CurrentPageRead,
     KeysetPage,
+    LibraryPageMetadata,
     PageDocument,
     PageMetadata,
     PageView,
     ReadWindow,
+    RevisionFileManifestView,
+    RevisionFileRead,
+    RevisionFileView,
     RevisionView,
     SectionView,
 )
@@ -68,14 +84,25 @@ class RetrievalService:
         self._authenticated = authenticated
         self._clock = clock
 
-    def list_sections(self, window: ReadWindow | None = None) -> KeysetPage[SectionView]:
-        caller = self._require_current_agent()
+    def list_sections(
+        self,
+        window: ReadWindow | None = None,
+        *,
+        library_id: str | None = None,
+    ) -> KeysetPage[SectionView]:
+        caller, policy = self._require_current_agent(target_library_id=library_id)
+        target_library_id = caller.library_id if library_id is None else library_id
         resolved_window = window or ReadWindow()
-        stored = self._repository.list_queryable_sections(
-            caller.library_id,
-            caller.id,
-            resolved_window,
-        )
+        if isinstance(policy, LegacySectionPolicy):
+            stored = self._repository.list_queryable_sections(
+                caller.library_id,
+                caller.id,
+                resolved_window,
+            )
+        else:
+            if not policy.read:
+                raise RetrievalAuthorizationError
+            stored = self._repository.list_sections(target_library_id, resolved_window)
         return self._map_page(
             stored,
             lambda section: SectionView(section_id=section.id, name=section.name),
@@ -85,12 +112,15 @@ class RetrievalService:
         self,
         section_id: str,
         window: ReadWindow | None = None,
+        *,
+        library_id: str | None = None,
     ) -> KeysetPage[BookView]:
-        caller = self._require_action(section_id, SectionAction.QUERY)
-        if self._repository.get_section(caller.library_id, section_id) is None:
+        caller = self._require_action(section_id, SectionAction.QUERY, library_id=library_id)
+        target_library_id = caller.library_id if library_id is None else library_id
+        if self._repository.get_section(target_library_id, section_id) is None:
             raise RetrievalNotFoundError
         stored = self._repository.list_books(
-            caller.library_id,
+            target_library_id,
             section_id,
             window or ReadWindow(),
         )
@@ -127,6 +157,8 @@ class RetrievalService:
                 section_id,
                 page_id,
             )
+        except RetrievalUnsupportedFormatError:
+            raise
         except RuntimeError:
             raise RetrievalPersistenceError from None
         if stored is None:
@@ -143,7 +175,78 @@ class RetrievalService:
                 stored.page.page_uid,
                 stored.revision.revision_id,
                 stored.revision.revision_number,
+                stored.page.occurred_at,
+                stored.page.updated_at,
             ),
+        )
+
+    def list_library_pages(
+        self,
+        library_id: str,
+        section_id: str,
+        window: ReadWindow | None = None,
+    ) -> KeysetPage[LibraryPageMetadata]:
+        self._require_library_section_action(library_id, section_id, SectionAction.QUERY)
+        if self._repository.get_section(library_id, section_id) is None:
+            raise RetrievalNotFoundError
+        stored = self._repository.list_pages(library_id, section_id, window or ReadWindow())
+        return self._map_page(stored, self._library_metadata)
+
+    def get_library_page(self, library_id: str, page_id: str) -> LibraryPageMetadata:
+        caller, policy = self._require_discovery_agent(library_id)
+        if isinstance(policy, LegacySectionPolicy):
+            if library_id != caller.library_id:
+                raise RetrievalNotFoundError
+        elif not policy.read:
+            raise RetrievalNotFoundError
+        validate_page_id(page_id)
+        page = self._repository.get_page_by_id(library_id, page_id)
+        if page is None:
+            raise RetrievalNotFoundError
+        if isinstance(policy, LegacySectionPolicy):
+            actions = self._repository.section_actions(library_id, caller.id, page.section_id)
+            if SectionAction.PAGE_READ not in actions:
+                raise RetrievalNotFoundError
+        return self._library_metadata(page)
+
+    def library_page_cursor_binding(
+        self,
+        library_id: str,
+        section_id: str,
+        *,
+        limit: int,
+    ) -> CursorBinding:
+        """Build the new-route binding from current policy inside the read snapshot."""
+        caller, policy = self._require_library_section_action(
+            library_id,
+            section_id,
+            SectionAction.QUERY,
+        )
+        if isinstance(policy, LegacySectionPolicy):
+            rights: object = sorted(
+                action.value
+                for action in self._repository.section_actions(
+                    library_id,
+                    caller.id,
+                    section_id,
+                )
+            )
+        else:
+            rights = [policy.read, policy.write]
+        identity = json.dumps(
+            [caller.library_id, self._authenticated.credential.id, library_id, policy.mode, rights],
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+        return CursorBinding(
+            caller_id=caller.id,
+            policy_version=caller.policy_version,
+            section_id=section_id,
+            route_identity="library.pages.list",
+            limit=limit,
+            query_identity=b"query:none",
+            filters_identity=identity,
+            sort_identity=b"page-id:ascending;deleted:false;revision:current",
         )
 
     def get_revision(
@@ -158,7 +261,7 @@ class RetrievalService:
         page = self._repository.get_page(caller.library_id, section_id, page_id)
         if page is None:
             raise RetrievalNotFoundError
-        revision = self._repository.get_revision(
+        revision = self._get_revision(
             caller.library_id,
             page.page_uid,
             revision_number,
@@ -167,7 +270,107 @@ class RetrievalService:
             raise RetrievalNotFoundError
         return self._document(StoredDocument(page=page, revision=revision))
 
-    def _require_current_agent(self) -> CallerRecord:
+    def list_revision_files(
+        self,
+        section_id: str,
+        page_id: str,
+        revision_number: int,
+    ) -> RevisionFileManifestView:
+        page, revision, manifest = self._revision_files(section_id, page_id, revision_number)
+        return RevisionFileManifestView(
+            page_id=page.page_id,
+            revision_id=revision.revision_id,
+            revision_number=revision.revision_number,
+            files=[
+                RevisionFileView(
+                    filename=entry.name,
+                    size_bytes=entry.content_size_bytes,
+                    content_sha256=entry.content_sha256.hex(),
+                )
+                for entry in manifest.files
+            ],
+        )
+
+    def get_revision_file(
+        self,
+        section_id: str,
+        page_id: str,
+        revision_number: int,
+        filename: str,
+    ) -> RevisionFileRead:
+        _, _, manifest = self._revision_files(section_id, page_id, revision_number)
+        for entry in manifest.files:
+            if entry.name == filename:
+                return RevisionFileRead(filename=entry.name, content=entry.content)
+        raise RetrievalNotFoundError
+
+    def _revision_files(
+        self,
+        section_id: str,
+        page_id: str,
+        revision_number: int,
+    ) -> tuple[PageRecord, RevisionRecord, FileManifest]:
+        caller = self._require_action(section_id, SectionAction.PAGE_READ)
+        validate_page_id(page_id)
+        validate_revision_number(revision_number)
+        page = self._repository.get_page(caller.library_id, section_id, page_id)
+        if page is None:
+            raise RetrievalNotFoundError
+        revision = self._get_revision(caller.library_id, page.page_uid, revision_number)
+        if revision is None:
+            raise RetrievalNotFoundError
+        if not self._repository.has_revision_file_seal(
+            caller.library_id, page.page_uid, revision.revision_id, revision.revision_number
+        ):
+            raise RetrievalPersistenceError
+        try:
+            stored = self._repository.list_revision_files(
+                caller.library_id, page.page_uid, revision.revision_id, revision.revision_number
+            )
+            if any(entry.name != normalize_file_name(entry.name) for entry in stored):
+                raise ValueError("Stored file name is invalid.")
+            manifest = build_file_manifest((entry.name, entry.content) for entry in stored)
+            if len(stored) != len(manifest.files):
+                raise ValueError("Stored file set is ambiguous.")
+            by_name = {entry.name: entry for entry in stored}
+            for entry in manifest.files:
+                original = by_name[entry.name]
+                if (
+                    original.size_bytes != entry.content_size_bytes
+                    or original.content_sha256 != entry.content_sha256
+                ):
+                    raise ValueError("Stored file metadata is inconsistent.")
+            # This release's sealed format contains only the legacy Markdown mirror.
+            if (
+                len(manifest.files) != 1
+                or manifest.files[0].name != "content.md"
+                or manifest.files[0].content != revision.content_md
+                or manifest.files[0].content_size_bytes != revision.content_size_bytes
+                or manifest.files[0].content_sha256 != revision.content_sha256
+            ):
+                raise ValueError("Stored legacy Revision file set is inconsistent.")
+        except (TypeError, ValueError, OverflowError, UnicodeError):
+            raise RetrievalPersistenceError from None
+        return page, revision, manifest
+
+    def _get_revision(
+        self,
+        library_id: str,
+        page_uid: bytes,
+        revision_number: int,
+    ) -> RevisionRecord | None:
+        try:
+            return self._repository.get_revision(library_id, page_uid, revision_number)
+        except RetrievalUnsupportedFormatError:
+            raise
+        except RuntimeError:
+            raise RetrievalPersistenceError from None
+
+    def _require_current_agent(
+        self,
+        *,
+        target_library_id: str | None = None,
+    ) -> tuple[CallerRecord, LibraryPolicy]:
         authenticated = self._authenticated
         identity = authenticated.caller
         credential = authenticated.credential
@@ -195,22 +398,71 @@ class RetrievalService:
             or now >= current_credential.expires_at
         ):
             raise RetrievalAuthenticationError
-        return current
+        policy = self._repository.get_library_policy(
+            credential_id=credential.id,
+            caller_id=identity.id,
+            home_library_id=identity.library_id,
+            target_library_id=(
+                identity.library_id if target_library_id is None else target_library_id
+            ),
+            active_at=now,
+        )
+        if policy is None:
+            raise RetrievalAuthenticationError
+        if (
+            isinstance(policy, LegacySectionPolicy)
+            and target_library_id is not None
+            and target_library_id != current.library_id
+        ):
+            raise RetrievalAuthorizationError
+        return current, policy
+
+    def _require_discovery_agent(self, library_id: str) -> tuple[CallerRecord, LibraryPolicy]:
+        # Preserve older routes' cross-Library rejection semantics. Only these
+        # metadata discovery entries conceal a legacy credential's other Library.
+        caller, policy = self._require_current_agent()
+        if library_id == caller.library_id:
+            return caller, policy
+        if isinstance(policy, LegacySectionPolicy):
+            raise RetrievalNotFoundError
+        return self._require_current_agent(target_library_id=library_id)
+
+    def _require_library_section_action(
+        self,
+        library_id: str,
+        section_id: str,
+        action: SectionAction,
+    ) -> tuple[CallerRecord, LibraryPolicy]:
+        caller, policy = self._require_discovery_agent(library_id)
+        if isinstance(policy, LegacySectionPolicy):
+            if library_id != caller.library_id:
+                raise RetrievalNotFoundError
+            actions = self._repository.section_actions(library_id, caller.id, section_id)
+            if action not in actions:
+                raise RetrievalNotFoundError
+        elif not policy.read:
+            raise RetrievalNotFoundError
+        return caller, policy
 
     def _require_action(
         self,
         section_id: str,
         action: SectionAction,
+        *,
+        library_id: str | None = None,
     ) -> CallerRecord:
-        caller = self._require_current_agent()
-        actions = self._repository.section_actions(
-            caller.library_id,
-            caller.id,
-            section_id,
-        )
-        if not actions:
-            raise RetrievalNotFoundError
-        if action not in actions:
+        caller, policy = self._require_current_agent(target_library_id=library_id)
+        if isinstance(policy, LegacySectionPolicy):
+            actions = self._repository.section_actions(
+                caller.library_id,
+                caller.id,
+                section_id,
+            )
+            if not actions:
+                raise RetrievalNotFoundError
+            if action not in actions:
+                raise RetrievalAuthorizationError
+        elif not policy.read:
             raise RetrievalAuthorizationError
         return caller
 
@@ -230,6 +482,33 @@ class RetrievalService:
         return PageMetadata(
             page=view,
             citation=cls._citation(page, page.current_revision_id, page.current_revision_number),
+        )
+
+    @classmethod
+    def _library_metadata(cls, page: PageRecord) -> LibraryPageMetadata:
+        base = build_api_v1_path(
+            "libraries",
+            page.library_id,
+            "sections",
+            page.section_id,
+            "pages",
+            page.page_id,
+        )
+        return LibraryPageMetadata(
+            library_id=page.library_id,
+            page=cls._page_view(page),
+            current_files_href=base,
+            revision_files_href=build_api_v1_path(
+                "libraries",
+                page.library_id,
+                "sections",
+                page.section_id,
+                "pages",
+                page.page_id,
+                "revisions",
+                page.current_revision_id,
+                "files",
+            ),
         )
 
     @classmethod
@@ -303,5 +582,6 @@ __all__ = [
     "RetrievalAuthorizationError",
     "RetrievalNotFoundError",
     "RetrievalPersistenceError",
+    "RetrievalUnsupportedFormatError",
     "RetrievalService",
 ]

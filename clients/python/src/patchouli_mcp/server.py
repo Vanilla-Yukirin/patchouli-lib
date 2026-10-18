@@ -28,19 +28,19 @@ from patchouli_client import (
     ArchiveRevisionMetadata,
     BearerToken,
     ClientResponse,
+    CurrentPageSearchRequest,
     MarkdownContent,
     Page,
+    PageDocument,
     PatchouliClient,
     ProblemError,
     ProtocolError,
-    SearchRequest,
     SourceInput,
     TransportError,
     WhoAmI,
 )
 from patchouli_client.models import MAX_ARCHIVE_BYTES, MAX_CURSOR_LENGTH, parse_rfc3339
 
-MAX_QUERY_BYTES = 4_096
 MAX_SOURCE_BYTES = 16_384
 _SERVER_NAME = "patchouli-agent"
 _SERVER_VERSION = "0.1.0a0"
@@ -49,6 +49,7 @@ _PUBLIC_PROBLEM_CODES = {
     "content_too_large",
     "idempotency_mismatch",
     "insufficient_scope",
+    "invalid_cursor",
     "invalid_token",
     "precondition_required",
     "rate_limited",
@@ -134,7 +135,7 @@ def create_server(*, runtime_factory: RuntimeFactory = runtime_from_environment)
         _SERVER_NAME,
         version=_SERVER_VERSION,
         instructions=(
-            "Section-scoped PatchouliLib Agent tools. Configuration and caller credentials "
+            "PatchouliLib Agent tools. Configuration and caller credentials "
             "are process startup concerns and are never tool inputs."
         ),
         lifespan=lifespan,
@@ -205,18 +206,11 @@ def _dispatch(runtime: McpRuntime, name: str, arguments: Mapping[str, object]) -
                 cursor=_optional_string(arguments, "cursor"),
             ),
         )
-    elif name == "section_search":
-        query = _bounded_text(
-            _required_string(arguments, "query"), label="search query", max_bytes=MAX_QUERY_BYTES
-        )
-        request = SearchRequest(
-            query=query,
-            limit=_limit(arguments),
-            cursor=_optional_string(arguments, "cursor"),
-        )
+    elif name == "pages_search":
+        request = CurrentPageSearchRequest.from_dict(arguments)
         response = cast(
             ClientResponse[object],
-            runtime.client.search(_required_string(arguments, "section_id"), request, token=token),
+            runtime.client.search_pages(request, token=token),
         )
     elif name == "page_current":
         response = cast(
@@ -243,7 +237,11 @@ def _dispatch(runtime: McpRuntime, name: str, arguments: Mapping[str, object]) -
             title=_bounded_text(
                 _required_string(arguments, "title"), label="archive title", max_bytes=65_536
             ),
-            occurred_at=parse_rfc3339(_required_string(arguments, "occurred_at")),
+            occurred_at=(
+                parse_rfc3339(_required_string(arguments, "occurred_at"))
+                if "occurred_at" in arguments
+                else None
+            ),
             source=_source(arguments),
         )
         result = runtime.application.create_archive(
@@ -374,8 +372,12 @@ def _jsonable(value: object) -> object:
         return {
             "caller_id": value.caller_id,
             "kind": value.kind,
+            "name": value.name,
+            "description": value.description,
             "expires_at": _jsonable(value.expires_at),
             "policy_version": value.policy_version,
+            "policy_mode": value.policy_mode,
+            "library_grants": _jsonable(value.library_grants),
             "grants": _jsonable(value.grants),
         }
     if isinstance(value, Page):
@@ -389,6 +391,15 @@ def _jsonable(value: object) -> object:
             "current_revision_id": value.current_revision_id,
             "current_revision_number": value.current_revision_number,
         }
+    if isinstance(value, PageDocument):
+        result = {
+            "page": _jsonable(value.page),
+            "revision": _jsonable(value.revision),
+            "citation": _jsonable(value.citation),
+        }
+        if value.occurrence_notice is not None:
+            result["occurrence_notice"] = _jsonable(value.occurrence_notice)
+        return result
     if isinstance(value, Mapping):
         return {str(key): _jsonable(item) for key, item in value.items()}
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
@@ -462,7 +473,7 @@ def _tool_inventory() -> list[types.Tool]:
     write = types.ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True)
     return [
         _tool("capabilities", "Read Agent v1 capabilities.", {}, [], read),
-        _tool("whoami", "Read the current caller identity and Section grants.", {}, [], read),
+        _tool("whoami", "Read the caller identity and effective authorization mode.", {}, [], read),
         _tool("sections_list", "List granted Sections.", _pagination_properties(), [], read),
         _tool(
             "books_list",
@@ -472,14 +483,44 @@ def _tool_inventory() -> list[types.Tool]:
             read,
         ),
         _tool(
-            "section_search",
-            "Search current Revisions within one explicit Section.",
+            "pages_search",
+            "Search current Pages in readable Libraries by literal keywords, Tags, and time.",
             {
-                "section_id": _string_schema(),
-                "query": _string_schema(max_length=MAX_QUERY_BYTES),
-                **_pagination_properties(),
+                "keywords": {
+                    "type": "array",
+                    "items": _string_schema(max_length=32_768),
+                    "maxItems": 256,
+                },
+                "tags_any": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "library_id": _string_schema(),
+                            "tag_id": _string_schema(),
+                        },
+                        "required": ["library_id", "tag_id"],
+                        "additionalProperties": False,
+                    },
+                    "maxItems": 256,
+                },
+                "libraries": {
+                    "anyOf": [
+                        {
+                            "type": "array",
+                            "items": _string_schema(),
+                            "minItems": 1,
+                            "maxItems": 256,
+                        },
+                        {"type": "null"},
+                    ]
+                },
+                "occurred_from_us": {"type": ["integer", "null"]},
+                "occurred_before_us": {"type": ["integer", "null"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                "cursor": _nullable_string_schema(max_length=MAX_CURSOR_LENGTH),
             },
-            ["section_id", "query"],
+            [],
             read,
         ),
         _tool(
@@ -513,7 +554,7 @@ def _tool_inventory() -> list[types.Tool]:
                 "content": _string_schema(max_length=MAX_ARCHIVE_BYTES),
                 "operation_id": _nullable_string_schema(max_length=36),
             },
-            ["section_id", "book_id", "title", "occurred_at", "source_kind", "content"],
+            ["section_id", "book_id", "title", "source_kind", "content"],
             write,
         ),
         _tool(

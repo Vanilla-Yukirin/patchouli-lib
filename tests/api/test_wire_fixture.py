@@ -32,6 +32,7 @@ from patchouli_lib.api.errors import (
     problem_response,
 )
 from patchouli_lib.api.request_ids import REQUEST_ID_HEADER, RequestIDMiddleware
+from patchouli_lib.api.search_routes_v2 import SearchResponse
 from patchouli_lib.retrieval.schemas import PageMetadata
 
 _FIXTURE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "api" / "agent_v1_wire.json"
@@ -129,7 +130,7 @@ def test_collection_vectors_use_server_models_and_flat_pagination() -> None:
 
     search = as_object(responses["search"])
     search_body = as_object(search["body"])
-    parsed_search = PaginatedResponse[dict[str, object]].model_validate(search_body)
+    parsed_search = SearchResponse.model_validate(search_body)
     assert parsed_search.model_dump(mode="json") == search_body
 
     for response in (sections, pages, search):
@@ -139,6 +140,17 @@ def test_collection_vectors_use_server_models_and_flat_pagination() -> None:
         assert headers["Content-Type"] == "application/json"
         assert headers["Cache-Control"] == PROTECTED_CACHE_CONTROL
         assert _REQUEST_ID_PATTERN.fullmatch(headers[REQUEST_ID_HEADER]) is not None
+
+
+def test_search_accepts_older_responses_without_pagination_or_snippets() -> None:
+    responses = as_object(load_wire_fixture()["responses"])
+    body = as_object(as_object(responses["search"])["body"])
+    body.pop("next_cursor")
+    for item in cast(list[object], body["items"]):
+        as_object(item).pop("snippet")
+    parsed = SearchResponse.model_validate(body)
+    assert parsed.next_cursor is None
+    assert parsed.items and all(item.snippet is None for item in parsed.items)
 
 
 def test_page_collection_vector_rejects_non_current_citation() -> None:

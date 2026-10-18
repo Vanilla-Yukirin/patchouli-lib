@@ -7,7 +7,13 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from patchouli_lib.api.contracts import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Citation
+from patchouli_lib.api.contracts import (
+    DEFAULT_PAGE_LIMIT,
+    MAX_PAGE_LIMIT,
+    Citation,
+    build_api_v1_path,
+)
+from patchouli_lib.content.file_manifest import MAX_FILES_PER_PAGE, normalize_file_name
 from patchouli_lib.content.schemas import PageId, RevisionId, StrongPageETag
 from patchouli_lib.identifiers import parse_occurrence_time
 from patchouli_lib.library.schemas import OpaqueId, ResourceName
@@ -90,6 +96,53 @@ class RevisionView(RetrievalSchema):
         return value
 
 
+class RevisionFileView(RetrievalSchema):
+    filename: Annotated[str, Field(min_length=1, max_length=255)]
+    size_bytes: Annotated[int, Field(ge=0)]
+    content_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+    @field_validator("filename")
+    @classmethod
+    def require_normalized_filename(cls, value: str) -> str:
+        if normalize_file_name(value) != value:
+            raise ValueError("File name must be normalized.")
+        return value
+
+
+class RevisionFileManifestView(RetrievalSchema):
+    page_id: PageId
+    revision_id: RevisionId
+    revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+    files: Annotated[list[RevisionFileView], Field(min_length=1, max_length=MAX_FILES_PER_PAGE)]
+
+
+class RevisionHistoryItem(RetrievalSchema):
+    revision_id: RevisionId
+    revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+    created_at: str
+
+    @field_validator("created_at")
+    @classmethod
+    def require_canonical_created_at(cls, value: str) -> str:
+        if parse_occurrence_time(value).canonical_utc != value:
+            raise ValueError("Revision timestamp must be canonical UTC text.")
+        return value
+
+
+class RevisionHistoryPage(RetrievalSchema):
+    page_id: PageId
+    current_revision_id: RevisionId
+    current_revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+    items: Annotated[list[RevisionHistoryItem], Field(max_length=MAX_PAGE_LIMIT)]
+    next_before_revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)] | None
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class RevisionFileRead:
+    filename: str
+    content: bytes = field(repr=False)
+
+
 class PageMetadata(RetrievalSchema):
     """Current Page metadata and its exact current-Revision citation."""
 
@@ -105,6 +158,39 @@ class PageMetadata(RetrievalSchema):
             or self.citation.revision_number != self.page.current_revision_number
         ):
             raise ValueError("Page metadata citation is not the current Revision.")
+        return self
+
+
+class LibraryPageMetadata(RetrievalSchema):
+    """Current ownership and file-set links, not a file manifest or write ETag."""
+
+    library_id: OpaqueId
+    page: PageView
+    current_files_href: Annotated[str, Field(min_length=1, max_length=2_048)]
+    revision_files_href: Annotated[str, Field(min_length=1, max_length=2_048)]
+
+    @model_validator(mode="after")
+    def require_exact_file_links(self) -> Self:
+        current = build_api_v1_path(
+            "libraries",
+            self.library_id,
+            "sections",
+            self.page.section_id,
+            "pages",
+            self.page.page_id,
+        )
+        if self.current_files_href != current or self.revision_files_href != build_api_v1_path(
+            "libraries",
+            self.library_id,
+            "sections",
+            self.page.section_id,
+            "pages",
+            self.page.page_id,
+            "revisions",
+            self.page.current_revision_id,
+            "files",
+        ):
+            raise ValueError("Page discovery links must identify the current file-set Revision.")
         return self
 
 
@@ -146,10 +232,16 @@ __all__ = [
     "CurrentPageRead",
     "InternalPageKey",
     "KeysetPage",
+    "LibraryPageMetadata",
     "PageDocument",
     "PageMetadata",
     "PageView",
     "ReadWindow",
+    "RevisionFileManifestView",
+    "RevisionFileRead",
+    "RevisionFileView",
+    "RevisionHistoryItem",
+    "RevisionHistoryPage",
     "RevisionView",
     "SectionView",
 ]

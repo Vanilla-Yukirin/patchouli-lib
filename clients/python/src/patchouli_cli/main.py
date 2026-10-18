@@ -23,7 +23,6 @@ from patchouli_cli.files import (
     MAX_METADATA_BYTES,
     MAX_QUERY_BYTES,
     InputRoot,
-    decode_text,
     open_input_root,
     read_stdin,
 )
@@ -32,11 +31,11 @@ from patchouli_cli.render import emit_error, emit_success
 from patchouli_client import (
     ArchiveCreateMetadata,
     ArchiveRevisionMetadata,
+    CurrentPageSearchRequest,
     MarkdownContent,
     PatchouliClient,
     ProblemError,
     ProtocolError,
-    SearchRequest,
     SourceInput,
     TransportError,
 )
@@ -74,9 +73,9 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("capabilities", help="show safe server capabilities").set_defaults(
         handler="capabilities"
     )
-    commands.add_parser("whoami", help="show the current caller grants").set_defaults(
-        handler="whoami"
-    )
+    commands.add_parser(
+        "whoami", help="show the current caller and authorization mode"
+    ).set_defaults(handler="whoami")
 
     sections = commands.add_parser("sections", help="Section operations").add_subparsers(
         dest="sections_action", required=True
@@ -101,16 +100,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_pagination(page_list)
     page_list.set_defaults(handler="pages.list")
 
-    section = commands.add_parser("section", help="Section-scoped queries").add_subparsers(
-        dest="section_action", required=True
-    )
-    search = section.add_parser("search", help="search current Revisions in one Section")
-    search.add_argument("--section", required=True)
+    search = commands.add_parser("search", help="search current Pages in readable Libraries")
     query = search.add_mutually_exclusive_group(required=True)
     query.add_argument("--query-file")
     query.add_argument("--query-stdin", action="store_true")
-    _add_pagination(search)
-    search.set_defaults(handler="section.search")
+    search.set_defaults(handler="search.pages")
 
     page = commands.add_parser("page", help="Page and Revision reads").add_subparsers(
         dest="page_action", required=True
@@ -349,17 +343,19 @@ def _dispatch(
             ),
             None,
         )
-    if operation == "section.search":
+    if operation == "search.pages":
         if args.query_stdin:
             query_data = read_stdin(stdin, max_bytes=MAX_QUERY_BYTES)
         else:
             with open_input_root(cast(str | None, args.input_root), environ) as input_root:
                 query_data = _read_sensitive(args, "query", stdin, input_root, MAX_QUERY_BYTES)
-        query = decode_text(query_data, label="search query", trim_terminal_newline=True)
-        request = SearchRequest(query=query, limit=args.limit, cursor=args.cursor)
-        return cast(
-            ClientResponse[object], client.search(args.section, request, token=caller_token)
-        ), None
+        try:
+            request = CurrentPageSearchRequest.from_dict(
+                _parse_json_object(query_data, label="search query")
+            )
+        except ValueError as exc:
+            raise input_error("search query did not match the expected schema") from exc
+        return cast(ClientResponse[object], client.search_pages(request, token=caller_token)), None
     if operation == "page.current":
         return cast(
             ClientResponse[object], client.get_page(args.section, args.page, token=caller_token)
@@ -459,25 +455,38 @@ def _read_sensitive(
 
 def _parse_json_object(data: bytes, *, label: str) -> dict[str, object]:
     try:
-        parsed: object = json.loads(data)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        parsed: object = json.loads(data, object_pairs_hook=_unique_json_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise input_error(f"{label} must be a valid UTF-8 JSON object") from exc
     if not isinstance(parsed, dict) or not all(isinstance(key, str) for key in parsed):
         raise input_error(f"{label} must be a JSON object")
     return cast(dict[str, object], parsed)
 
 
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON field")
+        result[key] = value
+    return result
+
+
 def _create_metadata(data: Mapping[str, object]) -> ArchiveCreateMetadata:
-    if set(data) != {"title", "occurred_at", "source"}:
-        raise input_error("create metadata requires exactly title, occurred_at, and source")
+    if not {"title", "source"} <= set(data) <= {"title", "occurred_at", "source"}:
+        raise input_error("create metadata requires title, source, and optional occurred_at")
     title = data["title"]
-    occurred_at = data["occurred_at"]
-    if not isinstance(title, str) or not isinstance(occurred_at, str):
-        raise input_error("create metadata title and occurred_at must be strings")
-    try:
-        timestamp: datetime = parse_rfc3339(occurred_at)
-    except ProtocolError as exc:
-        raise input_error("create metadata occurred_at must be accepted RFC 3339") from exc
+    if not isinstance(title, str):
+        raise input_error("create metadata title must be a string")
+    timestamp: datetime | None = None
+    if "occurred_at" in data:
+        occurred_at = data["occurred_at"]
+        if not isinstance(occurred_at, str):
+            raise input_error("create metadata occurred_at must be a string")
+        try:
+            timestamp = parse_rfc3339(occurred_at)
+        except ProtocolError as exc:
+            raise input_error("create metadata occurred_at must be accepted RFC 3339") from exc
     return ArchiveCreateMetadata(title=title, occurred_at=timestamp, source=_source(data["source"]))
 
 
@@ -531,7 +540,7 @@ def _map_problem(error: ProblemError, *, operation_id: str | None) -> CliError:
     if status == 401 or code in {"authentication_required", "invalid_token"}:
         return CliError(ExitCode.AUTH, "auth", code, "caller credential was rejected")
     if status == 403 or code == "insufficient_scope":
-        return CliError(ExitCode.SCOPE, "scope", code, "caller lacks the required Section action")
+        return CliError(ExitCode.SCOPE, "scope", code, "caller lacks the required action")
     if status == 404 or code == "resource_not_found":
         return CliError(
             ExitCode.NOT_FOUND, "not_found", code, "resource was not found or is hidden"

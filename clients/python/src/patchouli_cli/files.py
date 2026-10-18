@@ -10,7 +10,7 @@ from patchouli_cli.errors import input_error
 from patchouli_cli.secure_fs import SecureDirectory
 
 MAX_METADATA_BYTES = 64 * 1024
-MAX_QUERY_BYTES = 4_096
+MAX_QUERY_BYTES = 96 * 1_024
 MAX_MARKDOWN_BYTES = 2 * 1024 * 1024
 InputStream = BinaryIO | TextIO
 

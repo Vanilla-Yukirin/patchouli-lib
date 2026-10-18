@@ -70,8 +70,7 @@ patchouli whoami
 patchouli sections list [--limit N] [--cursor CURSOR]
 patchouli books list --section SECTION [--limit N] [--cursor CURSOR]
 patchouli pages list --section SECTION [--limit N] [--cursor CURSOR]
-patchouli section search --section SECTION (--query-file FILE | --query-stdin) \
-  [--limit N] [--cursor CURSOR]
+patchouli search (--query-file FILE | --query-stdin)
 patchouli page current --section SECTION --page PAGE
 patchouli page revision --section SECTION --page PAGE --revision NUMBER
 patchouli archive create --section SECTION --book BOOK \
@@ -89,6 +88,15 @@ patchouli archive revise --section SECTION --page PAGE --if-match '"strong-etag"
 请求元数据、幂等指纹、输出或诊断。每个路径组成部分都相对于已经验证的目录句柄遍历，
 因此并发替换路径名无法重定向已打开的读取。生产入口以二进制模式读取 stdin，避免
 Markdown 正文字节（包括换行符）被终端文本层规范化。
+
+搜索输入现在是 JSON 对象，例如
+`{"keywords":["技术","报告"],"tags_any":[],"libraries":null,"limit":20}`。
+可选时间字段 `occurred_from_us`／`occurred_before_us` 使用 UTC Unix 微秒。
+旧 `section search --section ...` 命令及其游标／片段响应已退役；请改用跨知识库
+`search`，返回当前 Page 的准确 Revision ID／序号和命中来源。
+服务未完成索引重建时会返回 `search_unavailable`，不是空结果。
+能力响应中的 `limits.max_query_bytes` 是兼容旧客户端保留的字段，不能用于截断新搜索；
+新搜索的请求、关键词及数组上限以索引就绪后公布的 `limits.search` 为准。
 
 `--output json` 会向 stdout 写入稳定的成功封装。供人阅读的输出也只用 stdout 返回
 数据。所有诊断都使用 stderr；错误输出经过脱敏，绝不显示内容、元数据、bearer 令牌
@@ -140,15 +148,16 @@ capabilities
 whoami
 sections_list
 books_list
-section_search
+pages_search
 page_current
 page_revision
 archive_create
 archive_revise
 ```
 
-工具绝不接受凭据、端点、日志路径、幂等键或本地文件路径。搜索查询和 Markdown 内容
-是有大小限制的内存 JSON 字符串。归档创建和修订是两个独立工具；修订需要强
+工具绝不接受凭据、端点、日志路径、幂等键或本地文件路径。`pages_search` 接受
+结构化关键词、Tag 身份、时间范围、Library 范围和 Top K；Markdown 内容是有大小
+限制的内存 JSON 字符串。归档创建和修订是两个独立工具；修订需要强
 `if_match`。返回的非机密 `operation_id` 可以提供给同一写入工具进行原样重放。
 调用方无关的日志绑定会在 `whoami` 前于本地检查，稳定调用方则在变更前检查。原始
 操作键始终是私有日志状态。

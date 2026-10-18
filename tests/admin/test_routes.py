@@ -4,25 +4,41 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from time import time_ns
 from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, delete, select, update
 from starlette.concurrency import run_in_threadpool as starlette_run_in_threadpool
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 import patchouli_lib.admin.router as admin_router
+from patchouli_lib.admin.master_audit import MasterAuditRepository
+from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.passwords import hash_password
+from patchouli_lib.admin.session import AdminSessionCodec
 from patchouli_lib.app import create_app
-from patchouli_lib.auth.models import Caller
+from patchouli_lib.auth.library_policy import LibraryAction, target_library_grants_digest
+from patchouli_lib.auth.models import (
+    AdminStructureAuditEvent,
+    AgentTokenValue,
+    Caller,
+    Credential,
+    MasterAuditEvent,
+    MasterIdentity,
+)
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import CallerKind
-from patchouli_lib.auth.service import AuthenticationError, AuthenticationService
+from patchouli_lib.auth.service import AuthenticationError, AuthenticationService, CredentialIssuer
 from patchouli_lib.config import Settings
+from patchouli_lib.database import immediate_transaction
+from patchouli_lib.library.models import Book, Library, Section
 
 _ORIGIN = "https://admin.example.invalid"
 _ADMIN_PASSWORD = "synthetic admin password"
+_MASTER_TOKEN = "synthetic master token material old 0001"
+_ROTATED_MASTER_TOKEN = "synthetic master token material new 0002"
 _ADMIN_PASSWORD_HASH = hash_password(
     _ADMIN_PASSWORD,
     salt_factory=lambda size: b"s" * size,
@@ -102,6 +118,34 @@ def _login(web: AdminWeb) -> str:
     return match.group(1)
 
 
+def _initialize_master(web: AdminWeb) -> None:
+    with immediate_transaction(web.engine) as connection:
+        MasterTokenRepository(
+            connection, identity_factory=lambda: "a" * 32
+        ).initialize_from_local_cli(_MASTER_TOKEN, now=1_000)
+
+
+def _login_master(web: AdminWeb) -> tuple[str, str]:
+    response = _post(web.client, "/admin/login", data={"password": _MASTER_TOKEN})
+    assert response.status_code == 303
+    assert response.headers["location"] == "/admin"
+    cookie = response.headers["set-cookie"]
+    assert "HttpOnly" in cookie
+    assert "Secure" in cookie
+    assert "SameSite=strict" in cookie
+    assert "Path=/admin" in cookie
+    assert _MASTER_TOKEN not in cookie
+    _assert_security_headers(response)
+    encoded = web.client.cookies.get(_SESSION_COOKIE) or ""
+    codec = AdminSessionCodec(b"s" * 32, ttl_seconds=600)
+    session = codec.verify_master(encoded)
+    assert session is not None
+    assert session.identity_id == "a" * 32
+    assert session.session_generation == 1
+    assert codec.verify(encoded) is None
+    return encoded, session.csrf_token
+
+
 def _bootstrap_data(csrf_token: str) -> dict[str, str]:
     return {
         "csrf_token": csrf_token,
@@ -126,6 +170,30 @@ def _metadata_from(response_text: str) -> tuple[str, str, str]:
     values = re.findall(r"<dd>([^<]+)</dd>", response_text)
     assert len(values) == 3
     return values[0], values[1], values[2]
+
+
+def _issue_web_agent(web: AdminWeb) -> tuple[str, str, str, str]:
+    csrf = _login(web)
+    bootstrapped = _post(web.client, "/admin/bootstrap", data=_bootstrap_data(csrf))
+    assert bootstrapped.status_code == 200
+    operator_token = _credential_from(bootstrapped.text)
+    provisioned = _post(
+        web.client,
+        "/admin/agents/provision",
+        data={
+            "csrf_token": csrf,
+            "operator_token": operator_token,
+            "library_name": "Synthetic Web Library",
+            "section_name": "Synthetic Web Section",
+            "agent_name": "Synthetic Web Agent",
+            "agent_description": "Synthetic Agent",
+            "credential_ttl_seconds": "3600",
+            "grants": ["section:query", "page:read"],
+        },
+    )
+    assert provisioned.status_code == 200
+    library_id, caller_id, credential_id = _metadata_from(provisioned.text)
+    return _credential_from(provisioned.text), library_id, caller_id, credential_id
 
 
 def test_production_private_http_preserves_login_csrf_and_token_boundaries(tmp_path: Path) -> None:
@@ -234,6 +302,7 @@ def test_multiple_entrypoints_work_without_origin_configuration(
         }
     )
     application = create_app(settings)
+    Caller.metadata.create_all(application.state.engine)
 
     with TestClient(application, base_url=origin, follow_redirects=False) as client:
         assert client.get("/admin/login").status_code == 200
@@ -300,6 +369,389 @@ def test_login_fails_closed_for_wrong_origin_password_and_form_shape(
         assert _ADMIN_PASSWORD not in response.text
         assert _SESSION_COOKIE not in response.cookies
         _assert_security_headers(response)
+
+
+def test_initialized_master_token_login_retires_legacy_web_login_but_not_operator(
+    admin_web: AdminWeb,
+) -> None:
+    # This is a test-only local initialization, never an HTTP setup path.
+    assert (
+        _post(admin_web.client, "/admin/login", data={"password": _MASTER_TOKEN}).status_code == 401
+    )
+
+    legacy_csrf = _login(admin_web)
+    legacy_encoded = admin_web.client.cookies.get(_SESSION_COOKIE) or ""
+    bootstrapped = _post(admin_web.client, "/admin/bootstrap", data=_bootstrap_data(legacy_csrf))
+    assert bootstrapped.status_code == 200
+    library_id, _, _ = _metadata_from(bootstrapped.text)
+    operator_token = _credential_from(bootstrapped.text)
+
+    _initialize_master(admin_web)
+    assert (
+        admin_web.client.get(
+            "/admin", headers={"Cookie": f"{_SESSION_COOKIE}={legacy_encoded}"}
+        ).status_code
+        == 303
+    )
+    assert (
+        admin_web.client.post(
+            "/admin/bootstrap",
+            data=_bootstrap_data(legacy_csrf),
+            headers={"Origin": _ORIGIN, "Cookie": f"{_SESSION_COOKIE}={legacy_encoded}"},
+        ).status_code
+        == 401
+    )
+    assert (
+        _post(admin_web.client, "/admin/login", data={"password": _ADMIN_PASSWORD}).status_code
+        == 401
+    )
+
+    wrong_origin = _post(
+        admin_web.client,
+        "/admin/login",
+        data={"password": _MASTER_TOKEN},
+        origin="https://wrong.example.invalid",
+    )
+    assert wrong_origin.status_code == 403
+    assert _SESSION_COOKIE not in wrong_origin.cookies
+
+    encoded, csrf = _login_master(admin_web)
+    assert admin_web.client.get("/admin").status_code == 200
+    setup = admin_web.client.get("/admin/setup")
+    assert setup.status_code == 200
+    assert "issue Agent Tokens from Identities" in setup.text
+    assert 'action="/admin/agents/revoke"' not in setup.text
+    assert 'action="/admin/agents/provision"' not in setup.text
+    assert admin_web.client.get("/api/v1/auth/whoami").status_code == 401
+    assert _post(admin_web.client, "/admin/logout", data={"csrf_token": "wrong"}).status_code == 403
+    rejected = _post(admin_web.client, "/admin/bootstrap", data=_bootstrap_data(csrf))
+    assert rejected.status_code == 403
+    assert "not available to Master Token sessions yet" in rejected.text
+    # Master restore now exists, but still requires a current Page ETag.
+    missing_etag = _post(
+        admin_web.client,
+        "/admin/libraries/x/sections/y/trash/z/restore",
+        data={"csrf_token": csrf},
+    )
+    assert missing_etag.status_code == 422
+    tag_path = f"/admin/libraries/{library_id}/tags"
+    assert (
+        _post(
+            admin_web.client,
+            tag_path,
+            data={"csrf_token": csrf, "name": "Synthetic Tag", "operator_token": operator_token},
+        ).status_code
+        == 422
+    )
+    assert (
+        _post(
+            admin_web.client,
+            tag_path,
+            data={"csrf_token": csrf, "name": "Synthetic Tag"},
+        ).status_code
+        == 303
+    )
+    assert _post(admin_web.client, "/admin/logout", data={"csrf_token": csrf}).status_code == 303
+    assert admin_web.client.get("/admin").status_code == 303
+
+    codec = AdminSessionCodec(b"s" * 32, ttl_seconds=600)
+    assert codec.verify(legacy_encoded) is not None
+    assert codec.verify_master(legacy_encoded) is None
+    assert encoded != legacy_encoded
+
+
+def test_master_session_creates_structure_with_atomic_identity_audit(admin_web: AdminWeb) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+
+    library = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Synthetic Master Library"},
+    )
+    assert library.status_code == 303
+    library_path = library.headers["location"]
+    section = _post(
+        admin_web.client,
+        f"{library_path}/sections",
+        data={"csrf_token": csrf, "name": "Synthetic Master Section", "description": "Brief"},
+    )
+    assert section.status_code == 303
+    section_path = section.headers["location"]
+    book = _post(
+        admin_web.client,
+        f"{section_path}/books",
+        data={"csrf_token": csrf, "name": "Synthetic Master Book", "summary": "Brief"},
+    )
+    assert book.status_code == 303
+    with admin_web.engine.connect() as connection:
+        assert len(connection.execute(select(Library.id)).all()) == 1
+        assert len(connection.execute(select(Section.id)).all()) == 1
+        assert len(connection.execute(select(Book.id)).all()) == 1
+        assert connection.execute(select(AdminStructureAuditEvent.id)).all() == []
+        events = connection.execute(
+            select(
+                MasterAuditEvent.action,
+                MasterAuditEvent.target_type,
+                MasterAuditEvent.target_id,
+                MasterAuditEvent.identity_id,
+                MasterAuditEvent.session_generation,
+            ).order_by(MasterAuditEvent.occurred_at)
+        ).all()
+    assert len(events) == 3
+    assert {(event.action, event.target_type) for event in events} == {
+        ("library.create", "library"),
+        ("section.create", "section"),
+        ("book.create", "book"),
+    }
+    assert {event.target_id for event in events} == {
+        library_path.rsplit("/", 1)[-1],
+        section_path.rsplit("/", 1)[-1],
+        book.headers["location"].rsplit("/", 1)[-1],
+    }
+    assert all(event.identity_id == "a" * 32 for event in events)
+    assert all(event.session_generation == 1 for event in events)
+
+
+def test_master_structure_write_rechecks_generation_inside_transaction(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+
+    async def rotate_before_action(action: Any, *args: Any) -> Any:
+        with immediate_transaction(admin_web.engine) as connection:
+            assert (
+                MasterTokenRepository(connection).rotate(
+                    _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
+                )
+                is not None
+            )
+        return await starlette_run_in_threadpool(action, *args)
+
+    monkeypatch.setattr(admin_router, "run_in_threadpool", rotate_before_action)
+    rejected = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Must Not Be Created"},
+    )
+    assert rejected.status_code == 401
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(Library.id)).all() == []
+        assert connection.execute(select(MasterAuditEvent.id)).all() == []
+
+
+def test_legacy_structure_write_rechecks_master_setup_inside_transaction(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    csrf = _login(admin_web)
+
+    async def initialize_before_action(action: Any, *args: Any) -> Any:
+        with immediate_transaction(admin_web.engine) as connection:
+            MasterTokenRepository(
+                connection, identity_factory=lambda: "a" * 32
+            ).initialize_from_local_cli(_MASTER_TOKEN, now=1_000)
+        return await starlette_run_in_threadpool(action, *args)
+
+    monkeypatch.setattr(admin_router, "run_in_threadpool", initialize_before_action)
+    rejected = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Must Not Be Created"},
+    )
+    assert rejected.status_code == 401
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(Library.id)).all() == []
+        assert connection.execute(select(AdminStructureAuditEvent.id)).all() == []
+
+
+def test_master_structure_write_requires_origin_csrf_and_committed_audit(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    path = "/admin/libraries"
+    fields = {"csrf_token": csrf, "name": "Must Not Be Created"}
+    assert (
+        _post(
+            admin_web.client, path, data=fields, origin="https://other.example.invalid"
+        ).status_code
+        == 403
+    )
+    assert _post(admin_web.client, path, data={**fields, "csrf_token": "wrong"}).status_code == 403
+
+    def reject_audit(self: MasterAuditRepository, **kwargs: Any) -> None:
+        raise RuntimeError("synthetic audit failure")
+
+    monkeypatch.setattr(MasterAuditRepository, "add_success", reject_audit)
+    assert _post(admin_web.client, path, data=fields).status_code == 500
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(Library.id)).all() == []
+        assert connection.execute(select(MasterAuditEvent.id)).all() == []
+
+
+@pytest.mark.parametrize("operation", ["rotate", "recover"])
+@pytest.mark.parametrize(
+    ("path", "expected_status"),
+    [
+        ("/admin", 303),
+        ("/admin/setup", 303),
+        ("/admin/libraries", 303),
+        ("/admin/guide", 303),
+        ("/admin/login", 200),
+    ],
+)
+def test_rotated_master_session_is_rejected_on_management_get(
+    admin_web: AdminWeb, path: str, expected_status: int, operation: str
+) -> None:
+    _initialize_master(admin_web)
+    encoded, _ = _login_master(admin_web)
+    with immediate_transaction(admin_web.engine) as connection:
+        repository = MasterTokenRepository(connection)
+        state = (
+            repository.rotate(_MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001)
+            if operation == "rotate"
+            else repository.recover_from_local_cli(_ROTATED_MASTER_TOKEN, now=1_001)
+        )
+        assert state is not None
+        assert state.session_generation == 2
+
+    response = admin_web.client.get(path, headers={"Cookie": f"{_SESSION_COOKIE}={encoded}"})
+    assert response.status_code == expected_status
+    assert _MASTER_TOKEN not in response.text
+
+
+@pytest.mark.parametrize("operation", ["rotate", "recover"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/admin/logout",
+        "/admin/bootstrap",
+        "/admin/libraries",
+        "/admin/libraries/x/tags",
+        "/admin/libraries/x/sections/y/trash/z/restore",
+    ],
+)
+def test_rotated_master_session_is_rejected_on_management_post(
+    admin_web: AdminWeb, path: str, operation: str
+) -> None:
+    _initialize_master(admin_web)
+    encoded, csrf = _login_master(admin_web)
+    with immediate_transaction(admin_web.engine) as connection:
+        repository = MasterTokenRepository(connection)
+        state = (
+            repository.rotate(_MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001)
+            if operation == "rotate"
+            else repository.recover_from_local_cli(_ROTATED_MASTER_TOKEN, now=1_001)
+        )
+        assert state is not None
+
+    response = admin_web.client.post(
+        path,
+        data={"csrf_token": csrf},
+        headers={"Origin": _ORIGIN, "Cookie": f"{_SESSION_COOKIE}={encoded}"},
+    )
+    assert response.status_code == 401
+    assert _MASTER_TOKEN not in response.text
+
+
+def test_missing_master_identity_rejects_existing_v2_session(admin_web: AdminWeb) -> None:
+    _initialize_master(admin_web)
+    encoded, csrf = _login_master(admin_web)
+    with immediate_transaction(admin_web.engine) as connection:
+        connection.execute(delete(MasterIdentity))
+
+    assert (
+        admin_web.client.get(
+            "/admin", headers={"Cookie": f"{_SESSION_COOKIE}={encoded}"}
+        ).status_code
+        == 303
+    )
+    assert (
+        admin_web.client.post(
+            "/admin/logout",
+            data={"csrf_token": csrf},
+            headers={"Origin": _ORIGIN, "Cookie": f"{_SESSION_COOKIE}={encoded}"},
+        ).status_code
+        == 401
+    )
+    assert (
+        _post(admin_web.client, "/admin/login", data={"password": _MASTER_TOKEN}).status_code == 401
+    )
+
+
+def test_matching_master_token_and_legacy_password_issues_revocable_v2_cookie(
+    tmp_path: Path,
+) -> None:
+    settings = Settings.model_validate(
+        {
+            "environment": "test",
+            "database_url": f"sqlite:///{(tmp_path / 'matching-master.db').as_posix()}",
+            "admin_password_hash": hash_password(
+                _MASTER_TOKEN, salt_factory=lambda size: b"s" * size, iterations=300_000
+            ),
+            "admin_session_signing_secret": "s" * 32,
+        }
+    )
+    application = create_app(settings)
+    Caller.metadata.create_all(application.state.engine)
+    with TestClient(application, base_url=_ORIGIN, follow_redirects=False) as client:
+        web = AdminWeb(client, application.state.engine)
+        _initialize_master(web)
+        encoded, _ = _login_master(web)
+
+        with immediate_transaction(web.engine) as connection:
+            assert (
+                MasterTokenRepository(connection).rotate(
+                    _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
+                )
+                is not None
+            )
+        assert (
+            client.get("/admin", headers={"Cookie": f"{_SESSION_COOKIE}={encoded}"}).status_code
+            == 303
+        )
+        assert _post(client, "/admin/login", data={"password": _MASTER_TOKEN}).status_code == 401
+        rotated_login = _post(client, "/admin/login", data={"password": _ROTATED_MASTER_TOKEN})
+        assert rotated_login.status_code == 303
+        rotated_cookie = client.cookies.get(_SESSION_COOKIE) or ""
+        rotated_session = AdminSessionCodec(b"s" * 32, ttl_seconds=600).verify_master(
+            rotated_cookie
+        )
+        assert rotated_session is not None
+        assert rotated_session.session_generation == 2
+
+
+def test_without_legacy_hash_v1_cookie_and_password_are_rejected(tmp_path: Path) -> None:
+    settings = Settings.model_validate(
+        {
+            "environment": "test",
+            "database_url": f"sqlite:///{(tmp_path / 'master-only.db').as_posix()}",
+            "admin_session_signing_secret": "s" * 32,
+        }
+    )
+    application = create_app(settings)
+    Caller.metadata.create_all(application.state.engine)
+    with TestClient(application, base_url=_ORIGIN, follow_redirects=False) as client:
+        encoded, _ = AdminSessionCodec(b"s" * 32, ttl_seconds=600).issue()
+        assert (
+            client.get("/admin", headers={"Cookie": f"{_SESSION_COOKIE}={encoded}"}).status_code
+            == 303
+        )
+        assert (
+            client.post(
+                "/admin/logout",
+                data={"csrf_token": "not-admitted"},
+                headers={"Origin": _ORIGIN, "Cookie": f"{_SESSION_COOKIE}={encoded}"},
+            ).status_code
+            == 401
+        )
+        assert _post(client, "/admin/login", data={"password": _ADMIN_PASSWORD}).status_code == 401
+
+        web = AdminWeb(client, application.state.engine)
+        _initialize_master(web)
+        _login_master(web)
+        assert client.get("/admin").status_code == 200
 
 
 @pytest.mark.parametrize(
@@ -443,6 +895,7 @@ def test_secure_cookie_depends_on_request_transport_and_http_opt_in(
         }
     )
     app = create_app(settings)
+    Caller.metadata.create_all(app.state.engine)
     # 同一个应用通过多个入口访问，不需要为入口名称分别修改设置。
     for origin in ("http://private.example.invalid:8080", "https://public.example.invalid"):
         with TestClient(app, base_url=origin, follow_redirects=False) as client:
@@ -508,6 +961,7 @@ def test_chinese_language_persists_across_dashboard_guides_and_form_errors(
 
     csrf = _login(admin_web)
     dashboard = admin_web.client.get("/admin")
+    setup = admin_web.client.get("/admin/setup")
     guide = admin_web.client.get("/admin/guide")
     agent = admin_web.client.get("/admin/agent")
     mcp = admin_web.client.get("/admin/mcp")
@@ -523,33 +977,36 @@ def test_chinese_language_persists_across_dashboard_guides_and_form_errors(
     )
 
     assert dashboard.headers["content-language"] == "zh-CN"
-    assert "首次设置" in dashboard.text
-    assert "只有明确要新建另一个知识库时才再次填写" in dashboard.text
-    assert "个人使用通常一个知识库就够了" in dashboard.text
-    assert "Agent 权限的边界" in dashboard.text
-    assert "首次生成的管理员令牌可以使用多久" in dashboard.text
-    assert "管理员令牌有效期（秒）" in dashboard.text
-    assert 'aria-describedby="library_name-help"' in dashboard.text
-    assert 'class="field-help" id="library_name-help"' in dashboard.text
-    assert dashboard.text.count("可选。") >= 3
-    assert "当前管理员凭据" in dashboard.text
+    assert "内容近况" in dashboard.text
+    assert 'href="/admin/setup"' in dashboard.text
+    assert "首次设置" in setup.text
+    assert "只有明确要新建另一个知识库时才再次填写" in setup.text
+    assert "个人使用通常一个知识库就够了" in setup.text
+    assert "Agent 权限的边界" in setup.text
+    assert "首次生成的管理员令牌可以使用多久" in setup.text
+    assert "管理员令牌有效期（秒）" in setup.text
+    assert 'aria-describedby="library_name-help"' in setup.text
+    assert 'class="field-help" id="library_name-help"' in setup.text
+    assert setup.text.count("可选。") >= 3
+    assert "当前管理员凭据" in setup.text
     assert "退出登录" in dashboard.text
     assert "管理员指南" in guide.text
     assert "恢复管理员凭据会使此前仍有效的管理员凭据失效" in guide.text
     assert "Agent 使用说明" in agent.text
     assert "MCP 配置" in mcp.text
     assert "提交的表单包含未知字段。" in invalid_form.text
-    assert 'href="/admin?lang=en"' in invalid_form.text
+    assert 'href="/admin/setup?lang=en"' in invalid_form.text
     assert "/admin/bootstrap?lang=" not in invalid_form.text
     assert initialized.status_code == 200
     assert "知识库已初始化" in initialized.text
+    assert 'href="/admin/setup"' in initialized.text
     assert "此值仅在本次响应中显示" in initialized.text
     assert "知识库 ID" in initialized.text
     assert "调用方 ID" in initialized.text
     assert "凭据 ID" in initialized.text
     assert 'class="language-switch"' not in initialized.text
     assert "/admin/bootstrap?lang=" not in initialized.text
-    for response in (dashboard, guide, agent, mcp, invalid_form, initialized):
+    for response in (dashboard, setup, guide, agent, mcp, invalid_form, initialized):
         _assert_security_headers(response)
 
 
@@ -557,26 +1014,31 @@ def test_login_session_protected_guides_and_logout(admin_web: AdminWeb) -> None:
     unauthenticated = admin_web.client.get("/admin")
     assert unauthenticated.status_code == 303
     assert unauthenticated.headers["location"] == "/admin/login"
+    assert admin_web.client.get("/admin/setup").status_code == 303
     sign_in = admin_web.client.get("/admin/login")
     assert "run host commands" in sign_in.text
 
     csrf = _login(admin_web)
     dashboard = admin_web.client.get("/admin")
-    assert "First-time setup" in dashboard.text
-    assert "One Library is usually enough for personal use" in dashboard.text
-    assert "only when you deliberately want another Library" in dashboard.text
-    assert "3600 seconds is one hour" in dashboard.text
-    assert _ADMIN_PASSWORD not in dashboard.text
+    setup = admin_web.client.get("/admin/setup")
+    assert "Content activity" in dashboard.text
+    assert "First-time setup" not in dashboard.text
+    assert "First-time setup" in setup.text
+    assert "One Library is usually enough for personal use" in setup.text
+    assert "only when you deliberately want another Library" in setup.text
+    assert "3600 seconds is one hour" in setup.text
+    assert _ADMIN_PASSWORD not in setup.text
 
     guide = admin_web.client.get("/admin/guide")
     agent = admin_web.client.get("/admin/agent")
     mcp = admin_web.client.get("/admin/mcp")
     stylesheet = admin_web.client.get("/admin/style.css")
     assert "no image update" in guide.text
-    assert "patchouli capabilities" in agent.text
+    assert 'href="/connect"' in agent.text
+    assert "Standard HTTP" in agent.text
     assert "patchouli-mcp" in mcp.text
     assert stylesheet.headers["content-type"].startswith("text/css")
-    for response in (dashboard, guide, agent, mcp, stylesheet):
+    for response in (dashboard, setup, guide, agent, mcp, stylesheet):
         _assert_security_headers(response)
 
     rejected = _post(
@@ -788,10 +1250,1086 @@ def test_bootstrap_recovery_provision_and_revoke_without_secret_retention(
     )
     assert revoked.status_code == 200
     assert "no longer active" in revoked.text
+    assert 'href="/admin/setup"' in revoked.text
     assert recovered_token not in revoked.text
 
     with admin_web.engine.connect() as connection, pytest.raises(AuthenticationError):
         AuthenticationService(AuthRepository(connection)).authenticate(agent_token)
+
+
+def test_agent_token_reveal_requires_current_master_session_origin_and_csrf(
+    admin_web: AdminWeb,
+) -> None:
+    token, library_id, caller_id, credential_id = _issue_web_agent(admin_web)
+    detail_path = f"/admin/libraries/{library_id}/callers/{caller_id}"
+    reveal_path = f"{detail_path}/credentials/{credential_id}/reveal"
+    legacy_page = admin_web.client.get(detail_path)
+    assert legacy_page.status_code == 200
+    assert token not in legacy_page.text
+    assert "token-reveal" not in legacy_page.text
+    assert f'action="{detail_path}/credentials/{credential_id}/revoke"' not in legacy_page.text
+    legacy_post = _post(admin_web.client, reveal_path, data={"csrf_token": "wrong"})
+    assert legacy_post.status_code == 403
+    assert token not in legacy_post.text
+    admin_web.client.cookies.clear()
+    unsigned = _post(admin_web.client, reveal_path, data={"csrf_token": "wrong"})
+    assert unsigned.status_code == 401
+    assert token not in unsigned.text
+
+    _initialize_master(admin_web)
+    encoded, csrf = _login_master(admin_web)
+    detail = admin_web.client.get(detail_path)
+    assert detail.status_code == 200
+    assert token not in detail.text
+    assert f"plb1…{token[-4:]}" in detail.text
+    assert f'action="{reveal_path}"' in detail.text
+    assert f'action="{detail_path}/credentials/{credential_id}/revoke"' in detail.text
+    assert (
+        f'<p class="revoke-target">Credential ID: <code>{credential_id}</code></p>' in detail.text
+    )
+    assert 'src="/admin/reveal.js"' in detail.text
+    assert "script-src 'self'" in detail.headers["content-security-policy"]
+    assert "connect-src 'self'" in detail.headers["content-security-policy"]
+    assert "'unsafe-inline'" not in detail.headers["content-security-policy"]
+    assert "Clipboard unavailable. Select the displayed Token to copy it manually." in detail.text
+    chinese_detail = admin_web.client.get(f"{detail_path}?lang=zh-CN")
+    assert "剪贴板不可用。请选中显示的 Token 手动复制。" in chinese_detail.text
+    dashboard = admin_web.client.get("/admin")
+    assert "connect-src 'self'" not in dashboard.headers["content-security-policy"]
+    script = admin_web.client.get("/admin/reveal.js")
+    assert script.status_code == 200
+    assert "navigator.clipboard.writeText" in script.text
+    assert "form.dataset.manualCopyLabel" in script.text
+    assert token not in script.text
+    _assert_security_headers(script)
+    assert admin_web.client.get(reveal_path).status_code == 405
+
+    for data, origin, status in (
+        ({"csrf_token": csrf}, "https://other.example.invalid", 403),
+        ({"csrf_token": "wrong"}, _ORIGIN, 403),
+        ({"csrf_token": csrf, "extra": "x"}, _ORIGIN, 422),
+    ):
+        rejected = _post(admin_web.client, reveal_path, data=data, origin=origin)
+        assert rejected.status_code == status
+        assert token not in rejected.text
+        _assert_security_headers(rejected)
+
+    for wrong_path in (
+        f"{detail_path}/credentials/{'f' * 32}/reveal",
+        f"/admin/libraries/{'f' * 32}/callers/{caller_id}/credentials/{credential_id}/reveal",
+        f"/admin/libraries/{library_id}/callers/{'f' * 32}/credentials/{credential_id}/reveal",
+    ):
+        rejected = _post(admin_web.client, wrong_path, data={"csrf_token": csrf})
+        assert rejected.status_code == 404
+        assert token not in rejected.text
+
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(MasterAuditEvent.id)).all() == []
+
+    revealed = _post(admin_web.client, reveal_path, data={"csrf_token": csrf})
+    assert revealed.status_code == 200
+    assert revealed.text == token
+    assert revealed.headers["content-type"].startswith("text/plain")
+    assert token not in str(revealed.request.url)
+    assert token not in (admin_web.client.cookies.get(_SESSION_COOKIE) or "")
+    _assert_security_headers(revealed)
+    assert _post(admin_web.client, reveal_path, data={"csrf_token": csrf}).text == token
+    with admin_web.engine.connect() as connection:
+        events = connection.execute(
+            select(
+                MasterAuditEvent.identity_id,
+                MasterAuditEvent.session_generation,
+                MasterAuditEvent.session_fingerprint,
+                MasterAuditEvent.action,
+                MasterAuditEvent.target_type,
+                MasterAuditEvent.target_id,
+            )
+        ).all()
+    assert len(events) == 2
+    for event in events:
+        assert event.identity_id == "a" * 32
+        assert event.session_generation == 1
+        assert len(event.session_fingerprint) == 32
+        assert event.action == "auth.agent_token.reveal"
+        assert event.target_type == "credential"
+        assert event.target_id == credential_id
+        assert token.encode() not in bytes(event.session_fingerprint)
+
+    with immediate_transaction(admin_web.engine) as connection:
+        assert (
+            MasterTokenRepository(connection).rotate(
+                _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
+            )
+            is not None
+        )
+    rotated = admin_web.client.post(
+        reveal_path,
+        data={"csrf_token": csrf},
+        headers={"Origin": _ORIGIN, "Cookie": f"{_SESSION_COOKIE}={encoded}"},
+    )
+    assert rotated.status_code == 401
+    assert token not in rotated.text
+
+
+def test_master_session_revokes_exact_agent_token_with_atomic_audit(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token, library_id, caller_id, credential_id = _issue_web_agent(admin_web)
+    detail_path = f"/admin/libraries/{library_id}/callers/{caller_id}"
+    revoke_path = f"{detail_path}/credentials/{credential_id}/revoke"
+    reveal_path = f"{detail_path}/credentials/{credential_id}/reveal"
+    legacy_csrf = _login(admin_web)
+    assert _post(admin_web.client, revoke_path, data={"csrf_token": legacy_csrf}).status_code == 403
+
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    form = {"csrf_token": csrf}
+    for data, origin, status in (
+        (form, "https://other.example.invalid", 403),
+        ({"csrf_token": "wrong"}, _ORIGIN, 403),
+        ({**form, "extra": "x"}, _ORIGIN, 422),
+    ):
+        rejected = _post(admin_web.client, revoke_path, data=data, origin=origin)
+        assert rejected.status_code == status
+        assert token not in rejected.text
+    for path in (
+        f"{detail_path}/credentials/{'f' * 32}/revoke",
+        f"/admin/libraries/{'f' * 32}/callers/{caller_id}/credentials/{credential_id}/revoke",
+        f"/admin/libraries/{library_id}/callers/{'f' * 32}/credentials/{credential_id}/revoke",
+    ):
+        assert _post(admin_web.client, path, data=form).status_code == 404
+
+    with monkeypatch.context() as patcher:
+
+        def reject_audit(self: MasterAuditRepository, **kwargs: Any) -> None:
+            raise RuntimeError("synthetic audit failure")
+
+        patcher.setattr(MasterAuditRepository, "add_success", reject_audit)
+        failed = _post(admin_web.client, revoke_path, data=form)
+        assert failed.status_code == 500
+        assert token not in failed.text
+    with admin_web.engine.connect() as connection:
+        credential = AuthRepository(connection).get_credential(library_id, caller_id, credential_id)
+        assert credential is not None and credential.revoked_at is None
+        assert connection.execute(select(AgentTokenValue.credential_id)).scalars().all() == [
+            credential_id
+        ]
+        assert connection.execute(select(MasterAuditEvent.id)).all() == []
+        assert (
+            AuthenticationService(AuthRepository(connection)).authenticate(token).caller.id
+            == caller_id
+        )
+
+    revoked = _post(admin_web.client, revoke_path, data=form)
+    assert revoked.status_code == 303
+    assert revoked.headers["location"] == detail_path
+    assert token not in str(revoked.request.url)
+    assert token not in (admin_web.client.cookies.get(_SESSION_COOKIE) or "")
+    _assert_security_headers(revoked)
+    with admin_web.engine.connect() as connection:
+        credential = AuthRepository(connection).get_credential(library_id, caller_id, credential_id)
+        assert credential is not None and credential.revoked_at is not None
+        assert connection.execute(select(AgentTokenValue.credential_id)).all() == []
+        events = [
+            tuple(row)
+            for row in connection.execute(
+                select(
+                    MasterAuditEvent.action,
+                    MasterAuditEvent.target_type,
+                    MasterAuditEvent.target_id,
+                )
+            )
+        ]
+        with pytest.raises(AuthenticationError):
+            AuthenticationService(AuthRepository(connection)).authenticate(token)
+    assert events == [("auth.agent_credential.revoke", "credential", credential_id)]
+    assert _post(admin_web.client, reveal_path, data=form).status_code == 410
+    assert _post(admin_web.client, revoke_path, data=form).status_code == 303
+    with admin_web.engine.connect() as connection:
+        assert len(connection.execute(select(MasterAuditEvent.id)).all()) == 1
+
+
+def test_master_session_provisions_agent_with_explicit_cross_library_grants(
+    admin_web: AdminWeb,
+) -> None:
+    legacy_csrf = _login(admin_web)
+    assert 'action="/admin/agents/create"' not in admin_web.client.get("/admin/agents").text
+    legacy = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": legacy_csrf,
+            "home_library_id": "f" * 32,
+            "agent_name": "Not created",
+            "credential_ttl_seconds": "3600",
+        },
+    )
+    assert legacy.status_code == 403
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    home = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Synthetic Agent Home"},
+    )
+    target = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Synthetic Agent Target"},
+    )
+    assert home.status_code == target.status_code == 303
+    home_id = home.headers["location"].rsplit("/", 1)[-1]
+    target_id = target.headers["location"].rsplit("/", 1)[-1]
+    page = admin_web.client.get("/admin/agents?lang=zh-CN")
+    assert page.status_code == 200
+    assert 'action="/admin/agents/create"' in page.text
+    assert f'value="{home_id}:read"' in page.text
+    assert f'value="{target_id}:write"' in page.text
+    assert "写入不自动包含读取" in page.text
+    form = {
+        "csrf_token": csrf,
+        "home_library_id": home_id,
+        "agent_name": "Synthetic Cross-Library Agent",
+        "agent_description": "Synthetic device",
+        "credential_ttl_seconds": "3600",
+        "grants": [f"{home_id}:read", f"{target_id}:write"],
+    }
+    for data, origin, status in (
+        (form, "https://other.example.invalid", 403),
+        ({**form, "csrf_token": "wrong"}, _ORIGIN, 403),
+        ({**form, "extra": "x"}, _ORIGIN, 422),
+        ({**form, "grants": [f"{home_id}:read", f"{home_id}:read"]}, _ORIGIN, 422),
+        ({**form, "grants": [f"{'f' * 32}:read"]}, _ORIGIN, 404),
+    ):
+        assert (
+            _post(admin_web.client, "/admin/agents/create", data=data, origin=origin).status_code
+            == status
+        )
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(Caller.id).where(Caller.kind == "agent")).all() == []
+
+    created = _post(admin_web.client, "/admin/agents/create", data=form)
+    assert created.status_code == 200
+    token = _credential_from(created.text)
+    result_home, caller_id, credential_id = _metadata_from(created.text)
+    assert result_home == home_id
+    assert "此值可在 Agent 详情页经主会话再次显示" in created.text
+    assert token not in str(created.request.url)
+    assert token not in (admin_web.client.cookies.get(_SESSION_COOKIE) or "")
+    _assert_security_headers(created)
+    whoami = admin_web.client.get(
+        "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert whoami.status_code == 200
+    payload = whoami.json()
+    assert payload["policy_mode"] == "library_grants"
+    assert payload["grants"] == []
+    assert payload["library_grants"] == sorted(
+        [
+            {"library_id": home_id, "actions": ["read"]},
+            {"library_id": target_id, "actions": ["write"]},
+        ],
+        key=lambda grant: grant["library_id"],
+    )
+    assert admin_web.client.get("/api/v1/auth/whoami").status_code == 401
+    detail_path = f"/admin/libraries/{home_id}/callers/{caller_id}"
+    detail = admin_web.client.get(detail_path)
+    assert detail.status_code == 200
+    assert token not in detail.text
+    revealed = _post(
+        admin_web.client,
+        f"{detail_path}/credentials/{credential_id}/reveal",
+        data={"csrf_token": csrf},
+    )
+    assert revealed.status_code == 200
+    assert revealed.text == token
+
+
+def test_master_agent_metadata_editor_is_scoped_safe_and_current(admin_web: AdminWeb) -> None:
+    legacy_csrf = _login(admin_web)
+    assert (
+        _post(
+            admin_web.client,
+            f"/admin/libraries/{'f' * 32}/callers/{'e' * 32}/metadata",
+            data={"csrf_token": legacy_csrf},
+        ).status_code
+        == 403
+    )
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    home = _post(
+        admin_web.client, "/admin/libraries", data={"csrf_token": csrf, "name": "Edit Home"}
+    )
+    other = _post(
+        admin_web.client, "/admin/libraries", data={"csrf_token": csrf, "name": "Edit Other"}
+    )
+    home_id = home.headers["location"].rsplit("/", 1)[-1]
+    other_id = other.headers["location"].rsplit("/", 1)[-1]
+    issued = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": csrf,
+            "home_library_id": home_id,
+            "agent_name": "Editable Agent",
+            "agent_description": "Initial description",
+            "credential_ttl_seconds": "3600",
+            "grants": [f"{other_id}:read"],
+        },
+    )
+    assert issued.status_code == 200
+    token = _credential_from(issued.text)
+    _, caller_id, credential_id = _metadata_from(issued.text)
+    detail_path = f"/admin/libraries/{home_id}/callers/{caller_id}"
+    edit_path = f"{detail_path}/metadata"
+    detail = admin_web.client.get(detail_path)
+    assert detail.status_code == 200
+    assert f'action="{edit_path}"' in detail.text
+    assert token not in detail.text
+    match = re.search(r'name="expected_updated_at" value="(\d+)"', detail.text)
+    assert match is not None
+    old_version = match.group(1)
+    form = {
+        "csrf_token": csrf,
+        "expected_updated_at": old_version,
+        "name": '<img src=x onerror="alert(1)">',
+        "description": "<script>alert(1)</script>",
+    }
+    assert (
+        _post(
+            admin_web.client, edit_path, data=form, origin="https://other.example.invalid"
+        ).status_code
+        == 403
+    )
+    assert (
+        _post(admin_web.client, edit_path, data={**form, "csrf_token": "wrong"}).status_code == 403
+    )
+    assert _post(admin_web.client, edit_path, data={**form, "extra": "x"}).status_code == 422
+    wrong_home_path = f"/admin/libraries/{other_id}/callers/{caller_id}/metadata"
+    assert _post(admin_web.client, wrong_home_path, data=form).status_code == 404
+    edited = _post(admin_web.client, edit_path, data=form)
+    assert edited.status_code == 303
+    shown = admin_web.client.get(detail_path)
+    assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in shown.text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in shown.text
+    assert "<script>alert(1)</script>" not in shown.text
+    assert token not in shown.text
+    whoami = admin_web.client.get(
+        "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert whoami.status_code == 200
+    assert whoami.json()["name"] == form["name"]
+    assert whoami.json()["description"] == form["description"]
+    assert whoami.json()["library_grants"] == [{"library_id": other_id, "actions": ["read"]}]
+    stale = _post(admin_web.client, edit_path, data=form)
+    assert stale.status_code == 409
+    assert 'src="/admin/reveal.js"' in stale.text
+    assert "script-src 'self'" in stale.headers["content-security-policy"]
+    current_version = re.search(r'name="expected_updated_at" value="(\d+)"', shown.text)
+    assert current_version is not None
+    duplicate = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": csrf,
+            "home_library_id": home_id,
+            "agent_name": "Other Agent",
+            "credential_ttl_seconds": "3600",
+        },
+    )
+    assert duplicate.status_code == 200
+    duplicate_form = {
+        **form,
+        "expected_updated_at": current_version.group(1),
+        "name": "Other Agent",
+    }
+    assert _post(admin_web.client, edit_path, data=duplicate_form).status_code == 409
+    assert admin_web.client.get(detail_path).status_code == 200
+    with admin_web.engine.connect() as connection:
+        assert (
+            connection.scalar(
+                select(MasterAuditEvent.id).where(
+                    MasterAuditEvent.action == "auth.agent.metadata_update"
+                )
+            )
+            is not None
+        )
+        assert (
+            connection.scalar(
+                select(AgentTokenValue.token_value).where(
+                    AgentTokenValue.credential_id == credential_id
+                )
+            )
+            == token
+        )
+        assert (
+            connection.scalar(select(Credential.id).where(Credential.id == credential_id))
+            == credential_id
+        )
+    admin_web.client.cookies.set(_SESSION_COOKIE, "", path="/admin")
+    assert _post(admin_web.client, edit_path, data=form).status_code == 401
+
+
+def test_master_agent_metadata_edit_rechecks_session_generation(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    library = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Generation Home"},
+    )
+    home_id = library.headers["location"].rsplit("/", 1)[-1]
+    issued = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": csrf,
+            "home_library_id": home_id,
+            "agent_name": "Generation Agent",
+            "credential_ttl_seconds": "3600",
+        },
+    )
+    _, caller_id, _ = _metadata_from(issued.text)
+    edit_path = f"/admin/libraries/{home_id}/callers/{caller_id}/metadata"
+    detail = admin_web.client.get(f"/admin/libraries/{home_id}/callers/{caller_id}")
+    version = re.search(r'name="expected_updated_at" value="(\d+)"', detail.text)
+    assert version is not None
+
+    async def rotate_master_before_action(action: Any, *args: Any, **kwargs: Any) -> Any:
+        with immediate_transaction(admin_web.engine) as connection:
+            assert (
+                MasterTokenRepository(connection).rotate(
+                    _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
+                )
+                is not None
+            )
+        return await starlette_run_in_threadpool(action, *args, **kwargs)
+
+    monkeypatch.setattr(admin_router, "run_in_threadpool", rotate_master_before_action)
+    rejected = _post(
+        admin_web.client,
+        edit_path,
+        data={
+            "csrf_token": csrf,
+            "expected_updated_at": version.group(1),
+            "name": "Rejected rename",
+            "description": "",
+        },
+    )
+    assert rejected.status_code == 401
+    with admin_web.engine.connect() as connection:
+        caller = AuthRepository(connection).get_caller(home_id, caller_id)
+        assert caller is not None and caller.name == "Generation Agent"
+        assert (
+            connection.execute(
+                select(MasterAuditEvent.id).where(
+                    MasterAuditEvent.action == "auth.agent.metadata_update"
+                )
+            ).all()
+            == []
+        )
+
+
+def test_master_agent_provision_accepts_many_explicit_library_grants(
+    admin_web: AdminWeb,
+) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    library_ids: list[str] = []
+    for index in range(14):
+        created = _post(
+            admin_web.client,
+            "/admin/libraries",
+            data={"csrf_token": csrf, "name": f"Synthetic Grant Library {index}"},
+        )
+        assert created.status_code == 303
+        library_ids.append(created.headers["location"].rsplit("/", 1)[-1])
+    grants = [
+        f"{library_id}:{action}" for library_id in library_ids for action in ("read", "write")
+    ]
+    created = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": csrf,
+            "home_library_id": library_ids[0],
+            "agent_name": "Synthetic Many Grants Agent",
+            "agent_description": "Synthetic grant breadth",
+            "credential_ttl_seconds": "3600",
+            "grants": grants,
+        },
+    )
+    assert created.status_code == 200
+    token = _credential_from(created.text)
+    whoami = admin_web.client.get(
+        "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert whoami.status_code == 200
+    assert len(whoami.json()["library_grants"]) == 14
+    assert all(grant["actions"] == ["read", "write"] for grant in whoami.json()["library_grants"])
+
+
+def test_master_session_rotates_exact_library_agent_token_without_leaking_old_value(
+    admin_web: AdminWeb,
+) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    library = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Synthetic Rotation Library"},
+    )
+    assert library.status_code == 303
+    library_id = library.headers["location"].rsplit("/", 1)[-1]
+    issued = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": csrf,
+            "home_library_id": library_id,
+            "agent_name": "Synthetic Rotating Agent",
+            "credential_ttl_seconds": "3600",
+            "grants": [f"{library_id}:read"],
+        },
+    )
+    assert issued.status_code == 200
+    old_token = _credential_from(issued.text)
+    _, caller_id, old_id = _metadata_from(issued.text)
+    detail_path = f"/admin/libraries/{library_id}/callers/{caller_id}"
+    rotate_path = f"{detail_path}/credentials/{old_id}/rotate"
+    detail = admin_web.client.get(detail_path + "?lang=zh-CN")
+    assert detail.status_code == 200
+    assert f'action="{rotate_path}"' in detail.text
+    assert "逐知识库授权" in detail.text
+    assert " — 读取" in detail.text
+    assert old_token not in detail.text
+    form = {"csrf_token": csrf, "credential_ttl_seconds": "7200"}
+    assert (
+        _post(
+            admin_web.client, rotate_path, data=form, origin="https://other.example.invalid"
+        ).status_code
+        == 403
+    )
+    assert (
+        _post(admin_web.client, rotate_path, data={**form, "csrf_token": "bad"}).status_code == 403
+    )
+    assert _post(admin_web.client, rotate_path, data={**form, "extra": "x"}).status_code == 422
+    rotated = _post(admin_web.client, rotate_path, data=form)
+    assert rotated.status_code == 200
+    new_token = _credential_from(rotated.text)
+    _, new_caller_id, new_id = _metadata_from(rotated.text)
+    assert new_caller_id == caller_id
+    assert new_id != old_id
+    assert new_token != old_token
+    assert old_token not in rotated.text
+    assert new_token not in str(rotated.request.url)
+    assert new_token not in (admin_web.client.cookies.get(_SESSION_COOKIE) or "")
+    _assert_security_headers(rotated)
+    assert (
+        admin_web.client.get(
+            "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {old_token}"}
+        ).status_code
+        == 401
+    )
+    new_identity = admin_web.client.get(
+        "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {new_token}"}
+    )
+    assert new_identity.status_code == 200
+    assert new_identity.json()["library_grants"] == [
+        {"library_id": library_id, "actions": ["read"]}
+    ]
+    assert _post(admin_web.client, rotate_path, data=form).status_code == 409
+    assert (
+        _post(
+            admin_web.client,
+            f"{detail_path}/credentials/{old_id}/reveal",
+            data={"csrf_token": csrf},
+        ).status_code
+        == 410
+    )
+    revealed = _post(
+        admin_web.client,
+        f"{detail_path}/credentials/{new_id}/reveal",
+        data={"csrf_token": csrf},
+    )
+    assert revealed.status_code == 200
+    assert revealed.text == new_token
+
+
+def test_master_grant_editor_changes_only_target_token_with_csrf_and_stale_form_checks(
+    admin_web: AdminWeb,
+) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    home = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Synthetic Grants Home"},
+    )
+    target = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Synthetic Grants Target"},
+    )
+    assert home.status_code == target.status_code == 303
+    home_id = home.headers["location"].rsplit("/", 1)[-1]
+    target_id = target.headers["location"].rsplit("/", 1)[-1]
+    issued = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": csrf,
+            "home_library_id": home_id,
+            "agent_name": "Synthetic Grant Editor Agent",
+            "credential_ttl_seconds": "3600",
+            "grants": [f"{home_id}:read", f"{target_id}:write"],
+        },
+    )
+    assert issued.status_code == 200
+    token = _credential_from(issued.text)
+    _, caller_id, credential_id = _metadata_from(issued.text)
+    base = f"/admin/libraries/{home_id}/callers/{caller_id}/credentials/{credential_id}/grants"
+    detail = admin_web.client.get(f"/admin/libraries/{home_id}/callers/{caller_id}")
+    assert detail.status_code == 200
+    assert f'href="{base}"' in detail.text
+    assert token not in detail.text
+    editor = admin_web.client.get(base + "?lang=zh-CN")
+    assert editor.status_code == 200
+    assert "编辑 Token 授权" in editor.text
+    assert f'action="{base}/{target_id}"' in editor.text
+    original_digest = target_library_grants_digest(
+        home_id, caller_id, credential_id, target_id, (LibraryAction.WRITE,), 0
+    )
+    assert f'name="expected_digest" value="{original_digest}"' in editor.text
+    form = {"csrf_token": csrf, "expected_digest": original_digest, "read": "true"}
+    assert (
+        _post(
+            admin_web.client,
+            f"{base}/{target_id}",
+            data=form,
+            origin="https://other.example.invalid",
+        ).status_code
+        == 403
+    )
+    assert (
+        _post(
+            admin_web.client, f"{base}/{target_id}", data={**form, "csrf_token": "bad"}
+        ).status_code
+        == 403
+    )
+    assert (
+        _post(admin_web.client, f"{base}/{target_id}", data={**form, "extra": "bad"}).status_code
+        == 422
+    )
+    saved = _post(admin_web.client, f"{base}/{target_id}", data=form)
+    assert saved.status_code == 303
+    assert saved.headers["location"] == base
+    assert "编辑 Token 授权" in admin_web.client.get(base).text
+    whoami = admin_web.client.get(
+        "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert whoami.status_code == 200
+    assert sorted(whoami.json()["library_grants"], key=lambda item: item["library_id"]) == [
+        {"library_id": library_id, "actions": ["read"]}
+        for library_id in sorted((home_id, target_id))
+    ]
+    stale = _post(admin_web.client, f"{base}/{target_id}", data=form)
+    assert stale.status_code == 409
+    assert "Grants changed since this page was opened" in stale.text
+    assert token not in stale.text
+    _assert_security_headers(stale)
+
+
+def test_master_grant_editor_rechecks_master_generation_inside_write_transaction(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    library = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Synthetic Grant Generation Library"},
+    )
+    assert library.status_code == 303
+    library_id = library.headers["location"].rsplit("/", 1)[-1]
+    issued = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": csrf,
+            "home_library_id": library_id,
+            "agent_name": "Synthetic Grant Generation Agent",
+            "credential_ttl_seconds": "3600",
+        },
+    )
+    assert issued.status_code == 200
+    token = _credential_from(issued.text)
+    _, caller_id, credential_id = _metadata_from(issued.text)
+    path = (
+        f"/admin/libraries/{library_id}/callers/{caller_id}/credentials/"
+        f"{credential_id}/grants/{library_id}"
+    )
+
+    async def rotate_master_before_action(action: Any, *args: Any, **kwargs: Any) -> Any:
+        with immediate_transaction(admin_web.engine) as connection:
+            assert (
+                MasterTokenRepository(connection).rotate(
+                    _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
+                )
+                is not None
+            )
+        return await starlette_run_in_threadpool(action, *args, **kwargs)
+
+    monkeypatch.setattr(admin_router, "run_in_threadpool", rotate_master_before_action)
+    rejected = _post(
+        admin_web.client,
+        path,
+        data={
+            "csrf_token": csrf,
+            "expected_digest": target_library_grants_digest(
+                library_id, caller_id, credential_id, library_id, (), 0
+            ),
+            "read": "true",
+        },
+    )
+    assert rejected.status_code == 401
+    assert token not in rejected.text
+    with admin_web.engine.connect() as connection:
+        assert (
+            connection.execute(
+                select(MasterAuditEvent.id).where(
+                    MasterAuditEvent.action == "auth.agent_credential.grants_update"
+                )
+            ).all()
+            == []
+        )
+    identity = admin_web.client.get(
+        "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert identity.status_code == 200
+    assert identity.json()["library_grants"] == []
+
+
+def test_master_rotation_does_not_convert_legacy_section_token_to_library_access(
+    admin_web: AdminWeb,
+) -> None:
+    old_token, library_id, caller_id, credential_id = _issue_web_agent(admin_web)
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    detail_path = f"/admin/libraries/{library_id}/callers/{caller_id}"
+    detail = admin_web.client.get(detail_path)
+    assert detail.status_code == 200
+    assert f'action="{detail_path}/credentials/{credential_id}/rotate"' not in detail.text
+    grants_path = f"{detail_path}/credentials/{credential_id}/grants"
+    assert f'href="{grants_path}"' not in detail.text
+    assert admin_web.client.get(grants_path).status_code == 404
+    rejected_grants = _post(
+        admin_web.client,
+        f"{grants_path}/{library_id}",
+        data={
+            "csrf_token": csrf,
+            "expected_digest": target_library_grants_digest(
+                library_id, caller_id, credential_id, library_id, (), 0
+            ),
+            "read": "true",
+        },
+    )
+    assert rejected_grants.status_code == 409
+    assert "explicit reprovision" in rejected_grants.text
+    rejected = _post(
+        admin_web.client,
+        f"{detail_path}/credentials/{credential_id}/rotate",
+        data={"csrf_token": csrf, "credential_ttl_seconds": "3600"},
+    )
+    assert rejected.status_code == 409
+    assert "explicit reprovision" in rejected.text
+    assert (
+        admin_web.client.get(
+            "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {old_token}"}
+        ).status_code
+        == 200
+    )
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(AgentTokenValue.credential_id)).scalars().all() == [
+            credential_id
+        ]
+
+
+def test_master_agent_rotation_rechecks_session_generation_before_writing(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    library = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Synthetic Rotation Race Library"},
+    )
+    assert library.status_code == 303
+    library_id = library.headers["location"].rsplit("/", 1)[-1]
+    issued = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": csrf,
+            "home_library_id": library_id,
+            "agent_name": "Synthetic Rotation Race Agent",
+            "credential_ttl_seconds": "3600",
+            "grants": [f"{library_id}:read"],
+        },
+    )
+    assert issued.status_code == 200
+    old_token = _credential_from(issued.text)
+    _, caller_id, old_id = _metadata_from(issued.text)
+
+    async def rotate_master_before_action(action: Any, *args: Any, **kwargs: Any) -> Any:
+        with immediate_transaction(admin_web.engine) as connection:
+            assert (
+                MasterTokenRepository(connection).rotate(
+                    _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
+                )
+                is not None
+            )
+        return await starlette_run_in_threadpool(action, *args, **kwargs)
+
+    monkeypatch.setattr(admin_router, "run_in_threadpool", rotate_master_before_action)
+    rejected = _post(
+        admin_web.client,
+        f"/admin/libraries/{library_id}/callers/{caller_id}/credentials/{old_id}/rotate",
+        data={"csrf_token": csrf, "credential_ttl_seconds": "7200"},
+    )
+    assert rejected.status_code == 401
+    assert old_token not in rejected.text
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(AgentTokenValue.credential_id)).scalars().all() == [old_id]
+        assert len(connection.execute(select(Credential.id)).all()) == 1
+        assert (
+            connection.execute(
+                select(MasterAuditEvent.id).where(
+                    MasterAuditEvent.action == "auth.agent_credential.rotate"
+                )
+            ).all()
+            == []
+        )
+        assert (
+            AuthenticationService(AuthRepository(connection)).authenticate(old_token).caller.id
+            == caller_id
+        )
+
+
+def test_legacy_agent_provision_cannot_race_local_master_setup(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    csrf = _login(admin_web)
+    bootstrapped = _post(admin_web.client, "/admin/bootstrap", data=_bootstrap_data(csrf))
+    assert bootstrapped.status_code == 200
+    operator_token = _credential_from(bootstrapped.text)
+
+    async def initialize_before_action(action: Any, *args: Any, **kwargs: Any) -> Any:
+        _initialize_master(admin_web)
+        return await starlette_run_in_threadpool(action, *args, **kwargs)
+
+    monkeypatch.setattr(admin_router, "run_in_threadpool", initialize_before_action)
+    rejected = _post(
+        admin_web.client,
+        "/admin/agents/provision",
+        data={
+            "csrf_token": csrf,
+            "operator_token": operator_token,
+            "library_name": "Synthetic Web Library",
+            "section_name": "Synthetic Web Section",
+            "agent_name": "Synthetic Rejected Legacy Agent",
+            "credential_ttl_seconds": "3600",
+            "grants": ["section:query"],
+        },
+    )
+    assert rejected.status_code == 403
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(Caller.id).where(Caller.kind == "agent")).all() == []
+        assert connection.execute(select(AgentTokenValue.credential_id)).all() == []
+
+
+def test_master_agent_provision_rechecks_rotation_before_writing(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    library = _post(
+        admin_web.client,
+        "/admin/libraries",
+        data={"csrf_token": csrf, "name": "Synthetic Provision Race Library"},
+    )
+    assert library.status_code == 303
+    library_id = library.headers["location"].rsplit("/", 1)[-1]
+
+    async def rotate_before_action(action: Any, *args: Any, **kwargs: Any) -> Any:
+        with immediate_transaction(admin_web.engine) as connection:
+            assert (
+                MasterTokenRepository(connection).rotate(
+                    _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
+                )
+                is not None
+            )
+        return await starlette_run_in_threadpool(action, *args, **kwargs)
+
+    monkeypatch.setattr(admin_router, "run_in_threadpool", rotate_before_action)
+    rejected = _post(
+        admin_web.client,
+        "/admin/agents/create",
+        data={
+            "csrf_token": csrf,
+            "home_library_id": library_id,
+            "agent_name": "Synthetic Rejected Agent",
+            "credential_ttl_seconds": "3600",
+            "grants": [f"{library_id}:read"],
+        },
+    )
+    assert rejected.status_code == 401
+    assert "Synthetic Rejected Agent" not in rejected.text
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(Caller.id).where(Caller.kind == "agent")).all() == []
+        assert connection.execute(select(AgentTokenValue.credential_id)).all() == []
+        assert (
+            connection.execute(
+                select(MasterAuditEvent.id).where(MasterAuditEvent.action == "auth.agent.provision")
+            ).all()
+            == []
+        )
+
+
+def test_master_revoke_confirmation_identifies_each_of_multiple_credentials(
+    admin_web: AdminWeb,
+) -> None:
+    first_token, library_id, caller_id, first_credential_id = _issue_web_agent(admin_web)
+    with immediate_transaction(admin_web.engine) as connection:
+        repository = AuthRepository(connection)
+        caller = repository.get_caller(library_id, caller_id)
+        assert caller is not None
+        second = CredentialIssuer(repository).issue(
+            caller, expires_at=time_ns() // 1_000 + 3_600_000_000
+        )
+    second_credential_id = second.credential.id
+    detail_path = f"/admin/libraries/{library_id}/callers/{caller_id}"
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+
+    detail = admin_web.client.get(detail_path)
+    assert detail.status_code == 200
+    for credential_id in (first_credential_id, second_credential_id):
+        assert (
+            f'<p class="revoke-target">Credential ID: <code>{credential_id}</code></p>'
+            in detail.text
+        )
+        assert f'action="{detail_path}/credentials/{credential_id}/revoke"' in detail.text
+    assert first_token not in detail.text
+    assert second.value not in detail.text
+
+    revoked = _post(
+        admin_web.client,
+        f"{detail_path}/credentials/{first_credential_id}/revoke",
+        data={"csrf_token": csrf},
+    )
+    assert revoked.status_code == 303
+    with admin_web.engine.connect() as connection:
+        repository = AuthRepository(connection)
+        with pytest.raises(AuthenticationError):
+            AuthenticationService(repository).authenticate(first_token)
+        assert AuthenticationService(repository).authenticate(second.value).caller.id == caller_id
+
+
+def test_master_agent_revocation_rechecks_generation_inside_transaction(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token, library_id, caller_id, credential_id = _issue_web_agent(admin_web)
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+
+    async def rotate_before_action(action: Any, *args: Any, **kwargs: Any) -> Any:
+        with immediate_transaction(admin_web.engine) as connection:
+            assert (
+                MasterTokenRepository(connection).rotate(
+                    _MASTER_TOKEN, _ROTATED_MASTER_TOKEN, now=1_001
+                )
+                is not None
+            )
+        return await starlette_run_in_threadpool(action, *args, **kwargs)
+
+    monkeypatch.setattr(admin_router, "run_in_threadpool", rotate_before_action)
+    path = f"/admin/libraries/{library_id}/callers/{caller_id}/credentials/{credential_id}/revoke"
+    assert _post(admin_web.client, path, data={"csrf_token": csrf}).status_code == 401
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(MasterAuditEvent.id)).all() == []
+        assert (
+            AuthenticationService(AuthRepository(connection)).authenticate(token).caller.id
+            == caller_id
+        )
+
+
+@pytest.mark.parametrize("state", ["revoked", "rotated", "expired", "disabled", "legacy"])
+def test_agent_token_reveal_rejects_inactive_or_unrecoverable_values(
+    admin_web: AdminWeb, state: str
+) -> None:
+    token, library_id, caller_id, credential_id = _issue_web_agent(admin_web)
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    path = f"/admin/libraries/{library_id}/callers/{caller_id}/credentials/{credential_id}/reveal"
+    with immediate_transaction(admin_web.engine) as connection:
+        repository = AuthRepository(connection)
+        credential = repository.get_credential(library_id, caller_id, credential_id)
+        assert credential is not None
+        now = time_ns() // 1_000
+        if state == "revoked":
+            repository.revoke_credential(credential, revoked_at=now)
+        elif state == "rotated":
+            caller = repository.get_caller(library_id, caller_id)
+            assert caller is not None
+            replacement = CredentialIssuer(repository).issue(caller, expires_at=now + 3_600_000_000)
+            repository.mark_credential_rotated(
+                credential, replacement.credential.id, rotated_at=now
+            )
+        elif state == "expired":
+            connection.execute(
+                update(Credential).where(Credential.id == credential_id).values(expires_at=now - 1)
+            )
+        elif state == "disabled":
+            repository.disable_caller(library_id, caller_id, disabled_at=now)
+        else:
+            connection.execute(
+                delete(AgentTokenValue).where(AgentTokenValue.credential_id == credential_id)
+            )
+
+    response = _post(admin_web.client, path, data={"csrf_token": csrf})
+    assert response.status_code == 410
+    assert token not in response.text
+    assert (
+        token not in admin_web.client.get(f"/admin/libraries/{library_id}/callers/{caller_id}").text
+    )
+    if state == "legacy":
+        with admin_web.engine.connect() as connection:
+            assert AuthenticationService(AuthRepository(connection)).authenticate(token)
+    _assert_security_headers(response)
+
+
+def test_agent_token_reveal_fails_closed_when_audit_cannot_commit(
+    admin_web: AdminWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token, library_id, caller_id, credential_id = _issue_web_agent(admin_web)
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+
+    def reject_audit(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("synthetic audit write failure")
+
+    monkeypatch.setattr(MasterAuditRepository, "add_success", reject_audit)
+    path = f"/admin/libraries/{library_id}/callers/{caller_id}/credentials/{credential_id}/reveal"
+    failed = _post(admin_web.client, path, data={"csrf_token": csrf})
+    assert failed.status_code == 500
+    assert token not in failed.text
+    with admin_web.engine.connect() as connection:
+        assert connection.execute(select(MasterAuditEvent.id)).all() == []
+    assert token not in str(admin_web.client.cookies)
 
 
 def test_action_errors_are_redacted_and_do_not_echo_operator_token(
