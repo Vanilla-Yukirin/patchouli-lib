@@ -180,7 +180,6 @@ _MAX_SECTION_EDIT_FORM_BYTES: Final[int] = 65_536
 _MAX_LIBRARY_EDIT_FORM_BYTES: Final[int] = 65_536
 _MAX_PAGE_TITLE_EDIT_FORM_BYTES: Final[int] = 65_536
 _MAX_FORM_FIELDS: Final[int] = 32
-_MAX_AGENT_PROVISION_FORM_FIELDS: Final[int] = 256
 _RESTORE_STALE_MESSAGE: Final[str] = (
     "The page changed since this form was opened. Reload the trash detail and try again."
 )
@@ -1195,7 +1194,7 @@ def create_admin_router(
                 request,
                 allowed_fields=frozenset(MasterProvisionAgentInput.model_fields) | {"csrf_token"},
                 repeatable_fields=frozenset({"grants", "read_libraries", "write_libraries"}),
-                max_fields=_MAX_AGENT_PROVISION_FORM_FIELDS,
+                max_fields=None,
             )
             _require_csrf(values, session)
             raw_grants = values.pop("grants", [])
@@ -1650,7 +1649,7 @@ def create_admin_router(
                 allowed_fields=frozenset(MasterSetAgentLibraryScopeInput.model_fields)
                 | {"csrf_token"},
                 repeatable_fields=frozenset({"read_libraries", "write_libraries"}),
-                max_fields=_MAX_AGENT_PROVISION_FORM_FIELDS,
+                max_fields=None,
             )
             _require_csrf(values, session)
             await run_in_threadpool(
@@ -3192,7 +3191,7 @@ async def _read_form(
     *,
     allowed_fields: frozenset[str],
     repeatable_fields: frozenset[str] = frozenset(),
-    max_fields: int = _MAX_FORM_FIELDS,
+    max_fields: int | None = _MAX_FORM_FIELDS,
     max_bytes: int = _MAX_FORM_BYTES,
 ) -> FormValues:
     content_type = request.headers.get("content-type", "").partition(";")[0].strip().casefold()
@@ -3209,13 +3208,17 @@ async def _read_form(
     body = bytearray()
     async for chunk in request.stream():
         _extend_form_body(body, chunk, max_bytes=max_bytes)
+    # Scope selections grow with the Library set. Their field budget follows the
+    # bounded body: even the shortest valid pair ("=") needs a separator between
+    # pairs. Other forms retain their smaller fixed field limit.
+    field_limit = max_fields if max_fields is not None else (len(body) + 1) // 2
     try:
         decoded = body.decode("utf-8")
         pairs = parse_qsl(
             decoded,
             keep_blank_values=True,
             strict_parsing=True,
-            max_num_fields=max_fields,
+            max_num_fields=field_limit,
             encoding="utf-8",
             errors="strict",
         )

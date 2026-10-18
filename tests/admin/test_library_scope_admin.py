@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlencode
+
 import pytest
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from test_routes import (
     AdminWeb,
     _credential_from,
@@ -21,8 +23,14 @@ from patchouli_lib.admin.master_audit import MasterAuditRepository
 from patchouli_lib.admin.service import AdminActionService
 from patchouli_lib.admin.session import AdminSessionCodec
 from patchouli_lib.auth.library_policy import target_library_grants_digest
-from patchouli_lib.auth.models import Caller, CredentialLibraryGrant, CredentialLibraryPolicy
+from patchouli_lib.auth.models import (
+    Caller,
+    Credential,
+    CredentialLibraryGrant,
+    CredentialLibraryPolicy,
+)
 from patchouli_lib.auth.repository import AuthRepository
+from patchouli_lib.library.models import Library
 
 
 def _prepare(web: AdminWeb) -> tuple[str, str, str]:
@@ -228,3 +236,92 @@ def test_scope_noop_and_failed_audit_leave_policy_unchanged(
         policy = connection.execute(select(CredentialLibraryPolicy)).mappings().one()
         assert policy["scope_revision"] == 0 and policy["read_mode"] == "include"
         assert connection.execute(select(CredentialLibraryGrant)).all() == []
+
+
+@pytest.mark.parametrize("operation", ["create", "edit"])
+@pytest.mark.parametrize("library_count", [127, 160])
+def test_large_scope_forms_preserve_selections_and_effective_grants(
+    admin_web: AdminWeb, operation: str, library_count: int
+) -> None:
+    _initialize_master(admin_web)
+    _, csrf = _login_master(admin_web)
+    library_ids = [f"{index:032x}" for index in range(1, library_count + 1)]
+    with admin_web.engine.begin() as connection:
+        connection.execute(
+            insert(Library),
+            [
+                {"id": library_id, "name": f"Library {index}", "created_at": 1, "updated_at": 1}
+                for index, library_id in enumerate(library_ids)
+            ],
+        )
+    fields: dict[str, object] = {
+        "csrf_token": csrf,
+        "read_mode": "include",
+        "write_mode": "include",
+        "read_libraries": library_ids,
+        "write_libraries": library_ids,
+    }
+    if operation == "create":
+        path = "/admin/agents/create"
+        fields.update(agent_name="Large scope", never_expires="true")
+    else:
+        home, caller, credential, _ = _issue(admin_web, csrf)
+        path = f"/admin/libraries/{home}/callers/{caller}/credentials/{credential}/grants"
+        fields["expected_scope_revision"] = "0"
+    encoded = urlencode(fields, doseq=True)
+    assert encoded.count("&") + 1 > 256
+    assert len(encoded.encode()) < 16_384
+    response = _post(admin_web.client, path, data=fields)
+    assert response.status_code == (200 if operation == "create" else 303), response.text
+    if operation == "create":
+        home, caller, credential = _metadata_from(response.text)
+    with admin_web.engine.connect() as connection:
+        repository = AuthRepository(connection)
+        scope = repository.get_credential_library_scope(home, caller, credential)
+        assert scope is not None
+        assert scope.read_mode == scope.write_mode == "include"
+        assert scope.read_libraries == scope.write_libraries == tuple(library_ids)
+        assert scope.revision == (0 if operation == "create" else 1)
+        grants = repository.list_credential_library_grants(
+            home_library_id=home, caller_id=caller, credential_id=credential
+        )
+        assert {item.library_id: item.actions for item in grants} == {
+            library_id: ("read", "write") for library_id in library_ids
+        }
+
+
+@pytest.mark.parametrize("operation", ["create", "edit"])
+@pytest.mark.parametrize("invalid", ["oversized", "duplicate"])
+def test_scope_forms_keep_byte_and_duplicate_limits_without_mutation(
+    admin_web: AdminWeb, operation: str, invalid: str
+) -> None:
+    csrf, _, second = _prepare(admin_web)
+    fields = {
+        "csrf_token": csrf,
+        "read_mode": "exclude",
+        "write_mode": "include",
+        "write_libraries": second,
+    }
+    if operation == "create":
+        path = "/admin/agents/create"
+        fields.update(agent_name="Rejected scope", never_expires="true")
+    else:
+        home, caller, credential, _ = _issue(admin_web, csrf)
+        path = f"/admin/libraries/{home}/callers/{caller}/credentials/{credential}/grants"
+        fields["expected_scope_revision"] = "0"
+    encoded = urlencode(fields)
+    encoded += "&read_mode=" + ("x" * 16_384 if invalid == "oversized" else "include")
+    models = (Caller, Credential, CredentialLibraryPolicy, CredentialLibraryGrant)
+    with admin_web.engine.connect() as connection:
+        before = [connection.execute(select(model)).all() for model in models]
+    response = admin_web.client.post(
+        path,
+        content=encoded,
+        headers={
+            "Origin": "https://admin.example.invalid",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+    )
+    assert response.status_code == (413 if invalid == "oversized" else 422)
+    with admin_web.engine.connect() as connection:
+        assert [connection.execute(select(model)).all() for model in models] == before
