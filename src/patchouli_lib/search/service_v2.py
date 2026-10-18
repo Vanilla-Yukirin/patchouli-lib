@@ -141,7 +141,7 @@ def _current_scope(
         readable = {
             grant.library_id: _Scope(grant.library_id, False)
             for grant in library_grants
-            if LibraryAction.READ in grant.actions and repository.library_exists(grant.library_id)
+            if LibraryAction.READ in grant.actions
         }
         grants_identity = _digest_json(
             b"patchouli-search-grants-v1\0",

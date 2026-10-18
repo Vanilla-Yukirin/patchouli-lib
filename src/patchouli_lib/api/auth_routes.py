@@ -31,6 +31,7 @@ def create_auth_router(
 
     router = APIRouter(prefix=API_V1_PREFIX)
     authenticate = BearerAuthentication(engine, clock=clock)
+    authenticate_identity = BearerAuthentication(engine, clock=clock, include_library_scope=True)
 
     @router.get("/capabilities", response_model=CapabilitiesResponse)
     def capabilities(
@@ -45,7 +46,7 @@ def create_auth_router(
 
     @router.get("/auth/whoami", response_model=WhoAmIResponse)
     def whoami(
-        context: Annotated[AuthenticatedRequestContext, Depends(authenticate)],
+        context: Annotated[AuthenticatedRequestContext, Depends(authenticate_identity)],
     ) -> WhoAmIResponse:
         return whoami_response(context)
 

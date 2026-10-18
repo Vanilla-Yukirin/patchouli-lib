@@ -413,6 +413,7 @@ def test_current_page_auth_scope_and_recycle_bin_are_closed(file_set_api: FileSe
 def test_opted_in_policy_scopes_reads_to_each_explicit_library(
     file_set_api: FileSetApi,
     read_mode: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scope = file_set_api.scope
     credential_id = "d" * 32
@@ -500,6 +501,11 @@ def test_opted_in_policy_scopes_reads_to_each_explicit_library(
                     },
                 )
 
+    def unexpected_expansion(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Target file reads must resolve only their target Library.")
+
+    monkeypatch.setattr(AuthRepository, "list_credential_library_grants", unexpected_expansion)
+    monkeypatch.setattr(AuthRepository, "get_credential_library_scope", unexpected_expansion)
     home_path = _base(file_set_api).split("/revisions/", 1)[0]
     target_path = (
         f"/api/v1/libraries/{target_library_id}/sections/{target_section_id}"

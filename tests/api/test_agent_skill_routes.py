@@ -7,10 +7,12 @@ from pathlib import Path
 from time import time_ns
 from unittest.mock import patch
 
+import pytest
 from alembic import command
 from alembic.config import Config
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import insert
+from sqlalchemy import delete, insert, update
 
 from patchouli_lib import __version__
 from patchouli_lib.app import create_app
@@ -117,6 +119,33 @@ def test_public_connection_instruction_contains_no_credential(tmp_path: Path) ->
     assert script.status_code == 200
     assert "window.location.origin" in script.text
     assert token not in script.text
+
+
+def test_skill_download_does_not_expand_library_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, token, _, _, _ = _client_and_token(tmp_path, library_grants=True)
+    with client:
+        assert isinstance(client.app, FastAPI)
+        engine = client.app.state.engine
+        with immediate_transaction(engine) as connection:
+            connection.execute(
+                update(CredentialLibraryPolicy).values(
+                    read_mode="exclude",
+                    write_mode="exclude",
+                    scope_revision=1,
+                )
+            )
+            connection.execute(delete(CredentialLibraryGrant))
+
+        def unexpected_expansion(*_args: object, **_kwargs: object) -> None:
+            pytest.fail("Skill downloads must not expand Library permissions.")
+
+        monkeypatch.setattr(AuthRepository, "list_credential_library_grants", unexpected_expansion)
+        monkeypatch.setattr(AuthRepository, "get_credential_library_scope", unexpected_expansion)
+        for path in ("/api/v1/agent/skill/manifest", "/api/v1/agent/skill/files/SKILL.md"):
+            response = client.get(path, headers={"Authorization": f"Bearer {token}"})
+            assert response.status_code == 200
 
 
 def test_skill_manifest_and_each_file_require_bearer_and_disable_caching(

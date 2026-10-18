@@ -712,6 +712,74 @@ def test_whoami_scopes_include_future_libraries_without_granting_write(
         assert after.json()["library_scope"] == before.json()["library_scope"]
 
 
+@pytest.mark.parametrize("touch_due", [False, True])
+def test_capabilities_does_not_expand_library_scopes_in_either_authentication_path(
+    auth_api: AuthApiFixture, monkeypatch: pytest.MonkeyPatch, touch_due: bool
+) -> None:
+    with immediate_transaction(auth_api.engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryPolicy),
+            {
+                "credential_id": auth_api.agent_credential_id,
+                "caller_id": auth_api.agent_caller_id,
+                "home_library_id": auth_api.library_id,
+                "mode": "library_grants",
+                "read_mode": "exclude",
+                "write_mode": "exclude",
+                "created_at": 1_000_000,
+            },
+        )
+
+    def unexpected_expansion(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Routine authentication must not materialize Library scopes.")
+
+    monkeypatch.setattr(AuthRepository, "list_credential_library_grants", unexpected_expansion)
+    monkeypatch.setattr(AuthRepository, "get_credential_library_scope", unexpected_expansion)
+    statements: list[str] = []
+
+    def capture(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        _params: object,
+        _context: object,
+        _many: object,
+    ) -> None:
+        statements.append(statement)
+
+    query_counts = []
+    with TestClient(_build_app(auth_api)) as client:
+        for extra_libraries in (0, 64):
+            with immediate_transaction(auth_api.engine) as connection:
+                for index in range(extra_libraries):
+                    LibraryRepository(connection).add_library(
+                        NewLibrary(
+                            id=f"{index + 100:032x}",
+                            name=f"Synthetic extra {index}",
+                            created_at=1_000_000,
+                            updated_at=1_000_000,
+                        )
+                    )
+            auth_api.clock.value = (
+                400_000_000 + (301_000_000 if extra_libraries else 0) if touch_due else 2_000_000
+            )
+            statements.clear()
+            event.listen(auth_api.engine, "before_cursor_execute", capture)
+            try:
+                response = client.get(
+                    "/api/v1/capabilities", headers=_authorization(auth_api.agent_token)
+                )
+            finally:
+                event.remove(auth_api.engine, "before_cursor_execute", capture)
+            assert response.status_code == 200
+            query_counts.append(len(statements))
+            assert not any("FROM libraries" in statement for statement in statements)
+            assert _credential_row(auth_api)["last_used_at"] == (
+                auth_api.clock.value if touch_due else None
+            )
+    assert query_counts[0] == query_counts[1]
+
+
 def test_rfc3339_maximum_expiry_is_issued_and_serialized_by_whoami(
     auth_api: AuthApiFixture,
 ) -> None:

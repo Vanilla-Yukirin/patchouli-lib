@@ -9,7 +9,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from content.helpers import insert_page_graph, page_graph_values, seed_library_structure
-from sqlalchemy import Engine, insert, update
+from sqlalchemy import Engine, event, insert, update
 
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.session import AdminSessionCodec
@@ -30,12 +30,13 @@ from patchouli_lib.auth.tokens import generate_token
 from patchouli_lib.content.file_manifest import build_file_manifest
 from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.database import build_engine, immediate_transaction
-from patchouli_lib.library.models import Book, Section
+from patchouli_lib.library.models import Book, Library, Section
 from patchouli_lib.search.index_v2 import SearchIndexUnavailableError, rebuild_search_index
 from patchouli_lib.search.query_v2 import SearchQueryV2, parse_query_v2_json
 from patchouli_lib.search.service_v2 import (
     SearchPageV2,
     SearchScopeError,
+    _current_scope,
     search_pages_for_master,
     search_pages_v2,
 )
@@ -321,6 +322,59 @@ def test_exclude_read_scope_sees_future_library_but_not_excluded_content(engine:
     # Granting write-all must not make the future Library readable.
     with pytest.raises(SearchScopeError):
         _search(engine, context, keywords=["needle"], libraries=[future[0]])
+
+
+def test_search_scope_expansion_uses_constant_query_count_without_per_library_exists(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = seed_library_structure(engine)
+    context = _agent(engine, home[0], home[1])
+    _opt_in(engine, home[0])
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            update(CredentialLibraryPolicy).values(read_mode="exclude", scope_revision=1)
+        )
+
+    def unexpected_exists(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Effective Library grants already select existing Libraries.")
+
+    monkeypatch.setattr(AuthRepository, "library_exists", unexpected_exists)
+    statements: list[str] = []
+
+    def capture(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        _params: object,
+        _context: object,
+        _many: object,
+    ) -> None:
+        statements.append(statement)
+
+    query_counts = []
+    for extra_libraries in (0, 64):
+        with immediate_transaction(engine) as connection:
+            for index in range(extra_libraries):
+                connection.execute(
+                    insert(Library),
+                    {
+                        "id": f"{index + 100:032x}",
+                        "name": f"Synthetic scope {index}",
+                        "created_at": CLOCK,
+                        "updated_at": CLOCK,
+                    },
+                )
+        statements.clear()
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            with engine.connect() as connection:
+                connection.exec_driver_sql("BEGIN")
+                scope = _current_scope(connection, context, _query(keywords=["needle"]), CLOCK)
+                assert len(scope.scopes) == extra_libraries + 1
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+        query_counts.append(len(statements))
+    assert query_counts[0] == query_counts[1]
 
 
 def test_short_literal_matches_exactly_within_its_own_field(engine: Engine) -> None:
