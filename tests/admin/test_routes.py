@@ -1990,7 +1990,10 @@ def test_master_grant_editor_changes_only_target_token_with_csrf_and_stale_form_
     ]
     stale = _post(admin_web.client, f"{base}/{target_id}", data=form)
     assert stale.status_code == 409
-    assert "Grants changed since this page was opened" in stale.text
+    assert "权限已被其他操作更新，请核对当前范围后重新保存。" in stale.text
+    stale_english = _post(admin_web.client, f"{base}/{target_id}?lang=en", data=form)
+    assert stale_english.status_code == 409
+    assert "Grants changed since this page was opened" in stale_english.text
     assert token not in stale.text
     _assert_security_headers(stale)
 
