@@ -612,6 +612,20 @@ def create_backup(
                     pages_per_step=pages,
                     cancel_check=cancel_check,
                 )
+                # Search is a disposable projection, never backup authority. A
+                # restored bundle must rebuild from the preserved Page history.
+                if destination.execute(
+                    "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'search_meta'"
+                ).fetchone():
+                    destination.execute("BEGIN IMMEDIATE")
+                    destination.execute(
+                        "UPDATE search_meta SET ready = 0, active_generation = NULL"
+                    )
+                    destination.execute("DELETE FROM search_terms")
+                    destination.execute("DELETE FROM search_documents")
+                    destination.execute("DELETE FROM search_page_state")
+                    destination.execute("DELETE FROM search_generations")
+                    destination.commit()
                 # A backup artifact is portable and never depends on source WAL sidecars.
                 destination.execute("PRAGMA journal_mode = DELETE")
                 destination.commit()
@@ -619,7 +633,7 @@ def create_backup(
             raw.close()
 
         _restrict(database_path)
-        report = validate_database(database_path)
+        report = validate_database(database_path, schema_revision=SUPPORTED_SCHEMA_REVISION)
         byte_size, sha256 = _hash_file(database_path)
         created_at = canonical_utc_timestamp(clock())
         manifest = BackupManifestV1(
@@ -700,7 +714,7 @@ def verify_backup_bundle(
         app_version=app_version,
         schema_revision=schema_revision,
     )
-    report = validate_database(database_path)
+    report = validate_database(database_path, schema_revision=schema_revision)
     if report.schema_revision != manifest.schema_revision:
         raise BackupManifestError
     _require_manifest_binding(database_path, manifest)
@@ -735,7 +749,7 @@ def restore_backup(
         app_version=app_version,
         schema_revision=schema_revision,
     )
-    validate_database(database_path)
+    validate_database(database_path, schema_revision=schema_revision)
     _require_manifest_binding(database_path, manifest)
     target = _canonical_path(destination, must_exist=False)
     _reject_reparse_components(destination)
@@ -772,7 +786,7 @@ def restore_backup(
         if current_size != manifest.byte_size or current_digest != manifest.sha256:
             raise BackupManifestError
         _restrict(staged_database)
-        restored_report = validate_database(staged_database)
+        restored_report = validate_database(staged_database, schema_revision=schema_revision)
         if restored_report.schema_revision != manifest.schema_revision:
             raise BackupDatabaseError
         restored_size, restored_digest = _hash_file(staged_database)

@@ -10,6 +10,8 @@ from patchouli_client import (
     ArchiveCreateMetadata,
     BearerToken,
     Capabilities,
+    CurrentPageSearchRequest,
+    CurrentPageSearchResult,
     IdempotencyKey,
     IdempotencySupport,
     MarkdownContent,
@@ -17,7 +19,7 @@ from patchouli_client import (
     PageMetadata,
     ProblemDetails,
     ProtocolError,
-    SearchRequest,
+    SearchTagRef,
     Section,
     SourceInput,
     WhoAmI,
@@ -40,7 +42,7 @@ def test_collection_json_vectors_match_top_level_server_shape() -> None:
     responses = response_object(fixture["responses"])
 
     assert pagination == {"default_limit": DEFAULT_PAGE_LIMIT, "max_limit": MAX_PAGE_LIMIT}
-    for name in ("sections", "pages", "search"):
+    for name in ("sections", "pages"):
         response = response_object(responses[name])
         assert response["status"] == 200
         body = response_object(response["body"])
@@ -62,6 +64,15 @@ def test_collection_json_vectors_match_top_level_server_shape() -> None:
     assert page_item.page.page_id == page_item.citation.page_id
     assert page_item.page.current_revision_id == page_item.citation.revision_id
     assert page_item.page.current_revision_number == page_item.citation.revision_number
+
+    search = response_object(responses["search"])
+    assert search["status"] == 200
+    search_body = response_object(search["body"])
+    assert set(search_body) == {"items", "next_cursor"}
+    parsed_search = CurrentPageSearchResult.from_dict(search_body)
+    assert parsed_search.items and parsed_search.items[0].snippet is None
+    assert parsed_search.next_cursor is None
+    assert response_cursor(search_body) is None
 
 
 def test_public_fixture_freezes_mutation_and_problem_envelopes() -> None:
@@ -125,6 +136,28 @@ def test_response_models_ignore_unknown_fields() -> None:
     assert capabilities.idempotency.content_mutations is True
 
 
+def test_structured_search_limits_are_separate_from_legacy_query_limit() -> None:
+    limits = ApiLimits.from_dict(
+        {
+            "max_content_bytes": 2 * 1024 * 1024,
+            "default_page_size": 20,
+            "max_page_size": 100,
+            "max_query_bytes": 4096,
+            "search": {
+                "max_request_bytes": 96 * 1024,
+                "max_keywords_bytes": 32 * 1024,
+                "max_keywords": 256,
+                "max_tags": 256,
+                "max_libraries": 256,
+            },
+        }
+    )
+    assert limits.search is not None
+    assert limits.search.max_request_bytes == 96 * 1024
+    assert limits.search.max_keywords_bytes == 32 * 1024
+    assert limits.max_query_bytes == 4096
+
+
 def test_page_and_revision_identifiers_remain_opaque() -> None:
     document = PageDocument.from_dict(sample_page())
 
@@ -132,6 +165,24 @@ def test_page_and_revision_identifiers_remain_opaque() -> None:
     assert document.revision.revision_id == "rev_0123456789abcdef0123456789abcdef"
     assert document.citation.page_id == document.page.page_id
     assert document.page.occurred_at == datetime(2026, 8, 11, 9, 15, 0, 123456, tzinfo=UTC)
+    assert document.occurrence_notice is None
+
+
+def test_page_document_parses_only_the_known_occurrence_default_notice() -> None:
+    response = sample_page()
+    response["occurrence_notice"] = {
+        "source": "server_utc",
+        "warning_code": "occurred_at_defaulted",
+    }
+    parsed = PageDocument.from_dict(response)
+    assert parsed.occurrence_notice is not None
+    assert parsed.occurrence_notice.source == "server_utc"
+    assert parsed.occurrence_notice.warning_code == "occurred_at_defaulted"
+
+    for invalid in (None, {}, {"source": "client", "warning_code": "occurred_at_defaulted"}):
+        response["occurrence_notice"] = invalid
+        with pytest.raises(ProtocolError):
+            PageDocument.from_dict(response)
 
 
 def test_problem_details_preserve_unknown_extensions() -> None:
@@ -164,8 +215,27 @@ def test_request_models_are_strict_and_canonical() -> None:
         "occurred_at": "2026-08-11T17:15:00.000000Z",
         "source": {"kind": "conversation"},
     }
+    omitted = ArchiveCreateMetadata(
+        title="Synthetic session", source=SourceInput(kind="conversation")
+    )
+    assert omitted.occurred_at is None
+    assert omitted.to_wire() == {
+        "title": "Synthetic session",
+        "source": {"kind": "conversation"},
+    }
+    assert "occurred_at" not in omitted.to_wire()
+    assert (
+        ArchiveCreateMetadata(
+            "Synthetic session",
+            datetime(2026, 8, 11, 17, 15, tzinfo=UTC),
+            SourceInput("conversation"),
+        ).to_wire()
+        == metadata.to_wire()
+    )
+    with pytest.raises(ValueError, match="source must be SourceInput"):
+        ArchiveCreateMetadata(title="Synthetic session")
     with pytest.raises(TypeError):
-        SearchRequest(query="synthetic", future=True)  # type: ignore[call-arg]
+        CurrentPageSearchRequest(keywords=("synthetic",), future=True)  # type: ignore[call-arg]
     with pytest.raises(ValueError, match="UTC offset"):
         ArchiveCreateMetadata(
             title="Synthetic",
@@ -291,7 +361,7 @@ def test_sensitive_request_and_response_fields_are_omitted_from_repr() -> None:
         occurred_at=datetime(2026, 8, 11, 17, 15, tzinfo=UTC),
         source=SourceInput(kind="conversation", locator="private:synthetic-locator"),
     )
-    search = SearchRequest(query="private synthetic query")
+    search = CurrentPageSearchRequest(keywords=("private synthetic query",))
     document = PageDocument.from_dict(sample_page(content="private synthetic body"))
     problem = ProblemDetails.from_dict(
         {
@@ -518,6 +588,46 @@ def test_response_timestamp_requires_valid_rfc3339_offset(timestamp: str) -> Non
         PageDocument.from_dict(response)
 
 
+@pytest.mark.parametrize(
+    ("change", "error"),
+    [
+        ({"policy_mode": "library_grants"}, "supplied together"),
+        ({"library_grants": []}, "supplied together"),
+        ({"policy_mode": None, "library_grants": []}, "unknown mode"),
+        ({"policy_mode": "future", "library_grants": []}, "unknown mode"),
+        ({"policy_mode": "operator", "library_grants": {}}, "array"),
+        (
+            {
+                "policy_mode": "library_grants",
+                "library_grants": [{"library_id": "lib_one", "actions": ["admin"]}],
+            },
+            "invalid permission",
+        ),
+        (
+            {
+                "policy_mode": "library_grants",
+                "library_grants": [{"library_id": "lib_one", "actions": ["read"], "extra": 1}],
+            },
+            "exactly",
+        ),
+    ],
+)
+def test_whoami_rejects_partial_or_unknown_library_policy(
+    change: dict[str, object], error: str
+) -> None:
+    identity: dict[str, object] = {
+        "caller_id": "caller_synthetic",
+        "credential_id": "credential_synthetic",
+        "kind": "agent",
+        "expires_at": "2026-09-01T00:00:00Z",
+        "policy_version": 1,
+        "grants": [],
+        **change,
+    }
+    with pytest.raises(ProtocolError, match=error):
+        WhoAmI.from_dict(identity)
+
+
 def test_request_value_invariants_are_strict() -> None:
     with pytest.raises(ValueError, match="source kind"):
         SourceInput(kind="")
@@ -527,16 +637,79 @@ def test_request_value_invariants_are_strict() -> None:
             occurred_at=datetime(2026, 8, 11, tzinfo=UTC),
             source=SourceInput(kind="conversation"),
         )
-    with pytest.raises(ValueError, match="query"):
-        SearchRequest(query="")
-    with pytest.raises(ValueError, match="limit"):
-        SearchRequest(query="synthetic", limit=101)
-    with pytest.raises(ValueError, match="integer"):
-        SearchRequest(query="synthetic", limit=True)
-    with pytest.raises(ValueError, match="cursor"):
-        SearchRequest(query="synthetic", cursor=3)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="bytes"):
         MarkdownContent("synthetic")  # type: ignore[arg-type]
+
+
+def test_current_page_search_request_rejects_invalid_scope_and_window() -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        CurrentPageSearchRequest()
+    with pytest.raises(ValueError, match="keywords"):
+        CurrentPageSearchRequest(keywords=("",))
+    with pytest.raises(ValueError, match="Tags"):
+        CurrentPageSearchRequest(tags_any=("tag",))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="Libraries"):
+        CurrentPageSearchRequest(keywords=("term",), libraries=("",))
+    with pytest.raises(ValueError, match="empty selection"):
+        CurrentPageSearchRequest(keywords=("term",), libraries=())
+    with pytest.raises(ValueError, match="keyword count"):
+        CurrentPageSearchRequest(keywords=("term",) * 257)
+    with pytest.raises(ValueError, match="keyword.*byte limit"):
+        CurrentPageSearchRequest(keywords=("x" * 32_769,))
+    with pytest.raises(ValueError, match="Tag count"):
+        CurrentPageSearchRequest(tags_any=(SearchTagRef("lib", "tag"),) * 257)
+    with pytest.raises(ValueError, match="request.*byte limit"):
+        CurrentPageSearchRequest(
+            tags_any=tuple(SearchTagRef("lib" + str(index), "x" * 400) for index in range(256))
+        )
+    with pytest.raises(ValueError, match="microseconds"):
+        CurrentPageSearchRequest(occurred_from_us=True)
+    with pytest.raises(ValueError, match="interval"):
+        CurrentPageSearchRequest(occurred_from_us=2, occurred_before_us=2)
+    with pytest.raises(ValueError, match="limit"):
+        CurrentPageSearchRequest(keywords=("term",), limit=101)
+    with pytest.raises(ValueError, match="Library identifier"):
+        SearchTagRef("", "tag")
+    with pytest.raises(ValueError, match="Tag identifier"):
+        SearchTagRef("lib", "")
+
+
+def test_current_page_search_result_rejects_unknown_match_source() -> None:
+    item = {
+        "library_id": "lib",
+        "section_id": "section",
+        "book_id": "book",
+        "page_id": "page",
+        "revision_id": "revision",
+        "revision_number": 1,
+        "revision_files_href": (
+            "/api/v1/libraries/lib/sections/section/pages/page/revisions/revision/files"
+        ),
+        "title": "Synthetic",
+        "occurred_at": 1_000_000,
+        "match_sources": [{"kind": "unknown", "file_name": None}],
+    }
+    with pytest.raises(ProtocolError, match="unknown match source"):
+        CurrentPageSearchResult.from_dict({"items": [item]})
+
+
+def test_current_page_search_result_rejects_mismatched_revision_href() -> None:
+    item = {
+        "library_id": "lib",
+        "section_id": "section",
+        "book_id": "book",
+        "page_id": "page",
+        "revision_id": "revision",
+        "revision_number": 1,
+        "revision_files_href": (
+            "/api/v1/libraries/lib/sections/section/pages/page/revisions/other/files"
+        ),
+        "title": "Synthetic",
+        "occurred_at": 1_000_000,
+        "match_sources": [],
+    }
+    with pytest.raises(ProtocolError, match="returned Revision"):
+        CurrentPageSearchResult.from_dict({"items": [item]})
 
 
 def test_multipart_rejects_unsafe_boundary() -> None:

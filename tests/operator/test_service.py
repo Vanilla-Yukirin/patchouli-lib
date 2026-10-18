@@ -6,11 +6,20 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, func, insert, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import OperationalError
 
-from patchouli_lib.auth.models import AuditEvent, BootstrapMarker, Caller, Credential, SectionGrant
+from patchouli_lib.auth.models import (
+    AgentTokenValue,
+    AuditEvent,
+    BootstrapMarker,
+    Caller,
+    Credential,
+    CredentialLibraryGrant,
+    CredentialLibraryPolicy,
+    SectionGrant,
+)
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
     AuditOutcome,
@@ -41,6 +50,7 @@ from patchouli_lib.operator.service import (
     OperatorBootstrapService,
     OperatorRecoveryUnavailableError,
     OperatorService,
+    PolicyConflictError,
     ResourceNotFoundError,
 )
 
@@ -549,6 +559,166 @@ def test_rotation_revocation_expiry_and_replay_safe_lifecycle(
     with operator_engine.connect() as connection:
         stored_count = connection.scalar(select(func.count()).select_from(Credential))
         assert stored_count == 3
+
+
+@pytest.mark.parametrize("with_grant", [False, True])
+def test_legacy_rotation_rejects_opted_in_library_policy_without_side_effects(
+    operator_engine: Engine,
+    operator_scopes: tuple[str, str, str],
+    bootstrapped_operator: BootstrappedOperator,
+    with_grant: bool,
+) -> None:
+    library_id, _, _ = operator_scopes
+    caller_id, credential_id, original_token = _create_agent_and_credential(
+        operator_engine, bootstrapped_operator, library_id
+    )
+    with immediate_transaction(operator_engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryPolicy),
+            {
+                "credential_id": credential_id,
+                "caller_id": caller_id,
+                "home_library_id": library_id,
+                "mode": "library_grants",
+                "created_at": 3_000_000,
+            },
+        )
+        if with_grant:
+            connection.execute(
+                insert(CredentialLibraryGrant),
+                {
+                    "credential_id": credential_id,
+                    "caller_id": caller_id,
+                    "home_library_id": library_id,
+                    "target_library_id": library_id,
+                    "action": "read",
+                    "created_at": 3_000_000,
+                },
+            )
+
+    with immediate_transaction(operator_engine) as connection:
+        repository = AuthRepository(connection)
+        before = repository.get_credential(library_id, caller_id, credential_id)
+        assert before is not None
+        credential_count = connection.scalar(select(func.count()).select_from(Credential))
+        value_count = connection.scalar(select(func.count()).select_from(AgentTokenValue))
+        audit_count = connection.scalar(select(func.count()).select_from(AuditEvent))
+        with pytest.raises(PolicyConflictError):
+            _operator_service(repository, ["1" * 32, "2" * 32]).rotate_credential(
+                bootstrapped_operator.credential.value,
+                library_id=library_id,
+                caller_id=caller_id,
+                credential_id=credential_id,
+                expires_at=16_000_000,
+                request_id="req_reject_legacy_rotation",
+            )
+        # Commit even after the handled error: the guard must precede issuance.
+        assert repository.get_credential(library_id, caller_id, credential_id) == before
+        assert connection.scalar(select(func.count()).select_from(Credential)) == credential_count
+        assert connection.scalar(select(func.count()).select_from(AgentTokenValue)) == value_count
+        assert connection.scalar(select(func.count()).select_from(AuditEvent)) == audit_count
+
+    with operator_engine.connect() as connection:
+        repository = AuthRepository(connection)
+        assert repository.get_credential(library_id, caller_id, credential_id) == before
+        assert (
+            AuthenticationService(repository, clock=lambda: 4_000_000)
+            .authenticate(original_token)
+            .credential.id
+            == credential_id
+        )
+
+
+def test_legacy_rotation_remains_available_for_sibling_credential(
+    operator_engine: Engine,
+    operator_scopes: tuple[str, str, str],
+    bootstrapped_operator: BootstrappedOperator,
+) -> None:
+    library_id, _, _ = operator_scopes
+    caller_id, opted_credential_id, _ = _create_agent_and_credential(
+        operator_engine, bootstrapped_operator, library_id
+    )
+    with immediate_transaction(operator_engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryPolicy),
+            {
+                "credential_id": opted_credential_id,
+                "caller_id": caller_id,
+                "home_library_id": library_id,
+                "mode": "library_grants",
+                "created_at": 3_000_000,
+            },
+        )
+        sibling = _operator_service(
+            AuthRepository(connection), ["1" * 32, "2" * 32]
+        ).create_credential(
+            bootstrapped_operator.credential.value,
+            library_id=library_id,
+            caller_id=caller_id,
+            expires_at=16_000_000,
+            request_id="req_create_legacy_sibling",
+        )
+
+    with immediate_transaction(operator_engine) as connection:
+        replacement = _operator_service(
+            AuthRepository(connection), ["3" * 32, "4" * 32]
+        ).rotate_credential(
+            bootstrapped_operator.credential.value,
+            library_id=library_id,
+            caller_id=caller_id,
+            credential_id=sibling.credential.id,
+            expires_at=17_000_000,
+            request_id="req_rotate_legacy_sibling",
+        )
+        repository = AuthRepository(connection)
+        assert repository.has_library_grant_policy(library_id, caller_id, opted_credential_id)
+        assert not repository.has_library_grant_policy(
+            library_id, caller_id, replacement.credential.id
+        )
+
+    with operator_engine.connect() as connection:
+        repository = AuthRepository(connection)
+        stored = repository.get_credential(library_id, caller_id, sibling.credential.id)
+        assert stored is not None
+        assert stored.rotated_to_credential_id == replacement.credential.id
+        assert (
+            AuthenticationService(repository, clock=lambda: 4_000_000)
+            .authenticate(replacement.value)
+            .credential.id
+            == replacement.credential.id
+        )
+
+
+def test_rotation_policy_probe_error_does_not_issue_or_retire(
+    operator_engine: Engine,
+    operator_scopes: tuple[str, str, str],
+    bootstrapped_operator: BootstrappedOperator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    library_id, _, _ = operator_scopes
+    caller_id, credential_id, _ = _create_agent_and_credential(
+        operator_engine, bootstrapped_operator, library_id
+    )
+    with immediate_transaction(operator_engine) as connection:
+        repository = AuthRepository(connection)
+        before = repository.get_credential(library_id, caller_id, credential_id)
+        credential_count = connection.scalar(select(func.count()).select_from(Credential))
+
+        def fail_policy_probe(*_args: str) -> bool:
+            raise RuntimeError("Synthetic policy lookup failure.")
+
+        monkeypatch.setattr(repository, "has_library_grant_policy", fail_policy_probe)
+        with pytest.raises(RuntimeError, match="Synthetic policy lookup failure"):
+            _operator_service(repository, ["1" * 32, "2" * 32]).rotate_credential(
+                bootstrapped_operator.credential.value,
+                library_id=library_id,
+                caller_id=caller_id,
+                credential_id=credential_id,
+                expires_at=16_000_000,
+                request_id="req_failed_policy_lookup",
+            )
+        assert repository.get_credential(library_id, caller_id, credential_id) == before
+        assert connection.scalar(select(func.count()).select_from(Credential)) == credential_count
 
 
 def test_expiry_last_used_coalescing_and_finite_expiry_validation(
@@ -1107,6 +1277,7 @@ def test_audit_request_id_validation_rejects_token_shaped_value() -> None:
         NewAuditEvent(
             id="1" * 32,
             library_id="2" * 32,
+            actor_home_library_id="2" * 32,
             actor_caller_id="3" * 32,
             actor_credential_id="4" * 32,
             action="auth.synthetic",
@@ -1123,6 +1294,7 @@ def test_grant_audit_schema_rejects_incomplete_or_non_grant_identity() -> None:
         NewAuditEvent(
             id="1" * 32,
             library_id="2" * 32,
+            actor_home_library_id="2" * 32,
             actor_caller_id="3" * 32,
             actor_credential_id="4" * 32,
             action="auth.grant.add",
@@ -1138,6 +1310,7 @@ def test_grant_audit_schema_rejects_incomplete_or_non_grant_identity() -> None:
         NewAuditEvent(
             id="1" * 32,
             library_id="2" * 32,
+            actor_home_library_id="2" * 32,
             actor_caller_id="3" * 32,
             actor_credential_id="4" * 32,
             action="auth.caller.create",

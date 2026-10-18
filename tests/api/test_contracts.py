@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
+from patchouli_lib.api.auth_contracts import FileSetLimits
 from patchouli_lib.api.contracts import (
     API_V1_PREFIX,
     DEFAULT_PAGE_LIMIT,
@@ -175,6 +176,12 @@ def test_citation_rejects_non_relative_or_unversioned_href(href: str) -> None:
 def test_wire_models_reject_unknown_fields() -> None:
     with pytest.raises(ValidationError):
         PaginationParameters.model_validate({"unexpected": "value"})
+
+
+@pytest.mark.parametrize("field", ["max_file_bytes", "max_page_bytes", "max_files_per_page"])
+def test_file_set_limits_require_positive_values(field: str) -> None:
+    with pytest.raises(ValidationError):
+        FileSetLimits.model_validate({field: 0})
 
 
 def test_pagination_defaults_and_bounds() -> None:

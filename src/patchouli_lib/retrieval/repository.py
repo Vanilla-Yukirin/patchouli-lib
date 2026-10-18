@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import Connection, and_, select
 
+from patchouli_lib.auth.library_policy import LibraryPolicy, resolve_library_policy
 from patchouli_lib.auth.models import Caller, Credential, SectionGrant
 from patchouli_lib.auth.schemas import (
     CallerRecord,
@@ -15,7 +16,20 @@ from patchouli_lib.auth.schemas import (
     StoredCredential,
     credential_metadata,
 )
-from patchouli_lib.content.models import Page, PageIdentifier, Revision
+from patchouli_lib.content.file_manifest import (
+    MAX_FILE_BYTES,
+    MAX_FILES_PER_PAGE,
+    MAX_PAGE_BYTES,
+)
+from patchouli_lib.content.models import (
+    Page,
+    PageIdentifier,
+    Revision,
+    RevisionFile,
+    RevisionFileSeal,
+    RevisionFileSealGuard,
+    RevisionFileSet,
+)
 from patchouli_lib.content.schemas import PageRecord, RevisionRecord
 from patchouli_lib.identifiers import page_id_registry_digest
 from patchouli_lib.library.models import Book, Section
@@ -27,6 +41,21 @@ from patchouli_lib.retrieval.schemas import KeysetPage, ReadWindow
 class StoredDocument:
     page: PageRecord
     revision: RevisionRecord
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class StoredRevisionFile:
+    name: str
+    content: bytes
+    size_bytes: int
+    content_sha256: bytes
+
+
+class RetrievalUnsupportedFormatError(RuntimeError):
+    """The legacy Markdown reader cannot represent this Revision format."""
+
+    def __init__(self) -> None:
+        super().__init__("The requested Revision format is not supported by this read route.")
 
 
 class RetrievalRepository:
@@ -77,6 +106,40 @@ class RetrievalRepository:
         return tuple(
             SectionAction(value) for value in self._connection.execute(statement).scalars().all()
         )
+
+    def get_library_policy(
+        self,
+        *,
+        credential_id: str,
+        caller_id: str,
+        home_library_id: str,
+        target_library_id: str,
+        active_at: int,
+    ) -> LibraryPolicy | None:
+        return resolve_library_policy(
+            self._connection,
+            credential_id=credential_id,
+            caller_id=caller_id,
+            home_library_id=home_library_id,
+            target_library_id=target_library_id,
+            active_at=active_at,
+        )
+
+    def list_sections(
+        self,
+        library_id: str,
+        window: ReadWindow,
+    ) -> KeysetPage[SectionRecord]:
+        """List one already-authorized Library without consulting legacy Section grants."""
+
+        statement = (
+            select(Section.__table__).where(Section.library_id == library_id).order_by(Section.id)
+        )
+        if window.after_key is not None:
+            statement = statement.where(Section.id > window.after_key)
+        rows = self._connection.execute(statement.limit(window.limit + 1)).mappings().all()
+        records = tuple(SectionRecord.model_validate(dict(row)) for row in rows)
+        return self._page(records, window.limit, key=lambda item: item.id)
 
     def list_queryable_sections(
         self,
@@ -182,6 +245,28 @@ class RetrievalRepository:
         row = self._connection.execute(statement).mappings().one_or_none()
         return None if row is None else PageRecord.model_validate(dict(row))
 
+    def get_page_by_id(self, library_id: str, identifier_text: str) -> PageRecord | None:
+        """Resolve a scoped registry key without guessing its current Section."""
+        statement = (
+            select(Page.__table__)
+            .join(
+                PageIdentifier,
+                and_(
+                    PageIdentifier.library_id == Page.library_id,
+                    PageIdentifier.page_uid == Page.page_uid,
+                ),
+            )
+            .where(
+                Page.library_id == library_id,
+                Page.deleted_at.is_(None),
+                PageIdentifier.library_id == library_id,
+                PageIdentifier.identifier_digest == page_id_registry_digest(identifier_text),
+                PageIdentifier.identifier_text == identifier_text,
+            )
+        )
+        row = self._connection.execute(statement).mappings().one_or_none()
+        return None if row is None else PageRecord.model_validate(dict(row))
+
     def get_revision(
         self,
         library_id: str,
@@ -194,7 +279,83 @@ class RetrievalRepository:
             Revision.revision_number == revision_number,
         )
         row = self._connection.execute(statement).mappings().one_or_none()
-        return None if row is None else RevisionRecord.model_validate(dict(row))
+        if row is None:
+            return None
+        # Check the stored format before validating the legacy Markdown model:
+        # file_set_v1 may legitimately have no content_md mirror at all.
+        format_statement = select(RevisionFileSet.storage_format).where(
+            RevisionFileSet.library_id == library_id,
+            RevisionFileSet.page_uid == page_uid,
+            RevisionFileSet.revision_id == row["revision_id"],
+            RevisionFileSet.revision_number == revision_number,
+        )
+        storage_format = self._connection.execute(format_statement).scalar_one_or_none()
+        if storage_format == "file_set_v1":
+            raise RetrievalUnsupportedFormatError
+        if storage_format != "legacy_markdown":
+            raise RuntimeError("Stored Revision file-set manifest is missing or invalid.")
+        return RevisionRecord.model_validate(dict(row))
+
+    def list_revision_files(
+        self,
+        library_id: str,
+        page_uid: bytes,
+        revision_id: str,
+        revision_number: int,
+    ) -> tuple[StoredRevisionFile, ...]:
+        statement = (
+            select(
+                RevisionFile.filename,
+                RevisionFile.content_bytes,
+                RevisionFile.size_bytes,
+                RevisionFile.content_sha256,
+            )
+            .where(
+                RevisionFile.library_id == library_id,
+                RevisionFile.page_uid == page_uid,
+                RevisionFile.revision_id == revision_id,
+                RevisionFile.revision_number == revision_number,
+            )
+            .order_by(RevisionFile.filename)
+        )
+        files: list[StoredRevisionFile] = []
+        total_size = 0
+        for row in self._connection.execute(statement):
+            content = row[1]
+            if (
+                type(content) is not bytes
+                or len(content) > MAX_FILE_BYTES
+                or len(files) >= MAX_FILES_PER_PAGE
+                or total_size + len(content) > MAX_PAGE_BYTES
+            ):
+                raise ValueError("Stored Revision file set exceeds its supported bounds.")
+            files.append(StoredRevisionFile(*row))
+            total_size += len(content)
+        return tuple(files)
+
+    def has_revision_file_seal(
+        self,
+        library_id: str,
+        page_uid: bytes,
+        revision_id: str,
+        revision_number: int,
+    ) -> bool:
+        identity = (
+            library_id,
+            page_uid,
+            revision_id,
+            revision_number,
+        )
+        for model in (RevisionFileSeal, RevisionFileSealGuard):
+            statement = select(model.revision_id).where(
+                model.library_id == identity[0],
+                model.page_uid == identity[1],
+                model.revision_id == identity[2],
+                model.revision_number == identity[3],
+            )
+            if self._connection.execute(statement).scalar_one_or_none() is None:
+                return False
+        return True
 
     def get_current_document(
         self,
@@ -227,4 +388,9 @@ class RetrievalRepository:
         return KeysetPage(items=visible, next_key=key(visible[-1]))
 
 
-__all__ = ["RetrievalRepository", "StoredDocument"]
+__all__ = [
+    "RetrievalRepository",
+    "RetrievalUnsupportedFormatError",
+    "StoredDocument",
+    "StoredRevisionFile",
+]

@@ -125,6 +125,7 @@ class OperatorBootstrapService:
             NewAuditEvent(
                 id=self._id_factory(),
                 library_id=request.library_id,
+                actor_home_library_id=caller.library_id,
                 actor_caller_id=caller.id,
                 actor_credential_id=credential.credential.id,
                 action="operator.bootstrap",
@@ -204,6 +205,7 @@ class LocalOperatorRecoveryService:
                 NewAuditEvent(
                     id=self._id_factory(),
                     library_id=request.library_id,
+                    actor_home_library_id=caller.library_id,
                     actor_caller_id=caller.id,
                     actor_credential_id=credential.credential.id,
                     action="auth.operator.recovery",
@@ -313,6 +315,10 @@ class OperatorService:
         current = self._repository.get_credential(library_id, caller_id, credential_id)
         if current is None or current.revoked_at is not None or current.rotated_at is not None:
             raise CredentialLifecycleError
+        # This legacy path does not copy per-credential Library grants. Never
+        # replace an opted-in credential with an implicit legacy Section token.
+        if self._repository.has_library_grant_policy(library_id, caller_id, credential_id):
+            raise PolicyConflictError
 
         rotated_at = self._clock()
         replacement = CredentialIssuer(
@@ -549,6 +555,7 @@ class OperatorService:
             NewAuditEvent(
                 id=self._id_factory(),
                 library_id=actor.caller.library_id,
+                actor_home_library_id=actor.caller.library_id,
                 actor_caller_id=actor.caller.id,
                 actor_credential_id=actor.credential.id,
                 target_caller_id=target_caller_id,

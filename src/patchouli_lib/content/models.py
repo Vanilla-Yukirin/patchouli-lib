@@ -15,6 +15,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
+from patchouli_lib.content.file_manifest import (
+    MAX_FILE_BYTES,
+    MAX_FILENAME_BYTES,
+    MAX_FILES_PER_PAGE,
+    MAX_PAGE_BYTES,
+)
 from patchouli_lib.identifiers import (
     MAX_BASE_SLUG_BYTES,
     MAX_COLLISION_ORDINAL,
@@ -156,6 +162,349 @@ class Page(Base):
     deleted_at: Mapped[int | None] = mapped_column(BigInteger)
 
 
+class PageTitleEvent(Base):
+    """Immutable master-audited change of a Page's display title."""
+
+    __tablename__ = "page_title_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id", "page_uid"],
+            ["pages.library_id", "pages.page_uid"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["master_audit_event_id"], ["admin_master_audit_events.id"], ondelete="RESTRICT"
+        ),
+        UniqueConstraint("master_audit_event_id", name="uq_page_title_events_master_audit"),
+        CheckConstraint("sequence BETWEEN 1 AND 9223372036854775807"),
+        CheckConstraint("at_revision_number BETWEEN 1 AND 9223372036854775807"),
+        CheckConstraint(
+            "typeof(old_title) = 'text' AND length(old_title) >= 1 "
+            "AND instr(old_title, char(0)) = 0 AND "
+            "typeof(new_title) = 'text' AND length(new_title) >= 1 "
+            "AND instr(new_title, char(0)) = 0 AND old_title != new_title"
+        ),
+        CheckConstraint(
+            "old_updated_at >= 0 AND changed_at > old_updated_at "
+            "AND changed_at <= 9223372036854775807"
+        ),
+    )
+
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
+    sequence: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    old_title: Mapped[str] = mapped_column(Text, nullable=False)
+    new_title: Mapped[str] = mapped_column(Text, nullable=False)
+    old_updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    changed_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    at_revision_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    master_audit_event_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+
+
+class PageOccurrenceCorrection(Base):
+    """Immutable audit of one declared-time correction, created by SQLite."""
+
+    __tablename__ = "page_occurrence_corrections"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id", "page_uid"],
+            ["pages.library_id", "pages.page_uid"],
+            name="fk_page_occurrence_corrections_page",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["actor_caller_id", "actor_home_library_id"],
+            ["auth_callers.id", "auth_callers.library_id"],
+            name="fk_page_occurrence_corrections_actor",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["master_audit_event_id"],
+            ["admin_master_audit_events.id"],
+            name="fk_page_occurrence_corrections_master_audit",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "master_audit_event_id", name="uq_page_occurrence_corrections_master_audit"
+        ),
+        CheckConstraint(
+            "(actor_caller_id IS NOT NULL AND actor_home_library_id IS NOT NULL "
+            "AND master_audit_event_id IS NULL) OR "
+            "(actor_caller_id IS NULL AND actor_home_library_id IS NULL "
+            "AND master_audit_event_id IS NOT NULL)",
+            name="ck_page_occurrence_corrections_actor_kind",
+        ),
+        CheckConstraint(
+            "sequence BETWEEN 1 AND 9223372036854775807",
+            name="ck_page_occurrence_corrections_sequence",
+        ),
+        CheckConstraint(
+            f"old_occurred_at BETWEEN {MIN_OCCURRENCE_MICROSECONDS} "
+            f"AND {MAX_OCCURRENCE_MICROSECONDS} "
+            f"AND new_occurred_at BETWEEN {MIN_OCCURRENCE_MICROSECONDS} "
+            f"AND {MAX_OCCURRENCE_MICROSECONDS} "
+            "AND old_occurred_at != new_occurred_at",
+            name="ck_page_occurrence_corrections_values",
+        ),
+        CheckConstraint(
+            "at_revision_number BETWEEN 1 AND 9223372036854775807",
+            name="ck_page_occurrence_corrections_revision",
+        ),
+        CheckConstraint("corrected_at >= 0", name="ck_page_occurrence_corrections_time"),
+    )
+
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    actor_home_library_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
+    page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
+    sequence: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    old_occurred_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    new_occurred_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    at_revision_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    actor_caller_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
+    master_audit_event_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
+    corrected_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class PageOccurrenceCorrectionGuard(Base):
+    """Transient write authorization consumed by a Page UPDATE trigger."""
+
+    __tablename__ = "page_occurrence_correction_guards"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id", "page_uid"],
+            ["pages.library_id", "pages.page_uid"],
+            name="fk_page_occurrence_correction_guards_page",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["actor_caller_id", "actor_home_library_id"],
+            ["auth_callers.id", "auth_callers.library_id"],
+            name="fk_page_occurrence_correction_guards_actor",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["master_audit_event_id"],
+            ["admin_master_audit_events.id"],
+            name="fk_page_occurrence_correction_guards_master_audit",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "(actor_caller_id IS NOT NULL AND actor_home_library_id IS NOT NULL "
+            "AND master_audit_event_id IS NULL) OR "
+            "(actor_caller_id IS NULL AND actor_home_library_id IS NULL "
+            "AND master_audit_event_id IS NOT NULL)",
+            name="ck_page_occurrence_correction_guards_actor_kind",
+        ),
+        ForeignKeyConstraint(
+            ["library_id", "page_uid", "sequence"],
+            [
+                "page_occurrence_corrections.library_id",
+                "page_occurrence_corrections.page_uid",
+                "page_occurrence_corrections.sequence",
+            ],
+            name="fk_page_occurrence_correction_guards_completed",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        CheckConstraint(
+            "sequence BETWEEN 1 AND 9223372036854775807",
+            name="ck_page_occurrence_correction_guards_sequence",
+        ),
+        CheckConstraint(
+            f"old_occurred_at BETWEEN {MIN_OCCURRENCE_MICROSECONDS} "
+            f"AND {MAX_OCCURRENCE_MICROSECONDS} "
+            f"AND new_occurred_at BETWEEN {MIN_OCCURRENCE_MICROSECONDS} "
+            f"AND {MAX_OCCURRENCE_MICROSECONDS} "
+            "AND old_occurred_at != new_occurred_at",
+            name="ck_page_occurrence_correction_guards_values",
+        ),
+        CheckConstraint("corrected_at >= 0", name="ck_page_occurrence_correction_guards_time"),
+    )
+
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    actor_home_library_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
+    page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    old_occurred_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    new_occurred_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    actor_caller_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
+    master_audit_event_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
+    corrected_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class PageLifecycleEvent(Base):
+    """Immutable delete/restore event written by the Page transition trigger."""
+
+    __tablename__ = "page_lifecycle_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id", "page_uid"],
+            ["pages.library_id", "pages.page_uid"],
+            name="fk_page_lifecycle_events_page",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["section_id", "library_id"],
+            ["sections.id", "sections.library_id"],
+            name="fk_page_lifecycle_events_section",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["actor_caller_id", "actor_home_library_id"],
+            ["auth_callers.id", "auth_callers.library_id"],
+            name="fk_page_lifecycle_events_actor",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["master_audit_event_id"],
+            ["admin_master_audit_events.id"],
+            name="fk_page_lifecycle_events_master_audit",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "(actor_caller_id IS NOT NULL AND actor_home_library_id IS NOT NULL "
+            "AND master_audit_event_id IS NULL) OR "
+            "(actor_caller_id IS NULL AND actor_home_library_id IS NULL "
+            "AND master_audit_event_id IS NOT NULL)",
+            name="ck_page_lifecycle_events_actor_kind",
+        ),
+        CheckConstraint(
+            "sequence BETWEEN 1 AND 9223372036854775807",
+            name="ck_page_lifecycle_events_sequence",
+        ),
+        CheckConstraint(
+            "(action = 'delete' AND old_deleted_at IS NULL) "
+            "OR (action = 'restore' AND old_deleted_at IS NOT NULL)",
+            name="ck_page_lifecycle_events_action",
+        ),
+        CheckConstraint(
+            "old_updated_at >= 0 AND changed_at > old_updated_at "
+            "AND changed_at <= 9223372036854775807 "
+            "AND (old_deleted_at IS NULL OR "
+            "(old_deleted_at >= 0 AND old_deleted_at <= old_updated_at))",
+            name="ck_page_lifecycle_events_time",
+        ),
+        CheckConstraint(
+            "at_revision_number BETWEEN 1 AND 9223372036854775807 "
+            f"AND occurred_at_at_event BETWEEN {MIN_OCCURRENCE_MICROSECONDS} "
+            f"AND {MAX_OCCURRENCE_MICROSECONDS}",
+            name="ck_page_lifecycle_events_snapshot",
+        ),
+        CheckConstraint(
+            "length(request_id) = 36 AND substr(request_id, 1, 4) = 'req_' "
+            "AND substr(request_id, 5) NOT GLOB '*[^0-9a-f]*'",
+            name="ck_page_lifecycle_events_request_id",
+        ),
+    )
+
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    actor_home_library_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
+    page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
+    sequence: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    action: Mapped[str] = mapped_column(String(8), nullable=False)
+    section_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+    old_deleted_at: Mapped[int | None] = mapped_column(BigInteger)
+    old_updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    changed_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    at_revision_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    occurred_at_at_event: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    actor_caller_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
+    master_audit_event_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
+    request_id: Mapped[str] = mapped_column(String(36), nullable=False)
+
+
+class PageLifecycleGuard(Base):
+    """Short-lived transition proof consumed during the Page UPDATE."""
+
+    __tablename__ = "page_lifecycle_guards"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id", "page_uid"],
+            ["pages.library_id", "pages.page_uid"],
+            name="fk_page_lifecycle_guards_page",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["section_id", "library_id"],
+            ["sections.id", "sections.library_id"],
+            name="fk_page_lifecycle_guards_section",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["actor_caller_id", "actor_home_library_id"],
+            ["auth_callers.id", "auth_callers.library_id"],
+            name="fk_page_lifecycle_guards_actor",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["master_audit_event_id"],
+            ["admin_master_audit_events.id"],
+            name="fk_page_lifecycle_guards_master_audit",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "(actor_caller_id IS NOT NULL AND actor_home_library_id IS NOT NULL "
+            "AND master_audit_event_id IS NULL) OR "
+            "(actor_caller_id IS NULL AND actor_home_library_id IS NULL "
+            "AND master_audit_event_id IS NOT NULL)",
+            name="ck_page_lifecycle_guards_actor_kind",
+        ),
+        ForeignKeyConstraint(
+            ["library_id", "page_uid", "sequence"],
+            [
+                "page_lifecycle_events.library_id",
+                "page_lifecycle_events.page_uid",
+                "page_lifecycle_events.sequence",
+            ],
+            name="fk_page_lifecycle_guards_completed",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        CheckConstraint(
+            "sequence BETWEEN 1 AND 9223372036854775807",
+            name="ck_page_lifecycle_guards_sequence",
+        ),
+        CheckConstraint(
+            "(action = 'delete' AND old_deleted_at IS NULL) "
+            "OR (action = 'restore' AND old_deleted_at IS NOT NULL)",
+            name="ck_page_lifecycle_guards_action",
+        ),
+        CheckConstraint(
+            "old_updated_at >= 0 AND changed_at > old_updated_at "
+            "AND changed_at <= 9223372036854775807 "
+            "AND (old_deleted_at IS NULL OR "
+            "(old_deleted_at >= 0 AND old_deleted_at <= old_updated_at))",
+            name="ck_page_lifecycle_guards_time",
+        ),
+        CheckConstraint(
+            "at_revision_number BETWEEN 1 AND 9223372036854775807 "
+            f"AND occurred_at_at_event BETWEEN {MIN_OCCURRENCE_MICROSECONDS} "
+            f"AND {MAX_OCCURRENCE_MICROSECONDS}",
+            name="ck_page_lifecycle_guards_snapshot",
+        ),
+        CheckConstraint(
+            "length(request_id) = 36 AND substr(request_id, 1, 4) = 'req_' "
+            "AND substr(request_id, 5) NOT GLOB '*[^0-9a-f]*'",
+            name="ck_page_lifecycle_guards_request_id",
+        ),
+    )
+
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    actor_home_library_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
+    page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    action: Mapped[str] = mapped_column(String(8), nullable=False)
+    section_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
+    old_deleted_at: Mapped[int | None] = mapped_column(BigInteger)
+    old_updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    changed_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    at_revision_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    occurred_at_at_event: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    actor_caller_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
+    master_audit_event_id: Mapped[str | None] = mapped_column(String(OPAQUE_ID_LENGTH))
+    request_id: Mapped[str] = mapped_column(String(36), nullable=False)
+
+
 class Revision(Base):
     __tablename__ = "revisions"
     __table_args__ = (
@@ -181,16 +530,20 @@ class Revision(Base):
             name="ck_revisions_revision_number",
         ),
         CheckConstraint(
-            f"typeof(content_md) = 'blob' AND length(content_md) BETWEEN 1 "
-            f"AND {MAX_MARKDOWN_BYTES} AND instr(content_md, x'00') = 0",
+            "content_md IS NULL OR (typeof(content_md) = 'blob' "
+            f"AND length(content_md) BETWEEN 1 AND {MAX_MARKDOWN_BYTES} "
+            "AND instr(content_md, x'00') = 0)",
             name="ck_revisions_content_md",
         ),
         CheckConstraint(
-            "content_size_bytes = length(content_md)",
+            "(content_md IS NULL AND content_size_bytes IS NULL) OR "
+            "(content_md IS NOT NULL AND content_size_bytes = length(content_md))",
             name="ck_revisions_content_size_bytes",
         ),
         CheckConstraint(
-            f"typeof(content_sha256) = 'blob' AND length(content_sha256) = {CONTENT_SHA256_BYTES}",
+            "(content_md IS NULL AND content_sha256 IS NULL) OR "
+            "(content_md IS NOT NULL AND typeof(content_sha256) = 'blob' "
+            f"AND length(content_sha256) = {CONTENT_SHA256_BYTES})",
             name="ck_revisions_content_sha256",
         ),
         CheckConstraint("created_at >= 0", name="ck_revisions_created_at"),
@@ -225,13 +578,159 @@ class Revision(Base):
     )
     page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), nullable=False)
     revision_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    content_md: Mapped[bytes] = mapped_column(LargeBinary(MAX_MARKDOWN_BYTES), nullable=False)
-    content_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    content_sha256: Mapped[bytes] = mapped_column(
+    content_md: Mapped[bytes | None] = mapped_column(LargeBinary(MAX_MARKDOWN_BYTES))
+    content_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    content_sha256: Mapped[bytes | None] = mapped_column(
         LargeBinary(CONTENT_SHA256_BYTES),
-        nullable=False,
     )
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class RevisionFileSet(Base):
+    """Format and declared complete manifest for one immutable Revision."""
+
+    __tablename__ = "revision_file_sets"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id", "page_uid", "revision_id", "revision_number"],
+            [
+                "revisions.library_id",
+                "revisions.page_uid",
+                "revisions.revision_id",
+                "revisions.revision_number",
+            ],
+            name="fk_revision_file_sets_exact_revision",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "(storage_format = 'legacy_markdown' AND file_count = 1 "
+            f"AND total_size_bytes BETWEEN 1 AND {MAX_MARKDOWN_BYTES} "
+            "AND snapshot_sha256 IS NULL) OR "
+            "(storage_format = 'file_set_v1' "
+            f"AND file_count BETWEEN 1 AND {MAX_FILES_PER_PAGE} "
+            f"AND total_size_bytes BETWEEN 0 AND {MAX_PAGE_BYTES} "
+            "AND typeof(snapshot_sha256) = 'blob' AND length(snapshot_sha256) = 32)",
+            name="ck_revision_file_sets_format_manifest",
+        ),
+    )
+
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
+    revision_id: Mapped[str] = mapped_column(String(REVISION_ID_LENGTH), primary_key=True)
+    revision_number: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    storage_format: Mapped[str] = mapped_column(String(16), nullable=False)
+    file_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    total_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    snapshot_sha256: Mapped[bytes | None] = mapped_column(LargeBinary(CONTENT_SHA256_BYTES))
+
+
+class RevisionFile(Base):
+    """One immutable flat file in a Revision's sealed snapshot."""
+
+    __tablename__ = "revision_files"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id", "page_uid", "revision_id", "revision_number"],
+            [
+                "revisions.library_id",
+                "revisions.page_uid",
+                "revisions.revision_id",
+                "revisions.revision_number",
+            ],
+            name="fk_revision_files_exact_revision",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "typeof(filename) = 'text' AND length(filename) >= 1 "
+            f"AND length(CAST(filename AS BLOB)) <= {MAX_FILENAME_BYTES} "
+            "AND filename NOT IN ('.', '..') "
+            "AND instr(filename, '/') = 0 AND instr(filename, char(92)) = 0 "
+            "AND instr(filename, char(0)) = 0 "
+            "AND filename = trim(filename, ' ') "
+            "AND substr(filename, -1) != '.'",
+            name="ck_revision_files_flat_filename",
+        ),
+        CheckConstraint(
+            "typeof(content_bytes) = 'blob' "
+            f"AND length(content_bytes) BETWEEN 0 AND {MAX_FILE_BYTES}",
+            name="ck_revision_files_content_bytes",
+        ),
+        CheckConstraint("size_bytes = length(content_bytes)", name="ck_revision_files_size_bytes"),
+        CheckConstraint(
+            "typeof(content_sha256) = 'blob' AND length(content_sha256) = 32",
+            name="ck_revision_files_content_sha256",
+        ),
+    )
+
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
+    revision_id: Mapped[str] = mapped_column(String(REVISION_ID_LENGTH), primary_key=True)
+    revision_number: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    filename: Mapped[str] = mapped_column(Text, primary_key=True)
+    content_bytes: Mapped[bytes] = mapped_column(LargeBinary(MAX_FILE_BYTES), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    content_sha256: Mapped[bytes] = mapped_column(LargeBinary(CONTENT_SHA256_BYTES), nullable=False)
+
+
+class RevisionFileSeal(Base):
+    """An immutable marker for a complete Revision file set."""
+
+    __tablename__ = "revision_file_seals"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id", "page_uid", "revision_id", "revision_number"],
+            [
+                "revisions.library_id",
+                "revisions.page_uid",
+                "revisions.revision_id",
+                "revisions.revision_number",
+            ],
+            name="fk_revision_file_seals_exact_revision",
+            ondelete="RESTRICT",
+        ),
+    )
+
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
+    revision_id: Mapped[str] = mapped_column(String(REVISION_ID_LENGTH), primary_key=True)
+    revision_number: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+
+class RevisionFileSealGuard(Base):
+    """Require a matching seal by commit time for every Revision."""
+
+    __tablename__ = "revision_file_seal_guards"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["library_id", "page_uid", "revision_id", "revision_number"],
+            [
+                "revisions.library_id",
+                "revisions.page_uid",
+                "revisions.revision_id",
+                "revisions.revision_number",
+            ],
+            name="fk_revision_file_seal_guards_exact_revision",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["library_id", "page_uid", "revision_id", "revision_number"],
+            [
+                "revision_file_seals.library_id",
+                "revision_file_seals.page_uid",
+                "revision_file_seals.revision_id",
+                "revision_file_seals.revision_number",
+            ],
+            name="fk_revision_file_seal_guards_exact_seal",
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+    )
+
+    library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
+    page_uid: Mapped[bytes] = mapped_column(LargeBinary(RANDOM_IDENTIFIER_BYTES), primary_key=True)
+    revision_id: Mapped[str] = mapped_column(String(REVISION_ID_LENGTH), primary_key=True)
+    revision_number: Mapped[int] = mapped_column(BigInteger, primary_key=True)
 
 
 class PageRevisionAppendGuard(Base):
@@ -461,8 +960,15 @@ __all__ = [
     "MAX_OCCURRENCE_MICROSECONDS",
     "MIN_OCCURRENCE_MICROSECONDS",
     "Page",
+    "PageTitleEvent",
+    "PageOccurrenceCorrection",
+    "PageOccurrenceCorrectionGuard",
+    "PageLifecycleEvent",
+    "PageLifecycleGuard",
     "PageIdCollisionCounter",
     "PageIdentifier",
     "PageSource",
     "Revision",
+    "RevisionFile",
+    "RevisionFileSet",
 ]

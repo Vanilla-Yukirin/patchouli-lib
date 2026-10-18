@@ -52,7 +52,7 @@ _TOOL_NAMES = {
     "whoami",
     "sections_list",
     "books_list",
-    "section_search",
+    "pages_search",
     "page_current",
     "page_revision",
     "archive_create",
@@ -158,7 +158,58 @@ def test_tool_inventory_and_schemas_expose_no_secret_or_path_fields(tmp_path: Pa
         assert forbidden not in serialized
     for tool in tools:
         assert tool.inputSchema["additionalProperties"] is False
+    create_tool = next(tool for tool in tools if tool.name == "archive_create")
+    assert "occurred_at" not in create_tool.inputSchema["required"]
+    assert "occurred_at" in create_tool.inputSchema["properties"]
     assert harness.clients[0].close_calls == 1
+
+
+def test_archive_create_without_time_omits_field_and_returns_notice(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/v1/auth/whoami":
+            return httpx.Response(200, headers=protected_headers(), json=whoami_body())
+        assert request.url.path == "/api/v1/sections/sec_synthetic/books/book_synthetic/pages"
+        assert b'"occurred_at"' not in request.content
+        response = sample_page()
+        response["occurrence_notice"] = {
+            "source": "server_utc",
+            "warning_code": "occurred_at_defaulted",
+        }
+        return httpx.Response(
+            201,
+            headers=protected_headers(
+                Location=f"/api/v1/sections/sec_synthetic/pages/{_PAGE_ID}",
+                ETag='"revision-synthetic-1"',
+            ),
+            json=response,
+        )
+
+    harness = RuntimeHarness(tmp_path, httpx.MockTransport(handler))
+    arguments: dict[str, object] = {
+        "section_id": "sec_synthetic",
+        "book_id": "book_synthetic",
+        "title": "Synthetic",
+        "source_kind": "conversation",
+        "content": "# Synthetic",
+    }
+
+    async def action(session: ClientSession) -> list[mcp_types.CallToolResult]:
+        created = await session.call_tool("archive_create", arguments)
+        rejected = await session.call_tool("archive_create", {**arguments, "occurred_at": None})
+        return [created, rejected]
+
+    created, rejected = _run_session(harness, action)
+    assert not created.isError
+    assert rejected.isError
+    assert len(requests) == 2  # only the successful call reaches whoami and create
+    data = cast(dict[str, object], _payload(created)["data"])
+    assert data["occurrence_notice"] == {
+        "source": "server_utc",
+        "warning_code": "occurred_at_defaulted",
+    }
 
 
 def test_read_tools_use_exact_typed_client_requests_and_redact_credential_id(
@@ -172,7 +223,12 @@ def test_read_tools_use_exact_typed_client_requests_and_redact_credential_id(
         if path == "/api/v1/capabilities":
             body: object = capabilities_body()
         elif path == "/api/v1/auth/whoami":
-            body = whoami_body(credential_id="credential_must_not_escape")
+            body = {
+                **whoami_body(credential_id="credential_must_not_escape"),
+                "policy_mode": "library_grants",
+                "library_grants": [{"library_id": "lib_synthetic", "actions": ["read", "write"]}],
+                "grants": [],
+            }
         elif path == "/api/v1/sections":
             body = {
                 "items": [{"section_id": "sec_synthetic", "name": "Synthetic"}],
@@ -189,17 +245,25 @@ def test_read_tools_use_exact_typed_client_requests_and_redact_credential_id(
                 ],
                 "next_cursor": None,
             }
-        elif path == "/api/v1/sections/sec_synthetic/search":
-            page = sample_page()
+        elif path == "/api/v1/search":
             body = {
                 "items": [
                     {
-                        "page": page["page"],
-                        "citation": page["citation"],
-                        "snippet": "synthetic hit",
+                        "library_id": "lib_synthetic",
+                        "section_id": "sec_synthetic",
+                        "book_id": "book_synthetic",
+                        "page_id": _PAGE_ID,
+                        "revision_id": "rev_synthetic",
+                        "revision_number": 1,
+                        "revision_files_href": (
+                            f"/api/v1/libraries/lib_synthetic/sections/sec_synthetic/pages/{_PAGE_ID}"
+                            "/revisions/rev_synthetic/files"
+                        ),
+                        "title": "Synthetic",
+                        "occurred_at": 1_000_000,
+                        "match_sources": [{"kind": "title", "file_name": None}],
                     }
                 ],
-                "next_cursor": None,
             }
         else:
             body = sample_page()
@@ -217,8 +281,13 @@ def test_read_tools_use_exact_typed_client_requests_and_redact_credential_id(
             await session.call_tool("sections_list", {"limit": 20}),
             await session.call_tool("books_list", {"section_id": "sec_synthetic", "limit": 10}),
             await session.call_tool(
-                "section_search",
-                {"section_id": "sec_synthetic", "query": "synthetic", "limit": 5},
+                "pages_search",
+                {
+                    "keywords": ["synthetic"],
+                    "occurred_from_us": None,
+                    "occurred_before_us": None,
+                    "limit": 5,
+                },
             ),
             await session.call_tool(
                 "page_current", {"section_id": "sec_synthetic", "page_id": _PAGE_ID}
@@ -232,18 +301,53 @@ def test_read_tools_use_exact_typed_client_requests_and_redact_credential_id(
 
     results = _run_session(harness, action)
     assert all(not result.isError for result in results)
+    assert "occurrence_notice" not in cast(dict[str, object], _payload(results[5])["data"])
+    assert "occurrence_notice" not in cast(dict[str, object], _payload(results[6])["data"])
     assert "credential_must_not_escape" not in json.dumps(_payload(results[1]))
+    whoami_data = cast(dict[str, object], _payload(results[1])["data"])
+    assert whoami_data["name"] == "Synthetic Agent"
+    assert whoami_data["description"] == "Synthetic client fixture"
+    assert whoami_data["policy_mode"] == "library_grants"
+    assert whoami_data["library_grants"] == [
+        {"library_id": "lib_synthetic", "actions": ["read", "write"]}
+    ]
+    assert whoami_data["grants"] == []
     assert [(request.method, request.url.path) for request in requests] == [
         ("GET", "/api/v1/capabilities"),
         ("GET", "/api/v1/auth/whoami"),
         ("GET", "/api/v1/sections"),
         ("GET", "/api/v1/sections/sec_synthetic/books"),
-        ("POST", "/api/v1/sections/sec_synthetic/search"),
+        ("POST", "/api/v1/search"),
         ("GET", f"/api/v1/sections/sec_synthetic/pages/{_PAGE_ID}"),
         ("GET", f"/api/v1/sections/sec_synthetic/pages/{_PAGE_ID}/revisions/1"),
     ]
-    assert json.loads(requests[4].content) == {"query": "synthetic", "limit": 5}
+    assert json.loads(requests[4].content)["keywords"] == ["synthetic"]
+    assert json.loads(requests[4].content)["limit"] == 5
     assert harness.clients[0].close_calls == 1
+
+
+def test_whoami_from_old_server_does_not_infer_library_permissions(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/auth/whoami"
+        return httpx.Response(
+            200,
+            headers=protected_headers(),
+            json=whoami_body(credential_id="credential_must_not_escape"),
+        )
+
+    harness = RuntimeHarness(tmp_path, httpx.MockTransport(handler))
+
+    async def action(session: ClientSession) -> mcp_types.CallToolResult:
+        return await session.call_tool("whoami", {})
+
+    result = _run_session(harness, action)
+    identity = cast(dict[str, object], _payload(result)["data"])
+    assert identity["name"] == "Synthetic Agent"
+    assert identity["description"] == "Synthetic client fixture"
+    assert identity["policy_mode"] is None
+    assert identity["library_grants"] is None
+    assert identity["grants"] == [{"section_id": "sec_synthetic", "actions": ["archive:write"]}]
+    assert "credential_must_not_escape" not in json.dumps(_payload(result))
 
 
 def test_create_and_revise_are_explicit_and_keep_operation_key_internal(tmp_path: Path) -> None:
@@ -306,6 +410,7 @@ def test_create_and_revise_are_explicit_and_keep_operation_key_internal(tmp_path
     assert not create_result.isError
     assert not revise_result.isError
     create_payload = _payload(create_result)
+    assert "occurrence_notice" not in cast(dict[str, object], create_payload["data"])
     revise_payload = _payload(revise_result)
     assert "operation_id" in cast(dict[str, object], create_payload["metadata"])
     serialized = json.dumps([create_payload, revise_payload])
@@ -404,10 +509,13 @@ def test_concurrent_failed_mutations_keep_call_local_operation_ids(
     assert (tmp_path / "state" / "default" / f"{second_operation}.json").is_file()
 
 
-def test_cli_and_mcp_share_identical_journal_fingerprint_and_replay_key(tmp_path: Path) -> None:
+@pytest.mark.parametrize("omit_time", [False, True])
+def test_cli_and_mcp_share_identical_journal_fingerprint_and_replay_key(
+    tmp_path: Path, omit_time: bool
+) -> None:
+    occurred_at_field = "" if omit_time else '"occurred_at":"2026-08-11T09:15:00Z",'
     (tmp_path / "metadata.json").write_text(
-        '{"title":"Synthetic","occurred_at":"2026-08-11T09:15:00Z",'
-        '"source":{"kind":"conversation"}}',
+        '{"title":"Synthetic",' + occurred_at_field + '"source":{"kind":"conversation"}}',
         encoding="utf-8",
     )
     (tmp_path / "content.md").write_text("# Synthetic", encoding="utf-8")
@@ -449,17 +557,19 @@ def test_cli_and_mcp_share_identical_journal_fingerprint_and_replay_key(tmp_path
     harness = RuntimeHarness(tmp_path, httpx.MockTransport(handler))
 
     async def action(session: ClientSession) -> mcp_types.CallToolResult:
+        arguments = {
+            "section_id": "sec_synthetic",
+            "book_id": "book_synthetic",
+            "title": "Synthetic",
+            "source_kind": "conversation",
+            "content": "# Synthetic",
+            "operation_id": operation_id,
+        }
+        if not omit_time:
+            arguments["occurred_at"] = "2026-08-11T09:15:00Z"
         return await session.call_tool(
             "archive_create",
-            {
-                "section_id": "sec_synthetic",
-                "book_id": "book_synthetic",
-                "title": "Synthetic",
-                "occurred_at": "2026-08-11T09:15:00Z",
-                "source_kind": "conversation",
-                "content": "# Synthetic",
-                "operation_id": operation_id,
-            },
+            arguments,
         )
 
     result = _run_session(harness, action)
@@ -632,9 +742,7 @@ def test_invalid_query_and_content_fail_before_network(tmp_path: Path) -> None:
     harness = RuntimeHarness(tmp_path, httpx.MockTransport(handler))
 
     async def action(session: ClientSession) -> list[mcp_types.CallToolResult]:
-        query = await session.call_tool(
-            "section_search", {"section_id": "sec_synthetic", "query": "x" * 4_097}
-        )
+        query = await session.call_tool("pages_search", {"keywords": ["x" * 32_769]})
         content = await session.call_tool(
             "archive_create",
             {
@@ -746,7 +854,16 @@ def test_inflight_cancellation_leaves_no_background_client_work(tmp_path: Path) 
     assert harness.clients[0].close_calls == 1
 
 
-def test_real_stdio_entrypoint_has_protocol_clean_stdout_and_safe_stderr(tmp_path: Path) -> None:
+def test_real_stdio_entrypoint_has_protocol_clean_stdout_and_safe_stderr(
+    trusted_tmp_path: Path,
+) -> None:
+    config = trusted_tmp_path / "config.toml"
+    config.write_text(
+        'version = 1\n[profiles.default]\nendpoint = "https://patchouli.example.invalid"\n'
+        'api_version = "v1"\n',
+        encoding="utf-8",
+    )
+
     async def exercise() -> str:
         with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as error:
             params = StdioServerParameters(
@@ -754,9 +871,10 @@ def test_real_stdio_entrypoint_has_protocol_clean_stdout_and_safe_stderr(tmp_pat
                 args=["-m", "patchouli_mcp"],
                 cwd=Path.cwd(),
                 env={
+                    "PATCHOULI_CONFIG_FILE": str(config),
                     "PATCHOULI_ENDPOINT": "https://patchouli.example.invalid",
                     "PATCHOULI_TOKEN": "cred_synthetic_123",
-                    "PATCHOULI_STATE_DIR": str(tmp_path / "state"),
+                    "PATCHOULI_STATE_DIR": str(trusted_tmp_path / "state"),
                 },
             )
             async with (

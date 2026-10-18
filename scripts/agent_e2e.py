@@ -49,6 +49,20 @@ def _fail(message: str) -> NoReturn:
     raise E2EFailure(message)
 
 
+def _redacted_exit_reason(completed: subprocess.CompletedProcess[str]) -> str:
+    """Keep failure diagnostics useful without echoing command output or secrets."""
+
+    try:
+        document = json.loads(completed.stderr)
+    except (json.JSONDecodeError, TypeError):
+        return f"exit {completed.returncode}"
+    if isinstance(document, dict) and isinstance(error := document.get("error"), dict):
+        code = error.get("code")
+        if isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code):
+            return f"exit {completed.returncode}, code {code}"
+    return f"exit {completed.returncode}"
+
+
 def _clean_environment(source: Mapping[str, str], *, loopback_only: bool = False) -> dict[str, str]:
     environment = {
         key: value
@@ -90,7 +104,7 @@ def _run_checked(
     except (OSError, subprocess.TimeoutExpired):
         _fail(f"{step} failed.")
     if completed.returncode != expected_exit:
-        _fail(f"{step} failed.")
+        _fail(f"{step} failed ({_redacted_exit_reason(completed)}).")
     return completed
 
 
@@ -522,9 +536,15 @@ def _exercise_agent(
     inputs = runtime / "client-inputs"
     state.mkdir(mode=0o700)
     inputs.mkdir(mode=0o700)
+    config = runtime / "client-config.toml"
+    _write_private(
+        config,
+        f'version = 1\n[profiles.default]\nendpoint = {json.dumps(endpoint)}\napi_version = "v1"\n',
+    )
     client_environment = _clean_environment(os.environ, loopback_only=True)
     client_environment.update(
         {
+            "PATCHOULI_CONFIG_FILE": str(config),
             "PATCHOULI_ENDPOINT": endpoint,
             "PATCHOULI_API_VERSION": "v1",
             "PATCHOULI_TOKEN": agent_token,
@@ -542,7 +562,11 @@ def _exercise_agent(
         step="Agent capabilities",
     )
     capability_data = _object(capabilities.get("data"), step="Agent capabilities")
-    _require_equal(capability_data.get("features"), ["archive", "retrieval"], step="Capabilities")
+    _require_equal(
+        capability_data.get("features"),
+        ["archive", "file-sets", "page-lifecycle", "page-move", "retrieval", "search", "tags"],
+        step="Capabilities",
+    )
 
     whoami = _cli_success(
         patchouli,
@@ -621,7 +645,7 @@ def _exercise_agent(
         json.dumps({"source": {"kind": "synthetic-e2e-revision"}}, separators=(",", ":")),
     )
     _write_private(revise_content, second_body)
-    _write_private(query, "synthetic unavailable search\n")
+    _write_private(query, json.dumps({"keywords": ["Revision two"], "limit": 20}))
 
     create_arguments = (
         "--input-root",
@@ -748,27 +772,25 @@ def _exercise_agent(
     historical_revision = _object(history_document.get("revision"), step="Exact Revision fetch")
     _require_equal(historical_revision.get("content"), first_body, step="Historical content")
 
-    search = _run_checked(
-        (
-            patchouli,
-            "--output",
-            "json",
-            "--input-root",
-            inputs,
-            "section",
-            "search",
-            "--section",
-            section_id,
-            "--query-file",
-            query.name,
-        ),
+    search = _cli_success(
+        patchouli,
+        ("--input-root", str(inputs), "search", "--query-file", query.name),
         cwd=inputs,
         environment=client_environment,
-        step="Unavailable search",
-        expected_exit=16,
+        step="Current Page search",
     )
-    search_error = _error_payload(search, step="Unavailable search")
-    _require_equal(search_error.get("code"), "search_unavailable", step="Unavailable search")
+    search_items = _list(
+        _object(search.get("data"), step="Current Page search").get("items"),
+        step="Current Page search",
+    )
+    _require_equal(len(search_items), 1, step="Current Page search")
+    search_item = _object(search_items[0], step="Current Page search")
+    _require_equal(search_item.get("page_id"), page_id, step="Current Page search")
+    _require_equal(
+        search_item.get("revision_id"),
+        revised_citation["revision_id"],
+        step="Current Page search",
+    )
 
     revoke = _run_checked(
         (
@@ -890,6 +912,16 @@ def run() -> None:
             step="Local Agent provision",
         )
         agent_token = _extract_token(provision, step="Local Agent provision")
+
+        _run_checked(
+            (
+                _venv_executable(temporary / "server-environment", "patchouli-search-index"),
+                "rebuild",
+            ),
+            cwd=temporary,
+            environment=server_environment,
+            step="Search index rebuild before live writes",
+        )
 
         certificate_directory = temporary / "certificates"
         certificate_directory.mkdir(mode=0o700)
