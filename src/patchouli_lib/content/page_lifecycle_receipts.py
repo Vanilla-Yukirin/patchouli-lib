@@ -6,7 +6,7 @@ import sqlite3
 from typing import Literal
 
 from patchouli_lib.content.page_lifecycle_schemas import (
-    LIBRARY_LIFECYCLE_REVISION,
+    LIBRARY_LIFECYCLE_REVISIONS,
     LIBRARY_LIFECYCLE_ROUTES,
     LibraryPageLifecycleBody,
     PageLifecycleCommand,
@@ -31,7 +31,7 @@ def validate_library_lifecycle_receipt(
     connection: sqlite3.Connection, record: StoredIdempotencyRecord, *, schema_revision: str
 ) -> LibraryPageLifecycleBody:
     try:
-        if schema_revision != LIBRARY_LIFECYCLE_REVISION:
+        if schema_revision not in LIBRARY_LIFECYCLE_REVISIONS:
             raise ValueError
         body = LibraryPageLifecycleBody.model_validate_json(record.response_body)
         if body.model_dump_json().encode() != record.response_body:

@@ -132,6 +132,7 @@ def validate_master_file_set_receipt(
         (PAGE_MOVE_SCHEMA_REVISION,),
         (CALLER_PAGE_MOVE_SCHEMA_REVISION,),
         (LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,),
+        ("20261018_0031",),
     }:
         try:
             timeline = load_page_state_timeline(

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal
 
-from sqlalchemy import Connection, select
+from sqlalchemy import Connection, or_, select
 
 from patchouli_lib.auth.models import (
     Caller,
@@ -107,7 +107,7 @@ def resolve_library_policy(
             Credential.caller_id == caller_id,
             Credential.library_id == home_library_id,
             Credential.created_at <= active_at,
-            Credential.expires_at > active_at,
+            or_(Credential.expires_at.is_(None), Credential.expires_at > active_at),
             Credential.revoked_at.is_(None),
             Credential.rotated_at.is_(None),
             Caller.kind == "agent",

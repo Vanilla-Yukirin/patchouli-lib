@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from html import escape
@@ -13,6 +14,7 @@ from patchouli_lib.admin.read_model import (
     CallerView,
     ContentActivityItem,
     CredentialItem,
+    GlobalTagItem,
     LibraryItem,
     LibraryView,
     PageView,
@@ -68,6 +70,17 @@ _DISABLE_AGENT_WARNING = (
 )
 
 REVEAL_SCRIPT = """
+document.querySelectorAll('[data-lifetime-target]').forEach((checkbox) => {
+  const duration = document.getElementById(checkbox.dataset.lifetimeTarget);
+  if (!duration) return;
+  const update = () => {
+    duration.disabled = checkbox.checked;
+    duration.required = !checkbox.checked;
+  };
+  checkbox.addEventListener('change', update);
+  window.addEventListener('pageshow', update);
+  update();
+});
 document.querySelectorAll('.token-reveal').forEach((form) => {
   const output = form.querySelector('.token-output');
   const status = form.querySelector('[role="status"]');
@@ -146,6 +159,66 @@ document.querySelectorAll('.token-reveal').forEach((form) => {
 });
 """.strip()
 
+TAG_MANAGEMENT_SCRIPT = """
+const form = document.querySelector('.tag-management');
+if (form) {
+  const rows = Array.from(form.querySelectorAll('[data-tag-row]'));
+  const filter = form.querySelector('#tag-filter');
+  const library = form.querySelector('#tag-library');
+  const all = form.querySelector('#tag-select-all');
+  const status = form.querySelector('[role=status]');
+  const selected = () => rows.filter(row => row.querySelector('.tag-select').checked);
+  const refresh = () => {
+    const visible = rows.filter(row => !row.hidden);
+    const checked = row => row.querySelector('.tag-select').checked;
+    all.checked = visible.length > 0 && visible.every(checked);
+    all.indeterminate = !all.checked && visible.some(checked);
+    rows.forEach(row => {row.querySelector('.tag-new-name').disabled =
+      !row.querySelector('.tag-select').checked;});
+    status.textContent = form.dataset.selectedLabel + ': ' + selected().length;
+    form.querySelectorAll('button[type=submit]').forEach(button => {
+      button.disabled = selected().length === 0;
+    });
+  };
+  const applyFilter = () => {
+    rows.forEach(row => {
+      const matches = row.dataset.tagName.toLocaleLowerCase()
+        .includes(filter.value.toLocaleLowerCase());
+      row.hidden = !matches
+        || (library.value && row.dataset.libraryId !== library.value);
+      if (row.hidden) row.querySelector('.tag-select').checked = false;
+    });
+    refresh();
+  };
+  filter.addEventListener('input', applyFilter);
+  library.addEventListener('change', applyFilter);
+  all.addEventListener('change', () => {
+    rows.filter(row => !row.hidden).forEach(row => {
+      row.querySelector('.tag-select').checked = all.checked;
+    });
+    refresh();
+  });
+  rows.forEach(row => row.querySelector('.tag-select').addEventListener('change', refresh));
+  form.addEventListener('submit', event => {
+    const operation = event.submitter?.value;
+    const chosen = selected();
+    if (!operation || chosen.length === 0 || chosen.length > 200) {
+      event.preventDefault(); status.textContent = form.dataset.limitLabel; return;
+    }
+    if (operation === 'delete' && !form.querySelector('[name=confirm_delete]').checked) {
+      event.preventDefault(); status.textContent = form.dataset.confirmLabel; return;
+    }
+    const changes = chosen.map(row => {
+      const item = JSON.parse(row.dataset.identity);
+      if (operation === 'rename') item.new_name = row.querySelector('.tag-new-name').value;
+      return item;
+    });
+    form.elements.namedItem('changes').value = JSON.stringify(changes);
+  });
+  refresh();
+}
+""".strip()
+
 STYLESHEET = """
 :root {
   color-scheme: light;
@@ -206,6 +279,32 @@ button {
   padding: .6rem .9rem;
 }
 .secondary { background: #587063; margin-top: 0; }
+.library-tools { margin: 1.25rem 0; }
+.library-tools h2 { margin-top: 0; font-size: 1.05rem; }
+.tag-list, .library-actions { display: flex; flex-wrap: wrap; gap: .6rem; }
+.tag-list { padding: 0; list-style: none; margin: 0 0 1rem; }
+.tag-list li { max-width: 100%; }
+.tag-chip, .action-link {
+  display: inline-flex; align-items: center; gap: .5rem;
+  text-decoration: none; border: 1px solid #b7ccbc; font-weight: 600;
+  max-width: 100%; overflow-wrap: anywhere;
+}
+.tag-chip { border-radius: 999px; padding: .35rem .75rem; background: #e7f1e9; }
+.action-link { border-radius: .45rem; padding: .55rem .85rem; background: #f4f8f5; }
+.tag-chip:hover, .action-link:hover { background: #d7e9dc; border-color: #698c74; }
+.tag-chip:focus-visible, .action-link:focus-visible {
+  outline: 3px solid #2f6845; outline-offset: 3px;
+}
+.count-badge { border-radius: 999px; padding: .1rem .5rem; background: #dce8df; font-size: .85em; }
+.tag-table-wrap { overflow-x: auto; margin: 1rem 0; }
+.tag-table { width: 100%; min-width: 42rem; border-collapse: collapse; }
+.tag-table th, .tag-table td { padding: .7rem; text-align: left; border-bottom: 1px solid #d6ddd5; }
+.tag-table input[type=checkbox], .tag-confirm input { width: auto; margin: 0; }
+.tag-table .tag-new-name { min-width: 10rem; }
+.tag-table th label { margin: 0; }
+.tag-confirm { display: flex; align-items: flex-start; gap: .5rem; font-weight: 400; }
+.danger { background: #a03232; }
+button:disabled { opacity: .5; cursor: not-allowed; }
 .notice { border-left: .3rem solid #c57d14; padding: .7rem 1rem; background: #fff7e8; }
 .error { border-left-color: #a92f2f; background: #fff0f0; }
 .secret {
@@ -393,6 +492,35 @@ _ZH_CN: dict[str, str] = {
     "The requested Archive page was not found.": "未找到指定的 Archive 页面。",
     "Tagged pages": "标记的页面",
     "No tags yet.": "暂无标签。",
+    "Manage tags": "管理标签",
+    "Library": "知识库",
+    "New name": "新名称",
+    "Selected": "已选择",
+    "Select visible tags": "选择当前显示的标签",
+    "Filter tags": "筛选标签",
+    "All Libraries": "全部知识库",
+    "Save selected names": "保存所选标签名称",
+    "Delete selected tags": "删除所选标签",
+    "Select between 1 and 200 tags.": "每次请选择 1 至 200 个标签。",
+    "Confirm deletion first.": "请先勾选删除确认。",
+    "Tag changes conflict. Reload and check duplicate names.": (
+        "标签已变化或名称冲突，请刷新并检查同一知识库内是否重名。"
+    ),
+    (
+        "I confirm: remove these tags and all their associations, "
+        "including recycled pages; keep pages and history."
+    ): ("确认永久删除所选标签及全部关联（包括回收站页面的关联）；文章和历史版本保留。"),
+    (
+        "Select tags, edit their names, then save. "
+        "Duplicate names in one Library cannot be merged here."
+    ): ("勾选标签后编辑新名称，再统一保存。同一知识库内不允许重名，这里不会自动合并标签。"),
+    "Enable JavaScript to use batch tag management.": "批量管理标签需要启用 JavaScript。",
+    "Browse tags across Libraries. Select a tag to view its pages.": (
+        "浏览所有知识库的标签，点击标签查看关联页面。"
+    ),
+    "Deleted pages; revision history is kept with each page.": (
+        "已删除的页面数量，历史版本随页面保留。"
+    ),
     "No tagged pages yet.": "暂无已标记的页面。",
     "Create Tag": "创建标签",
     "Tag name": "标签名称",
@@ -1441,7 +1569,7 @@ def caller_page(
             credential_status = "Credential revoked"
         elif view.disabled_at is not None:
             credential_status = "Credential blocked by disabled identity"
-        elif item.expires_at <= now_micros:
+        elif item.expires_at is not None and item.expires_at <= now_micros:
             credential_status = "Credential expired"
         elif item.created_at > now_micros:
             credential_status = "Credential not yet active"
@@ -1560,9 +1688,7 @@ def caller_page(
             )
             rotate_label = "轮换此 Token" if locale == "zh-CN" else "Rotate this Token"
             rotate_button = "确认轮换" if locale == "zh-CN" else "Rotate credential"
-            ttl_field = _number(
-                "credential_ttl_seconds", "Credential lifetime in seconds", 31_536_000, locale
-            )
+            ttl_field = _credential_lifetime(locale, suffix=item.id)
             rotate = (
                 f"<details><summary>{rotate_label}</summary>"
                 f"<p>{
@@ -1594,7 +1720,8 @@ def caller_page(
             '<li class="credential-item">'
             '<p class="credential-summary">'
             f"<strong>{localize(locale, credential_status)}</strong>"
-            f'<span class="meta">{localize(locale, "Expires")} {_time(item.expires_at)}</span>'
+            f'<span class="meta">{localize(locale, "Expires")} '
+            f"{_credential_expiry_label(item.expires_at, locale)}</span>"
             "</p>"
             f"<details><summary>{localize(locale, 'Credential metadata')}</summary>"
             '<dl class="credential-metadata">'
@@ -1832,17 +1959,17 @@ def callers_page(
         grants = "".join(grant_fields)
         guidance = (
             "先选择 Agent 的归属知识库，再明确勾选每个知识库的读取和写入权限；"
-            "未勾选即无权限，写入不自动包含读取。新 Token 默认有效一年，可在详情页再次显示。"
+            "未勾选即无权限，写入不自动包含读取。新 Token 默认有效一年，也可选择永不过期，"
+            "可在详情页再次显示。"
             if locale == "zh-CN"
             else (
                 "Choose the Agent's home Library, then explicitly select read and write "
                 "for each Library. Unchecked means no access; write does not imply read. "
-                "The new Token lasts one year by default and can be revealed again in details."
+                "The new Token lasts one year by default, or can be set to never expire, "
+                "and can be revealed again in details."
             )
         )
-        ttl_field = _number(
-            "credential_ttl_seconds", "Credential lifetime in seconds", 31_536_000, locale
-        )
+        ttl_field = _credential_lifetime(locale)
         submit_label = "创建 Agent 和 Token" if locale == "zh-CN" else "Create Agent and Token"
         master_form = (
             '<section class="card">'
@@ -1876,7 +2003,12 @@ def callers_page(
         f'<p class="section-help">{credential_notice}</p>'
         f"{notice}{master_form}{body}</main></div>"
     )
-    return _document(localize(locale, "Identities"), content, locale)
+    return _document(
+        localize(locale, "Identities"),
+        content,
+        locale,
+        script_src="/admin/reveal.js" if allow_master_actions else None,
+    )
 
 
 def credential_page(
@@ -2111,6 +2243,123 @@ def libraries_page(
     )
 
 
+def tags_index_page(
+    csrf_token: str,
+    tags: tuple[GlobalTagItem, ...],
+    *,
+    locale: AdminLocale = "en",
+    master_mode: bool = False,
+    message: str | None = None,
+) -> str:
+    cards = "".join(
+        '<li class="card">'
+        f'<a class="tag-chip" href="/admin/libraries/{escape(item.library_id, quote=True)}'
+        f'/tags/{escape(item.tag.id, quote=True)}">{escape(item.tag.name)}</a>'
+        f'<p class="meta">{localize(locale, "Library")}: {escape(item.library_name)} · '
+        f"{localize(locale, 'Page count')}: {item.tag.page_count}</p></li>"
+        for item in tags
+    )
+    body = (
+        '<p class="section-help">'
+        + localize(locale, "Browse tags across Libraries. Select a tag to view its pages.")
+        + "</p>"
+        + (
+            f'<ul class="item-list library-grid">{cards}</ul>'
+            if tags
+            else f'<p class="card">{localize(locale, "No tags yet.")}</p>'
+        )
+    )
+    if master_mode and tags:
+        body = _tag_management_form(csrf_token, tags, locale)
+    if message:
+        body = _notice(localize(locale, message), error=True) + body
+    return _browser_document(
+        csrf_token,
+        locale,
+        localize(locale, "Tags"),
+        "/admin/tags",
+        body,
+        current_section="tags",
+        script_src="/admin/tags.js" if master_mode else None,
+    )
+
+
+def _tag_management_form(
+    csrf_token: str, tags: tuple[GlobalTagItem, ...], locale: AdminLocale
+) -> str:
+    rows = []
+    for item in tags:
+        identity = escape(
+            json.dumps(
+                {
+                    "library_id": item.library_id,
+                    "tag_id": item.tag.id,
+                    "expected_name": item.tag.name,
+                }
+            ),
+            quote=True,
+        )
+        key = f"{item.library_id}-{item.tag.id}"
+        rows.append(
+            f'<tr data-tag-row data-identity="{identity}" '
+            f'data-tag-name="{escape(item.tag.name, quote=True)}" '
+            f'data-library-id="{escape(item.library_id, quote=True)}">'
+            f'<td><input class="tag-select" type="checkbox" '
+            f'aria-label="{localize(locale, "Selected")}: '
+            f'{escape(item.tag.name, quote=True)}"></td>'
+            f'<td><a class="tag-chip" href="/admin/libraries/{escape(item.library_id, quote=True)}'
+            f'/tags/{escape(item.tag.id, quote=True)}">{escape(item.tag.name)}</a></td>'
+            f"<td>{escape(item.library_name)}</td><td>{item.tag.page_count}</td>"
+            f'<td><input class="tag-new-name" id="name-{key}" type="text" maxlength="100" '
+            f'aria-label="{localize(locale, "New name")}: {escape(item.tag.name, quote=True)}" '
+            f'value="{escape(item.tag.name, quote=True)}" disabled></td></tr>'
+        )
+    libraries = dict((item.library_id, item.library_name) for item in tags)
+    options = "".join(
+        f'<option value="{escape(key, quote=True)}">{escape(name)}</option>'
+        for key, name in libraries.items()
+    )
+    help_text = (
+        "Select tags, edit their names, then save. "
+        "Duplicate names in one Library cannot be merged here."
+    )
+    confirmation = (
+        "I confirm: remove these tags and all their associations, "
+        "including recycled pages; keep pages and history."
+    )
+    return (
+        '<form method="post" action="/admin/tags/batch" class="card tag-management" '
+        f'data-selected-label="{localize(locale, "Selected")}" '
+        f'data-limit-label="{localize(locale, "Select between 1 and 200 tags.")}" '
+        f'data-confirm-label="{localize(locale, "Confirm deletion first.")}">'
+        + _csrf(escape(csrf_token, quote=True))
+        + '<input type="hidden" name="changes" value="[]">'
+        f'<p class="section-help">{localize(locale, help_text)}</p>'
+        '<noscript><p class="notice">'
+        f"{localize(locale, 'Enable JavaScript to use batch tag management.')}</p></noscript>"
+        '<div class="grid">'
+        f'<label for="tag-filter">{localize(locale, "Filter tags")}'
+        '<input id="tag-filter" type="search"></label>'
+        f'<label for="tag-library">{localize(locale, "Library")}<select id="tag-library">'
+        f'<option value="">{localize(locale, "All Libraries")}</option>'
+        f"{options}</select></label></div>"
+        '<div class="tag-table-wrap"><table class="tag-table"><thead><tr>'
+        '<th><input type="checkbox" id="tag-select-all" '
+        f'aria-label="{localize(locale, "Select visible tags")}"></th>'
+        f"<th>{localize(locale, 'Tags')}</th><th>{localize(locale, 'Library')}</th>"
+        f"<th>{localize(locale, 'Page count')}</th><th>{localize(locale, 'New name')}</th>"
+        "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>"
+        '<p role="status" aria-live="polite"></p>'
+        '<button type="submit" name="operation" value="rename" disabled>'
+        f"{localize(locale, 'Save selected names')}</button>"
+        f'<label class="tag-confirm"><input type="checkbox" name="confirm_delete" value="true">'
+        f"{localize(locale, confirmation)}</label>"
+        '<button class="danger" type="submit" name="operation" value="delete" disabled>'
+        f"{localize(locale, 'Delete selected tags')}</button>"
+        "</form>"
+    )
+
+
 def library_scope_index_page(
     csrf_token: str,
     libraries: tuple[LibraryItem, ...],
@@ -2158,12 +2407,32 @@ def library_page(
         f"{escape(item.name)}</a><p>{escape(item.description)}</p></li>"
         for item in view.sections
     )
+    tag_chips = "".join(
+        f'<li><a class="tag-chip" href="{base}/tags/{escape(item.id, quote=True)}">'
+        f"{escape(item.name)}</a></li>"
+        for item in view.tags
+    )
+    tag_content = (
+        f'<ul class="tag-list">{tag_chips}</ul>'
+        if view.tags
+        else f'<p class="meta">{localize(locale, "No tags yet.")}</p>'
+    )
+    tools = (
+        '<section class="card library-tools" aria-labelledby="library-tags-heading">'
+        f'<h2 id="library-tags-heading">{localize(locale, "Tags")}</h2>'
+        + tag_content
+        + '<div class="library-actions">'
+        f'<a class="action-link" href="{base}/tags">{localize(locale, "Manage tags")}</a>'
+        f'<a class="action-link" href="{base}/trash" '
+        f'title="{localize(locale, "Deleted pages; revision history is kept with each page.")}">'
+        f'{localize(locale, "Trash")} <span class="count-badge">{view.trash_count}</span></a>'
+        "</div></section>"
+    )
     body = (
         f"<p>{escape(view.library.description)}</p>"
         f'<p class="meta">{localize(locale, "Created")}: {_time(view.library.created_at)} · '
         f"{localize(locale, 'Page count')}: {view.library.page_count}</p>"
-        f'<p><a href="{base}/tags">{localize(locale, "Tags")}</a></p>'
-        f'<p><a href="{base}/trash">{localize(locale, "Trash")}</a></p>'
+        f"{tools}"
         f"<h2>{localize(locale, 'Sections')}</h2>"
         + (
             f'<ul class="item-list">{cards}</ul>'
@@ -2220,7 +2489,8 @@ def tag_directory_page(
     library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
     base = f"{library_path}/tags"
     cards = "".join(
-        f'<li><a href="{base}/{escape(item.id, quote=True)}">{escape(item.name)}</a>'
+        f'<li><a class="tag-chip" href="{base}/{escape(item.id, quote=True)}">'
+        f"{escape(item.name)}</a>"
         f'<p class="meta">{localize(locale, "Page count")}: {item.page_count} · '
         f"{localize(locale, 'Created')}: {_time(item.created_at)}</p></li>"
         for item in view.tags
@@ -2233,6 +2503,12 @@ def tag_directory_page(
     )
     body = (
         (_notice(localize(locale, message), error=error) if message is not None else "")
+        + (
+            '<p><a class="action-link" href="/admin/tags">'
+            f"{localize(locale, 'Manage tags')}</a></p>"
+            if master_mode
+            else ""
+        )
         + body
         + '<section class="card"><h2>'
         + localize(locale, "Create Tag")
@@ -2271,7 +2547,8 @@ def tag_detail_page(
     tag_path = f"{library_path}/tags"
     base = f"{tag_path}/{escape(view.tag.id, quote=True)}"
     cards = "".join(
-        f'<li><a href="{library_path}/sections/{escape(item.section_id, quote=True)}'
+        f'<li><a class="action-link" href="{library_path}/sections/'
+        f"{escape(item.section_id, quote=True)}"
         f'/books/{escape(item.book_id, quote=True)}/pages/{escape(item.id, quote=True)}">'
         f'{escape(item.title)}</a><p class="meta">'
         f"{localize(locale, 'Occurred')}: {_time(item.occurred_at)}</p></li>"
@@ -3073,6 +3350,31 @@ def _textarea(
         f'<label for="{escaped_name}">{escape(localize(locale, label))}</label>'
         f'<textarea id="{escaped_name}" name="{escaped_name}" '
         f'maxlength="4000" rows="3"{described_by}></textarea>{help_markup}'
+    )
+
+
+def _credential_expiry_label(expires_at: int | None, locale: AdminLocale) -> str:
+    if expires_at is None:
+        return "永不过期" if locale == "zh-CN" else "Never expires"
+    return _time(expires_at)
+
+
+def _credential_lifetime(locale: AdminLocale, *, suffix: str = "new") -> str:
+    identifier = escape(f"credential-ttl-{suffix}", quote=True)
+    label = "永不过期" if locale == "zh-CN" else "Never expires"
+    help_text = (
+        "默认一年；十年可填 315360000 秒。勾选永不过期后忽略秒数，仍可随时吊销或轮换。"
+        if locale == "zh-CN"
+        else "Defaults to one year; ten years is 315360000 seconds. "
+        "Never expires ignores the duration; revocation and rotation still apply."
+    )
+    return (
+        f'<label for="{identifier}">{localize(locale, "Credential lifetime in seconds")}</label>'
+        f'<input id="{identifier}" name="credential_ttl_seconds" type="number" '
+        f'min="1" value="31536000" aria-describedby="{identifier}-help">'
+        '<label><input type="checkbox" name="never_expires" value="true" '
+        f'data-lifetime-target="{identifier}"> {label}</label>'
+        f'<p class="section-help" id="{identifier}-help">{help_text}</p>'
     )
 
 

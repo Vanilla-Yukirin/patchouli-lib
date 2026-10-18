@@ -200,6 +200,13 @@ class TagItem:
 
 
 @dataclass(frozen=True)
+class GlobalTagItem:
+    library_id: str
+    library_name: str
+    tag: TagItem
+
+
+@dataclass(frozen=True)
 class TaggedPageItem:
     id: str
     title: str
@@ -232,6 +239,8 @@ class TagView:
 class LibraryView:
     library: LibraryItem
     sections: tuple[SectionItem, ...]
+    tags: tuple[TagItem, ...] = ()
+    trash_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -355,7 +364,7 @@ class CallerView:
 class CredentialItem:
     id: str
     created_at: int
-    expires_at: int
+    expires_at: int | None
     last_used_at: int | None
     revoked_at: int | None
     rotated_at: int | None
@@ -993,7 +1002,7 @@ class AdminReadModel:
                         and_(
                             AgentTokenValue.credential_id == Credential.id,
                             Credential.created_at <= now,
-                            Credential.expires_at > now,
+                            or_(Credential.expires_at.is_(None), Credential.expires_at > now),
                             Credential.revoked_at.is_(None),
                             Credential.rotated_at.is_(None),
                         ),
@@ -1105,7 +1114,23 @@ class AdminReadModel:
                 .order_by(Section.name, Section.id)
             ).mappings()
             sections = tuple(_section_item(row) for row in rows)
-            return LibraryView(library, sections)
+            tags = tuple(
+                _tag_item(row)
+                for row in connection.execute(_tag_summary_query(library_id)).mappings()
+            )
+            trash_count = connection.execute(
+                select(func.count())
+                .select_from(Page)
+                .where(Page.library_id == library_id, Page.deleted_at.is_not(None))
+            ).scalar_one()
+            return LibraryView(library, sections, tags, trash_count)
+
+    def list_tags(self) -> tuple[GlobalTagItem, ...]:
+        with self._engine.connect() as connection:
+            return tuple(
+                GlobalTagItem(row["library_id"], row["library_name"], _tag_item(row))
+                for row in connection.execute(_tag_summary_query()).mappings()
+            )
 
     def list_library_tags(self, library_id: str) -> TagDirectoryView | None:
         with self._engine.connect() as connection:
@@ -1802,14 +1827,18 @@ def _parse_trash_cursor(value: str | None) -> tuple[int, str] | None:
     return int(timestamp), page_id
 
 
-def _tag_summary_query(library_id: str) -> Select[Any]:
-    return (
+def _tag_summary_query(library_id: str | None = None) -> Select[Any]:
+    statement = (
         select(
+            Tag.library_id,
+            Library.name.label("library_name"),
             Tag.id,
             Tag.display_name,
             Tag.created_at,
             func.count(Page.page_uid).label("page_count"),
         )
+        .select_from(Tag)
+        .join(Library, Library.id == Tag.library_id)
         .outerjoin(
             PageTag,
             and_(PageTag.library_id == Tag.library_id, PageTag.tag_id == Tag.id),
@@ -1822,10 +1851,10 @@ def _tag_summary_query(library_id: str) -> Select[Any]:
                 Page.deleted_at.is_(None),
             ),
         )
-        .where(Tag.library_id == library_id)
-        .group_by(Tag.id, Tag.display_name, Tag.created_at)
-        .order_by(Tag.match_key, Tag.id)
+        .group_by(Tag.library_id, Library.name, Tag.id, Tag.display_name, Tag.created_at)
+        .order_by(Tag.match_key, Library.name, Tag.library_id, Tag.id)
     )
+    return statement if library_id is None else statement.where(Tag.library_id == library_id)
 
 
 def _get_library(connection: Connection, library_id: str) -> LibraryItem | None:

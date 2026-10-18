@@ -115,9 +115,11 @@ class Credential(Base):
             name="ck_auth_credentials_verifier_length",
         ),
         CheckConstraint(
-            "created_at >= 0 AND updated_at >= created_at AND expires_at > created_at "
+            "created_at >= 0 AND updated_at >= created_at "
+            "AND (expires_at IS NULL OR expires_at > created_at) "
             "AND (last_used_at IS NULL OR "
-            "(last_used_at >= created_at AND last_used_at < expires_at "
+            "(last_used_at >= created_at "
+            "AND (expires_at IS NULL OR last_used_at < expires_at) "
             "AND last_used_at <= updated_at)) "
             "AND (revoked_at IS NULL OR "
             "(revoked_at >= created_at AND revoked_at <= updated_at)) "
@@ -150,7 +152,7 @@ class Credential(Base):
     selector: Mapped[str] = mapped_column(String(SELECTOR_LENGTH), nullable=False)
     token_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
     verifier: Mapped[bytes] = mapped_column(LargeBinary(VERIFIER_BYTES), nullable=False)
-    expires_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expires_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     last_used_at: Mapped[int | None] = mapped_column(BigInteger)

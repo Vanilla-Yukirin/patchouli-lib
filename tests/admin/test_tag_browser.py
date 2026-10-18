@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
+from html import unescape
 from pathlib import Path
+from re import search
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, update
 
+from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.passwords import hash_password
 from patchouli_lib.app import create_app
 from patchouli_lib.auth.models import Caller
@@ -50,6 +54,72 @@ def _login(client: TestClient) -> None:
         "/admin/login", data={"password": _PASSWORD}, headers={"Origin": _ORIGIN}
     )
     assert response.status_code == 303
+
+
+def test_tag_empty_states(browser: tuple[TestClient, Engine]) -> None:
+    client, engine = browser
+    library, _, _ = _seed_structure(engine, prefix="1")
+    _login(client)
+    assert "暂无标签。" in client.get("/admin/tags?lang=zh-CN").text
+    empty = client.get(f"/admin/libraries/{library}?lang=zh-CN")
+    assert "暂无标签。" in empty.text and '<span class="count-badge">0</span>' in empty.text
+
+
+def test_batch_tag_routes_require_master_csrf_and_confirm(
+    browser: tuple[TestClient, Engine],
+) -> None:
+    client, engine = browser
+    library, _, _ = _seed_structure(engine, prefix="1")
+    with immediate_transaction(engine) as connection:
+        TagRepository(connection).add_tag(
+            library_id=library, tag_id="a" * 32, name="Before", created_at=1
+        )
+    endpoint = "/admin/tags/batch"
+    assert client.post(endpoint, data={}, headers={"Origin": _ORIGIN}).status_code == 401
+    _login(client)
+    assert client.post(endpoint, data={}, headers={"Origin": _ORIGIN}).status_code == 403
+    master = "synthetic tag management master token 12345"
+    with immediate_transaction(engine) as connection:
+        MasterTokenRepository(connection).initialize_from_local_cli(master, now=1_000)
+    assert (
+        client.post(
+            "/admin/login", data={"password": master}, headers={"Origin": _ORIGIN}
+        ).status_code
+        == 303
+    )
+    index = client.get("/admin/tags?lang=zh-CN")
+    assert "script-src 'self'" in index.headers["content-security-policy"]
+    assert 'src="/admin/tags.js"' in index.text
+    assert "保存所选标签名称" in index.text
+    csrf_match = search(r'name="csrf_token" value="([^"]+)"', index.text)
+    assert csrf_match is not None
+    csrf = unescape(csrf_match.group(1))
+    change = {
+        "library_id": library,
+        "tag_id": "a" * 32,
+        "expected_name": "Before",
+        "new_name": "After",
+    }
+    fields = {"operation": "rename", "changes": json.dumps([change]), "csrf_token": csrf}
+    assert (
+        client.post(endpoint, data=fields, headers={"Origin": "https://other.invalid"}).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            endpoint, data={**fields, "csrf_token": "bad"}, headers={"Origin": _ORIGIN}
+        ).status_code
+        == 403
+    )
+    assert client.post(endpoint, data=fields, headers={"Origin": _ORIGIN}).status_code == 303
+    assert client.post(endpoint, data=fields, headers={"Origin": _ORIGIN}).status_code == 409
+    change.pop("new_name")
+    change["expected_name"] = "After"
+    fields.update(operation="delete", changes=json.dumps([change]))
+    assert client.post(endpoint, data=fields, headers={"Origin": _ORIGIN}).status_code == 422
+    fields["confirm_delete"] = "true"
+    assert client.post(endpoint, data=fields, headers={"Origin": _ORIGIN}).status_code == 303
+    assert "暂无标签。" in client.get("/admin/tags").text
 
 
 def _seed_structure(engine: Engine, *, prefix: str) -> tuple[str, str, str]:
@@ -134,6 +204,11 @@ def test_global_tag_index_requires_session_and_links_every_library(
     client, engine = browser
     first, _, _ = _seed_structure(engine, prefix="1")
     second, _, _ = _seed_structure(engine, prefix="4")
+    with immediate_transaction(engine) as connection:
+        for library_id in (first, second):
+            TagRepository(connection).add_tag(
+                library_id=library_id, tag_id="a" * 32, name="共同标签", created_at=3_000_000
+            )
     anonymous = client.get("/admin/tags")
     assert anonymous.status_code == 303
     assert anonymous.headers["location"] == "/admin/login"
@@ -145,9 +220,11 @@ def test_global_tag_index_requires_session_and_links_every_library(
     assert response.headers["content-language"] == "zh-CN"
     assert response.headers["cache-control"] == "no-store, max-age=0"
     assert 'href="/admin/tags" aria-current="page"' in response.text
-    assert f'href="/admin/libraries/{first}/tags"' in response.text
-    assert f'href="/admin/libraries/{second}/tags"' in response.text
-    assert "选择知识库以浏览其标签。" in response.text
+    assert f'href="/admin/libraries/{first}/tags/{"a" * 32}"' in response.text
+    assert f'href="/admin/libraries/{second}/tags/{"a" * 32}"' in response.text
+    assert response.text.count('class="tag-chip"') == 2
+    assert "Synthetic 1 Library" in response.text and "Synthetic 4 Library" in response.text
+    assert "选择知识库以浏览其标签。" not in response.text
     assert 'href="/admin/tags?lang=en"' in response.text
     assert client.get(f"/admin/libraries/{second}/tags").status_code == 200
 
@@ -227,6 +304,20 @@ def test_tag_browser_is_session_protected_library_scoped_and_escaped(
     _login(client)
     library_page = client.get(base)
     assert f'href="{base}/tags"' in library_page.text
+    assert f'class="action-link" href="{base}/trash"' in library_page.text
+    assert '<span class="count-badge">1</span>' in library_page.text
+    assert f'class="tag-chip" href="{base}/tags/{tag_id}"' in library_page.text
+    assert "Other private tag" not in library_page.text
+    assert "<img src=x onerror=alert(1)>" not in library_page.text
+    with immediate_transaction(engine) as connection:
+        connection.execute(update(Page).where(Page.library_id == library).values(deleted_at=None))
+    assert '<span class="count-badge">0</span>' in client.get(base).text
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            update(Page)
+            .where(Page.library_id == library, Page.page_id == deleted_page_id)
+            .values(deleted_at=4_000_000)
+        )
     directory = client.get(f"{base}/tags?lang=zh-CN")
     assert directory.status_code == 200
     assert 'href="/admin/tags" aria-current="page"' in directory.text

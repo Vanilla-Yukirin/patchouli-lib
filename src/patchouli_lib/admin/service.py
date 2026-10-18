@@ -12,12 +12,14 @@ from sqlalchemy import Connection, Engine, delete, insert, select
 from patchouli_lib.admin.contracts import (
     BootstrapInput,
     MasterCorrectOccurrenceInput,
+    MasterCredentialLifetimeInput,
     MasterDeletePageFormInput,
     MasterPageTagFormInput,
     MasterProvisionAgentInput,
     MasterRestoreArchiveFormInput,
     MasterRotateAgentCredentialInput,
     MasterSetAgentLibraryGrantsInput,
+    MasterTagBatchInput,
     MasterTagFormInput,
     MasterUpdateAgentInput,
     MasterUpdatePageTitleInput,
@@ -34,6 +36,7 @@ from patchouli_lib.admin.master_audit import (
 )
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.session import MasterAdminSession
+from patchouli_lib.admin.tag_management import apply_master_tag_batch
 from patchouli_lib.auth.library_policy import LibraryAction, target_library_grants_digest
 from patchouli_lib.auth.models import (
     AdminStructureAuditEvent,
@@ -528,7 +531,7 @@ class AdminActionService:
                 )
             )
             issued = CredentialIssuer(repository, clock=lambda: now).issue(
-                caller, expires_at=_expires_at(now, request.credential_ttl_seconds)
+                caller, expires_at=_master_credential_expiry(now, request)
             )
             connection.execute(
                 insert(CredentialLibraryPolicy),
@@ -638,7 +641,7 @@ class AdminActionService:
             if (
                 caller.disabled_at is not None
                 or current.created_at > now
-                or current.expires_at <= now
+                or (current.expires_at is not None and current.expires_at <= now)
                 or current.revoked_at is not None
                 or current.rotated_at is not None
             ):
@@ -651,7 +654,7 @@ class AdminActionService:
                 home_library_id=library_id, caller_id=caller_id, credential_id=credential_id
             )
             replacement = CredentialIssuer(repository, clock=lambda: now).issue(
-                caller, expires_at=_expires_at(now, request.credential_ttl_seconds)
+                caller, expires_at=_master_credential_expiry(now, request)
             )
             connection.execute(
                 insert(CredentialLibraryPolicy),
@@ -724,7 +727,7 @@ class AdminActionService:
             if (
                 caller.disabled_at is not None
                 or current.created_at > now
-                or current.expires_at <= now
+                or (current.expires_at is not None and current.expires_at <= now)
                 or current.revoked_at is not None
                 or current.rotated_at is not None
             ):
@@ -941,6 +944,17 @@ class AdminActionService:
                 event_id=uuid4().hex,
             )
             return tag.id, True
+
+    def manage_tags_as_master(
+        self, request: MasterTagBatchInput, *, master_session: MasterAdminSession
+    ) -> int:
+        with immediate_transaction(self._engine) as connection:
+            self._require_current_admin_session(
+                connection, master_session, master_session.audit_fingerprint()
+            )
+            return apply_master_tag_batch(
+                connection, request, master_session=master_session, now=self._clock()
+            )
 
     def set_page_tag(
         self,
@@ -1283,6 +1297,14 @@ class AdminActionService:
                 ),
             )
         return True
+
+
+def _master_credential_expiry(now: int, request: MasterCredentialLifetimeInput) -> int | None:
+    if request.never_expires:
+        return None
+    if request.credential_ttl_seconds is None:
+        raise ValueError("A finite credential requires a positive lifetime.")
+    return _expires_at(now, request.credential_ttl_seconds)
 
 
 def _expires_at(now: int, ttl_seconds: int) -> int:

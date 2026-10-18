@@ -128,7 +128,7 @@ def _current_scope(
         or credential.rotated_at is not None
         or credential.token_version != supplied.credential.token_version
         or now < credential.created_at
-        or now >= credential.expires_at
+        or (credential.expires_at is not None and now >= credential.expires_at)
     ):
         raise AuthenticationError
 

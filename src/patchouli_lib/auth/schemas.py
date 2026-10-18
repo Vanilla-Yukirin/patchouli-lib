@@ -71,7 +71,7 @@ class NewCredential(AuthSchema):
     selector: CredentialSelector = Field(repr=False)
     token_version: Annotated[int, Field(ge=1)]
     verifier: CredentialVerifier
-    expires_at: CredentialExpiryMicros
+    expires_at: CredentialExpiryMicros | None
     created_at: TimestampMicros
     updated_at: TimestampMicros
     last_used_at: TimestampMicros | None = None
@@ -89,7 +89,7 @@ class CredentialRecord(AuthSchema):
     library_id: OpaqueId
     caller_id: OpaqueId
     token_version: Annotated[int, Field(ge=1)]
-    expires_at: CredentialExpiryMicros
+    expires_at: CredentialExpiryMicros | None
     created_at: TimestampMicros
     updated_at: TimestampMicros
     last_used_at: TimestampMicros | None = None

@@ -1449,8 +1449,10 @@ def test_master_session_revokes_exact_agent_token_with_atomic_audit(
         assert len(connection.execute(select(MasterAuditEvent.id)).all()) == 1
 
 
+@pytest.mark.parametrize("unlimited", [False, True])
 def test_master_session_provisions_agent_with_explicit_cross_library_grants(
     admin_web: AdminWeb,
+    unlimited: bool,
 ) -> None:
     legacy_csrf = _login(admin_web)
     assert 'action="/admin/agents/create"' not in admin_web.client.get("/admin/agents").text
@@ -1486,6 +1488,9 @@ def test_master_session_provisions_agent_with_explicit_cross_library_grants(
     assert f'value="{home_id}:read"' in page.text
     assert f'value="{target_id}:write"' in page.text
     assert "写入不自动包含读取" in page.text
+    assert 'name="never_expires" value="true"' in page.text
+    assert 'src="/admin/reveal.js"' in page.text
+    assert "script-src 'self'" in page.headers["content-security-policy"]
     form = {
         "csrf_token": csrf,
         "home_library_id": home_id,
@@ -1494,6 +1499,9 @@ def test_master_session_provisions_agent_with_explicit_cross_library_grants(
         "credential_ttl_seconds": "3600",
         "grants": [f"{home_id}:read", f"{target_id}:write"],
     }
+    if unlimited:
+        form["never_expires"] = "true"
+        form.pop("credential_ttl_seconds")
     for data, origin, status in (
         (form, "https://other.example.invalid", 403),
         ({**form, "csrf_token": "wrong"}, _ORIGIN, 403),
@@ -1523,6 +1531,7 @@ def test_master_session_provisions_agent_with_explicit_cross_library_grants(
     assert whoami.status_code == 200
     payload = whoami.json()
     assert payload["policy_mode"] == "library_grants"
+    assert (payload["expires_at"] is None) == unlimited
     assert payload["grants"] == []
     assert payload["library_grants"] == sorted(
         [
@@ -1543,6 +1552,20 @@ def test_master_session_provisions_agent_with_explicit_cross_library_grants(
     )
     assert revealed.status_code == 200
     assert revealed.text == token
+
+    if unlimited:
+        revoke = _post(
+            admin_web.client,
+            f"{detail_path}/credentials/{credential_id}/revoke",
+            data={"csrf_token": csrf},
+        )
+        assert revoke.status_code == 303
+        assert (
+            admin_web.client.get(
+                "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {token}"}
+            ).status_code
+            == 401
+        )
 
 
 def test_master_agent_metadata_editor_is_scoped_safe_and_current(admin_web: AdminWeb) -> None:
@@ -1771,8 +1794,10 @@ def test_master_agent_provision_accepts_many_explicit_library_grants(
     assert all(grant["actions"] == ["read", "write"] for grant in whoami.json()["library_grants"])
 
 
+@pytest.mark.parametrize("unlimited", [False, True])
 def test_master_session_rotates_exact_library_agent_token_without_leaking_old_value(
     admin_web: AdminWeb,
+    unlimited: bool,
 ) -> None:
     _initialize_master(admin_web)
     _, csrf = _login_master(admin_web)
@@ -1806,6 +1831,8 @@ def test_master_session_rotates_exact_library_agent_token_without_leaking_old_va
     assert " — 读取" in detail.text
     assert old_token not in detail.text
     form = {"csrf_token": csrf, "credential_ttl_seconds": "7200"}
+    if unlimited:
+        form["never_expires"] = "true"
     assert (
         _post(
             admin_web.client, rotate_path, data=form, origin="https://other.example.invalid"
@@ -1837,6 +1864,7 @@ def test_master_session_rotates_exact_library_agent_token_without_leaking_old_va
         "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {new_token}"}
     )
     assert new_identity.status_code == 200
+    assert (new_identity.json()["expires_at"] is None) == unlimited
     assert new_identity.json()["library_grants"] == [
         {"library_id": library_id, "actions": ["read"]}
     ]
@@ -1856,6 +1884,30 @@ def test_master_session_rotates_exact_library_agent_token_without_leaking_old_va
     )
     assert revealed.status_code == 200
     assert revealed.text == new_token
+
+    if unlimited:
+        updated_detail = admin_web.client.get(detail_path + "?lang=zh-CN")
+        assert "永不过期" in updated_detail.text
+        assert f"{detail_path}/credentials/{new_id}/grants" in updated_detail.text
+        finite = _post(
+            admin_web.client,
+            f"{detail_path}/credentials/{new_id}/rotate",
+            data={"csrf_token": csrf, "credential_ttl_seconds": "315360000"},
+        )
+        assert finite.status_code == 200
+        finite_token = _credential_from(finite.text)
+        assert (
+            admin_web.client.get(
+                "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {new_token}"}
+            ).status_code
+            == 401
+        )
+        finite_identity = admin_web.client.get(
+            "/api/v1/auth/whoami", headers={"Authorization": f"Bearer {finite_token}"}
+        )
+        assert finite_identity.status_code == 200
+        assert finite_identity.json()["expires_at"] is not None
+        assert finite_identity.json()["library_grants"] == new_identity.json()["library_grants"]
 
 
 def test_master_grant_editor_changes_only_target_token_with_csrf_and_stale_form_checks(

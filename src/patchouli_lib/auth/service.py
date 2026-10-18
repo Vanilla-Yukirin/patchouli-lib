@@ -52,7 +52,7 @@ class AuthorizationError(RuntimeError):
 
 class CredentialExpiryError(ValueError):
     def __init__(self) -> None:
-        super().__init__("Credential expiry must be finite and in the future.")
+        super().__init__("Credential expiry must be in the future; only Agents may omit expiry.")
 
 
 class CredentialPersistenceError(RuntimeError):
@@ -74,9 +74,13 @@ class CredentialIssuer:
         self._id_factory = id_factory
         self._clock = clock
 
-    def issue(self, caller: CallerRecord, *, expires_at: int) -> IssuedCredential:
+    def issue(self, caller: CallerRecord, *, expires_at: int | None) -> IssuedCredential:
         created_at = self._clock()
-        if expires_at <= created_at or expires_at > MAX_RFC3339_TIMESTAMP_MICROSECONDS:
+        if expires_at is None and caller.kind is not CallerKind.AGENT:
+            raise CredentialExpiryError
+        if expires_at is not None and (
+            expires_at <= created_at or expires_at > MAX_RFC3339_TIMESTAMP_MICROSECONDS
+        ):
             raise CredentialExpiryError
         if caller.disabled_at is not None:
             raise AuthenticationError
@@ -144,7 +148,8 @@ class AuthenticationService:
             or stored.revoked_at is not None
             or stored.rotated_at is not None
             or now < stored.created_at
-            or now >= stored.expires_at
+            or (stored.expires_at is None and caller.kind is not CallerKind.AGENT)
+            or (stored.expires_at is not None and now >= stored.expires_at)
         ):
             raise AuthenticationError
 

@@ -12,8 +12,11 @@ GET /api/v1/auth/whoami
 GET /api/v1/capabilities
 ```
 
-`whoami` 返回身份名称、说明、到期时间、调用方与凭据 ID。新服务还同时返回
-`policy_mode` 与 `library_grants`；旧服务可能两个都不返回，届时权限模式是未知，
+`whoami` 返回身份名称、说明、到期时间、调用方与凭据 ID。
+`expires_at: null` 表示该 Agent Token 没有到期时间；有限期限仍是 RFC 3339 UTC
+字符串。没有到期时间不影响吊销、轮换、身份禁用和权限校验。
+
+新服务还同时返回 `policy_mode` 与 `library_grants`；旧服务可能两个都不返回，届时权限模式是未知，
 旧 `grants` 仍表示旧契约的 Section 授权，但不能据此推断新的 Library 权限。
 `policy_mode` 有三种：`operator` 为管理员身份；
 `legacy_section` 使用旧 `grants` 的 Section 操作，写入需 `archive:write`、读取需

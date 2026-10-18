@@ -284,7 +284,7 @@ class WhoAmI:
     caller_id: str
     credential_id: str
     kind: str
-    expires_at: datetime
+    expires_at: datetime | None
     policy_version: int
     grants: tuple[Grant, ...]
     policy_mode: Literal["operator", "legacy_section", "library_grants"] | None = None
@@ -317,7 +317,11 @@ class WhoAmI:
             caller_id=_string(data, "caller_id"),
             credential_id=_string(data, "credential_id"),
             kind=_string(data, "kind"),
-            expires_at=parse_rfc3339(_string(data, "expires_at")),
+            expires_at=(
+                None
+                if "expires_at" in data and data["expires_at"] is None
+                else parse_rfc3339(_string(data, "expires_at"))
+            ),
             policy_version=_integer(data, "policy_version"),
             grants=tuple(
                 Grant.from_dict(_object(item, context="grant"))
