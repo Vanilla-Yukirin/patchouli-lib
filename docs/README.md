@@ -53,6 +53,7 @@
 - [ADR 0004：Page 文件字节保存在 SQLite](decisions/0004-page-file-storage.md)
 - [管理面板入口简化提案](proposals/admin-request-origin.md)
 - [Agent Token 的可选无限有效期](proposals/non-expiring-agent-tokens.md)
+- [启用管理面板时的根地址导航](proposals/root-admin-navigation.md)
 
 ADR 0004 确定多文件的 SQLite 存储方向；主分支已实现统一文件集写入、逐库授权及
 受保护的 Token 再次显示。旧 Archive 与旧 Section 凭据保留兼容边界，旧搜索入口
