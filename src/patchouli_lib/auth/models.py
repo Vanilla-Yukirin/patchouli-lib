@@ -238,6 +238,18 @@ class CredentialLibraryPolicy(Base):
         ),
         CheckConstraint("mode = 'library_grants'", name="ck_auth_credential_library_policies_mode"),
         CheckConstraint(
+            "read_mode IN ('include', 'exclude')",
+            name="ck_auth_credential_library_policies_read_mode",
+        ),
+        CheckConstraint(
+            "write_mode IN ('include', 'exclude')",
+            name="ck_auth_credential_library_policies_write_mode",
+        ),
+        CheckConstraint(
+            "typeof(scope_revision) = 'integer' AND scope_revision >= 0",
+            name="ck_auth_credential_library_policies_scope_revision",
+        ),
+        CheckConstraint(
             "typeof(created_at) = 'integer' AND created_at >= 0",
             name="ck_auth_credential_library_policies_created_at",
         ),
@@ -247,6 +259,9 @@ class CredentialLibraryPolicy(Base):
     caller_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
     home_library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
     mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    read_mode: Mapped[str] = mapped_column(String(7), nullable=False, server_default="include")
+    write_mode: Mapped[str] = mapped_column(String(7), nullable=False, server_default="include")
+    scope_revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 

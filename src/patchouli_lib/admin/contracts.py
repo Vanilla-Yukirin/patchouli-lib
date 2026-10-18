@@ -90,8 +90,22 @@ class MasterCredentialLifetimeInput(AdminActionInput):
         return self
 
 
-class MasterProvisionAgentInput(MasterCredentialLifetimeInput):
-    home_library_id: OpaqueId
+class MasterLibraryScopeInput(AdminActionInput):
+    read_mode: Literal["include", "exclude"] = "include"
+    write_mode: Literal["include", "exclude"] = "include"
+    read_libraries: tuple[OpaqueId, ...] = ()
+    write_libraries: tuple[OpaqueId, ...] = ()
+
+    @model_validator(mode="after")
+    def require_distinct_selections(self) -> Self:
+        for values in (self.read_libraries, self.write_libraries):
+            if len(set(values)) != len(values):
+                raise ValueError("Library selections must be distinct.")
+        return self
+
+
+class MasterProvisionAgentInput(MasterCredentialLifetimeInput, MasterLibraryScopeInput):
+    home_library_id: OpaqueId | None = None
     agent_name: ResourceName
     agent_description: BoundedText = ""
     grants: tuple[MasterLibraryGrantInput, ...] = ()
@@ -101,7 +115,15 @@ class MasterProvisionAgentInput(MasterCredentialLifetimeInput):
         pairs = {(grant.library_id, grant.action) for grant in self.grants}
         if len(pairs) != len(self.grants):
             raise ValueError("Library grants must be distinct.")
+        if self.grants and self.model_fields_set.intersection(
+            {"read_mode", "write_mode", "read_libraries", "write_libraries"}
+        ):
+            raise ValueError("Legacy grants cannot be combined with scope selections.")
         return self
+
+
+class MasterSetAgentLibraryScopeInput(MasterLibraryScopeInput):
+    expected_scope_revision: Annotated[int, Field(ge=0)]
 
 
 class MasterUpdateAgentInput(AdminActionInput):
@@ -289,4 +311,6 @@ __all__ = [
     "MasterUpdateAgentInput",
     "MasterRotateAgentCredentialInput",
     "MasterSetAgentLibraryGrantsInput",
+    "MasterLibraryScopeInput",
+    "MasterSetAgentLibraryScopeInput",
 ]

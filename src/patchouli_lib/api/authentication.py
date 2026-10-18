@@ -8,7 +8,11 @@ from fastapi import Request
 from sqlalchemy import Connection, Engine
 
 from patchouli_lib.api.errors import authentication_required, invalid_token
-from patchouli_lib.auth.repository import AuthRepository, CredentialLibraryGrantSummary
+from patchouli_lib.auth.repository import (
+    AuthRepository,
+    CredentialLibraryGrantSummary,
+    CredentialLibraryScope,
+)
 from patchouli_lib.auth.schemas import (
     AuthenticatedCaller,
     CallerKind,
@@ -37,6 +41,7 @@ class AuthenticatedRequestContext:
     # Defaults preserve manually constructed legacy contexts in route tests.
     policy_mode: PolicyMode = "legacy_section"
     library_grants: tuple[CredentialLibraryGrantSummary, ...] = ()
+    library_scope: CredentialLibraryScope | None = None
 
     def __repr__(self) -> str:
         return (
@@ -88,9 +93,11 @@ class BearerAuthentication:
         engine: Engine,
         *,
         clock: Clock = utc_microseconds,
+        include_library_scope: bool = False,
     ) -> None:
         self._engine = engine
         self._clock = clock
+        self._include_library_scope = include_library_scope
 
     def __call__(self, request: Request) -> AuthenticatedRequestContext:
         credential = extract_bearer_token(request)
@@ -113,7 +120,11 @@ class BearerAuthentication:
                         and now >= stored.updated_at
                     )
                     if not touch_due:
-                        return self._context(connection, authenticated)
+                        return self._context(
+                            connection,
+                            authenticated,
+                            include_library_scope=self._include_library_scope,
+                        )
                 finally:
                     connection.rollback()
 
@@ -125,18 +136,26 @@ class BearerAuthentication:
                     AuthRepository(connection),
                     clock=self._clock,
                 ).authenticate(credential)
-                context = self._context(connection, authenticated)
+                context = self._context(
+                    connection,
+                    authenticated,
+                    include_library_scope=self._include_library_scope,
+                )
         except AuthenticationError:
             raise invalid_token() from None
         return context
 
     @staticmethod
     def _context(
-        connection: Connection, authenticated: AuthenticatedCaller
+        connection: Connection,
+        authenticated: AuthenticatedCaller,
+        *,
+        include_library_scope: bool = False,
     ) -> AuthenticatedRequestContext:
         repository = AuthRepository(connection)
         grants: tuple[SectionGrantRecord, ...] = ()
         library_grants: tuple[CredentialLibraryGrantSummary, ...] = ()
+        library_scope: CredentialLibraryScope | None = None
         policy_mode: PolicyMode = "operator"
         if authenticated.caller.kind is CallerKind.AGENT:
             home_library_id = authenticated.caller.library_id
@@ -144,11 +163,19 @@ class BearerAuthentication:
             credential_id = authenticated.credential.id
             if repository.has_library_grant_policy(home_library_id, caller_id, credential_id):
                 policy_mode = "library_grants"
-                library_grants = repository.list_credential_library_grants(
-                    home_library_id=home_library_id,
-                    caller_id=caller_id,
-                    credential_id=credential_id,
-                )
+                # Only identity diagnostics need the complete Library set.
+                # Content routes resolve their target again in their own snapshot.
+                if include_library_scope:
+                    library_grants = repository.list_credential_library_grants(
+                        home_library_id=home_library_id,
+                        caller_id=caller_id,
+                        credential_id=credential_id,
+                    )
+                    library_scope = repository.get_credential_library_scope(
+                        home_library_id=home_library_id,
+                        caller_id=caller_id,
+                        credential_id=credential_id,
+                    )
             else:
                 policy_mode = "legacy_section"
                 grants = repository.list_grants(home_library_id, caller_id)
@@ -157,6 +184,7 @@ class BearerAuthentication:
             grants=grants,
             policy_mode=policy_mode,
             library_grants=library_grants,
+            library_scope=library_scope,
         )
 
 

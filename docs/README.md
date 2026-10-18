@@ -28,6 +28,8 @@
 
 ## 工程文档
 
+- [Agent Token 的独立读取与写入范围](proposals/independent-library-scopes.md)：两项
+  独立的指定／排除模式，支持未来知识库，保留旧凭据与历史兼容边界。
 - [标签浏览与批量管理](proposals/tag-management.md)：全局标签浏览、批量改名和删除，
   知识库标签与回收站数量展示；本地实现，不新增备注字段。
 - [实施路线图与当前状态](../ROADMAP.md)

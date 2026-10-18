@@ -378,6 +378,7 @@ def _jsonable(value: object) -> object:
             "policy_version": value.policy_version,
             "policy_mode": value.policy_mode,
             "library_grants": _jsonable(value.library_grants),
+            "library_scope": _jsonable(value.library_scope),
             "grants": _jsonable(value.grants),
         }
     if isinstance(value, Page):

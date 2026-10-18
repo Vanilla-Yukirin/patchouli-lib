@@ -18,6 +18,7 @@ from patchouli_lib.backup import validate_database
 from patchouli_lib.backup.errors import BackupDatabaseError
 from patchouli_lib.backup.manifest import (
     LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+    LIBRARY_SCOPES_SCHEMA_REVISION,
     OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
 )
 from patchouli_lib.content.page_lifecycle_schemas import PageLifecycleCommand
@@ -79,6 +80,18 @@ def test_downgrade_rejects_library_lifecycle_success(
     lifecycle_engine: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     content_engine = lifecycle_engine
+    assert content_engine.url.database is not None
+    path = Path(content_engine.url.database)
+    config = _config(path, monkeypatch)
+    with content_engine.connect() as connection:
+        historical_revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    # Current authorization reads the 0032 scope columns. Build legitimate
+    # history there, then restore the exact historical schema under test.
+    # This tests historical downgrade safety without running new code on an
+    # unmigrated database or weakening its production schema requirement.
+    command.upgrade(config, LIBRARY_SCOPES_SCHEMA_REVISION)
     story = _story(content_engine)
     page = _page(content_engine, story.command.library_id, story.command.page_id)
     agent = _agent(content_engine, page.library_id)
@@ -94,9 +107,8 @@ def test_downgrade_rejects_library_lifecycle_success(
         ),
         "delete",
     )
-    assert content_engine.url.database is not None
-    config = _config(Path(content_engine.url.database), monkeypatch)
-    path = Path(content_engine.url.database)
+    command.downgrade(config, historical_revision)
+    validate_database(path, schema_revision=historical_revision)
     before = _snapshot(path)
     with pytest.raises(RuntimeError, match="Cannot discard Library Page lifecycle"):
         command.downgrade(config, "20261002_0029")

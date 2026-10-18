@@ -4,7 +4,12 @@ from dataclasses import dataclass
 
 from sqlalchemy import Connection, delete, insert, or_, select, update
 
-from patchouli_lib.auth.library_policy import LibraryAction, LibraryPolicy, resolve_library_policy
+from patchouli_lib.auth.library_policy import (
+    LibraryAction,
+    LibraryPolicy,
+    library_scope_allows,
+    resolve_library_policy,
+)
 from patchouli_lib.auth.models import (
     AgentTokenValue,
     AuditEvent,
@@ -38,6 +43,17 @@ class CredentialLibraryGrantSummary:
 
     library_id: str
     actions: tuple[LibraryAction, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CredentialLibraryScope:
+    """Stored selection modes and sets, separate from effective existing rights."""
+
+    read_mode: str
+    write_mode: str
+    read_libraries: tuple[str, ...]
+    write_libraries: tuple[str, ...]
+    revision: int
 
 
 class AuthRepository:
@@ -197,7 +213,70 @@ class AuthRepository:
         caller_id: str,
         credential_id: str,
     ) -> tuple[CredentialLibraryGrantSummary, ...]:
-        """List grants for only this exact credential, in deterministic order."""
+        """List effective rights over existing Libraries for an exact identity.
+
+        This is a policy read, not authentication; the caller must authenticate
+        separately before exposing or using these rights.
+        """
+        scope = self.get_credential_library_scope(home_library_id, caller_id, credential_id)
+        if scope is None:
+            return ()
+        read_libraries = frozenset(scope.read_libraries)
+        write_libraries = frozenset(scope.write_libraries)
+        grants = []
+        for library_id in self._connection.execute(
+            select(Library.id).order_by(Library.id)
+        ).scalars():
+            actions = []
+            if library_scope_allows(scope.read_mode, library_id in read_libraries):
+                actions.append(LibraryAction.READ)
+            if library_scope_allows(scope.write_mode, library_id in write_libraries):
+                actions.append(LibraryAction.WRITE)
+            if actions:
+                grants.append(CredentialLibraryGrantSummary(library_id, tuple(actions)))
+        return tuple(grants)
+
+    def get_credential_library_scope(
+        self, home_library_id: str, caller_id: str, credential_id: str
+    ) -> CredentialLibraryScope | None:
+        """Read stored modes and selected Libraries without expanding exclusions."""
+        policy = self._connection.execute(
+            select(
+                CredentialLibraryPolicy.read_mode,
+                CredentialLibraryPolicy.write_mode,
+                CredentialLibraryPolicy.scope_revision,
+            ).where(
+                CredentialLibraryPolicy.home_library_id == home_library_id,
+                CredentialLibraryPolicy.caller_id == caller_id,
+                CredentialLibraryPolicy.credential_id == credential_id,
+                CredentialLibraryPolicy.mode == "library_grants",
+            )
+        ).one_or_none()
+        if policy is None:
+            return None
+        selections = self.list_credential_library_selections(
+            home_library_id=home_library_id, caller_id=caller_id, credential_id=credential_id
+        )
+        return CredentialLibraryScope(
+            read_mode=policy.read_mode,
+            write_mode=policy.write_mode,
+            read_libraries=tuple(
+                item.library_id for item in selections if LibraryAction.READ in item.actions
+            ),
+            write_libraries=tuple(
+                item.library_id for item in selections if LibraryAction.WRITE in item.actions
+            ),
+            revision=policy.scope_revision,
+        )
+
+    def list_credential_library_selections(
+        self,
+        *,
+        home_library_id: str,
+        caller_id: str,
+        credential_id: str,
+    ) -> tuple[CredentialLibraryGrantSummary, ...]:
+        """List raw selected Libraries for an exact identity, in stable order."""
 
         statement = (
             select(CredentialLibraryGrant.target_library_id, CredentialLibraryGrant.action)

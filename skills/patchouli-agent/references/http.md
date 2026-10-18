@@ -25,6 +25,14 @@ GET /api/v1/capabilities
 无权限。身份验证成功不等于接口已开放，仍应查看 `/api/v1/capabilities`；其中
 没有搜索能力时不要把搜索当作已实现功能。
 
+支持独立范围的服务另返回 `library_scope`：`read_mode`、`write_mode` 分别为
+`include`（仅指定库）或 `exclude`（全部库减去排除项），`read_libraries` 与
+`write_libraries` 是各自原始选择集，`revision` 是范围版本。空 include 不授予该项
+权限，空 exclude 覆盖全部现有和未来库；两项独立，写入不包含读取。旧模式可能
+返回 `null`，旧服务可能不含此字段。`library_grants` 始终表示当前实际有效授权，
+不能把 exclude 的原始选择集当作允许列表。发现新知识库后重新请求 whoami 并
+核对权限；不要从内部兼容归属推断授权，也不要缓存旧授权来绕过撤销。
+
 受保护的 Skill 资源：
 
 ```text

@@ -157,7 +157,7 @@ def _seed_tag(api: TagApi, *, tag_id: str, name: str, page_ids: list[str]) -> No
             )
 
 
-def _opt_in(api: TagApi) -> None:
+def _opt_in(api: TagApi, *, read_mode: str = "include", write_mode: str = "include") -> None:
     with immediate_transaction(api.engine) as connection:
         connection.execute(
             insert(CredentialLibraryPolicy),
@@ -166,6 +166,8 @@ def _opt_in(api: TagApi) -> None:
                 "caller_id": CALLER_ID,
                 "home_library_id": api.scope.library_id,
                 "mode": "library_grants",
+                "read_mode": read_mode,
+                "write_mode": write_mode,
                 "created_at": 1_500_000,
             },
         )
@@ -560,6 +562,53 @@ def test_opt_in_home_library_tag_counts_do_not_include_foreign_library(tag_api: 
         assert (
             client.get(
                 f"/api/v1/libraries/{foreign_library}/tags", headers=_auth(api.agent_token)
+            ).status_code
+            == 404
+        )
+
+
+def test_tag_read_all_write_selected_includes_future_libraries(tag_api: TagApi) -> None:
+    api = tag_api
+    _opt_in(api, read_mode="exclude")
+    foreign_library, _, _ = seed_library_structure(api.engine, prefix="b", label="Future")
+    directory = f"/api/v1/libraries/{foreign_library}/tags"
+    with TestClient(_app(api), raise_server_exceptions=False) as client:
+        for path in (_path(api, "tags"), directory):
+            assert client.get(path, headers=_auth(api.agent_token)).status_code == 200
+            assert (
+                client.post(
+                    path, headers=_auth(api.agent_token), json={"name": "Read only"}
+                ).status_code
+                == 403
+            )
+        _grant(api, "write", target_library_id=foreign_library)
+        created = client.post(directory, headers=_auth(api.agent_token), json={"name": "Allowed"})
+        assert created.status_code == 201, created.text
+        assert (
+            client.post(
+                _path(api, "tags"), headers=_auth(api.agent_token), json={"name": "Home denied"}
+            ).status_code
+            == 403
+        )
+        # Excluding read on a writable Library keeps writes independently usable.
+        _grant(api, "read", target_library_id=foreign_library)
+        assert client.get(directory, headers=_auth(api.agent_token)).status_code == 403
+        assert (
+            client.post(
+                directory, headers=_auth(api.agent_token), json={"name": "Write only"}
+            ).status_code
+            == 201
+        )
+        _revoke(api, "write", target_library_id=foreign_library)
+        assert (
+            client.post(
+                directory, headers=_auth(api.agent_token), json={"name": "Denied"}
+            ).status_code
+            == 404
+        )
+        assert (
+            client.get(
+                f"/api/v1/libraries/{'f' * 32}/tags", headers=_auth(api.agent_token)
             ).status_code
             == 404
         )

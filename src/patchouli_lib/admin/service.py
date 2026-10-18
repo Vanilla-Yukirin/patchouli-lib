@@ -7,7 +7,7 @@ from time import time
 from typing import Literal
 from uuid import uuid4
 
-from sqlalchemy import Connection, Engine, delete, insert, select
+from sqlalchemy import Connection, Engine, delete, insert, select, update
 
 from patchouli_lib.admin.contracts import (
     BootstrapInput,
@@ -19,6 +19,7 @@ from patchouli_lib.admin.contracts import (
     MasterRestoreArchiveFormInput,
     MasterRotateAgentCredentialInput,
     MasterSetAgentLibraryGrantsInput,
+    MasterSetAgentLibraryScopeInput,
     MasterTagBatchInput,
     MasterTagFormInput,
     MasterUpdateAgentInput,
@@ -42,6 +43,7 @@ from patchouli_lib.auth.models import (
     AdminStructureAuditEvent,
     CredentialLibraryGrant,
     CredentialLibraryPolicy,
+    MasterAuditEvent,
 )
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import (
@@ -80,6 +82,7 @@ from patchouli_lib.idempotency.schemas import (
     digest_idempotency_key,
 )
 from patchouli_lib.identifiers import canonical_utc_wire, parse_occurrence_time
+from patchouli_lib.library.models import Library
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import (
     BookRecord,
@@ -112,6 +115,10 @@ _MICROSECONDS_PER_SECOND = 1_000_000
 
 class GrantVersionConflictError(ValueError):
     """The exact credential grants changed since the form was displayed."""
+
+
+class ScopeEditorRequiredError(PolicyConflictError):
+    """The legacy per-Library editor cannot represent this policy safely."""
 
 
 class AgentMetadataVersionConflictError(ValueError):
@@ -515,14 +522,23 @@ class AdminActionService:
                 connection, master_session, master_session.audit_fingerprint()
             )
             repository = AuthRepository(connection)
-            if not repository.library_exists(request.home_library_id):
+            home_library_id = request.home_library_id or connection.scalar(
+                select(Library.id).order_by(Library.created_at, Library.id).limit(1)
+            )
+            if home_library_id is None or not repository.library_exists(home_library_id):
                 raise ResourceNotFoundError
-            if any(not repository.library_exists(grant.library_id) for grant in request.grants):
+            selections = (
+                [(grant.library_id, grant.action.value) for grant in request.grants]
+                if request.grants
+                else [(key, "read") for key in request.read_libraries]
+                + [(key, "write") for key in request.write_libraries]
+            )
+            if any(not repository.library_exists(key) for key, _ in selections):
                 raise ResourceNotFoundError
             caller = repository.add_caller(
                 NewCaller(
                     id=new_opaque_id(),
-                    library_id=request.home_library_id,
+                    library_id=home_library_id,
                     kind=CallerKind.AGENT,
                     name=request.agent_name,
                     description=request.agent_description,
@@ -540,18 +556,21 @@ class AdminActionService:
                     "caller_id": caller.id,
                     "home_library_id": caller.library_id,
                     "mode": "library_grants",
+                    "read_mode": request.read_mode,
+                    "write_mode": request.write_mode,
+                    "scope_revision": 0,
                     "created_at": now,
                 },
             )
-            for grant in request.grants:
+            for target_library_id, action in selections:
                 connection.execute(
                     insert(CredentialLibraryGrant),
                     {
                         "credential_id": issued.credential.id,
                         "caller_id": caller.id,
                         "home_library_id": caller.library_id,
-                        "target_library_id": grant.library_id,
-                        "action": grant.action.value,
+                        "target_library_id": target_library_id,
+                        "action": action,
                         "created_at": now,
                     },
                 )
@@ -650,7 +669,12 @@ class AdminActionService:
                 # Legacy Section grants belong to the caller, not this credential.
                 # Require explicit reprovision instead of silently changing modes.
                 raise PolicyConflictError
-            existing_grants = repository.list_credential_library_grants(
+            scope = repository.get_credential_library_scope(
+                home_library_id=library_id, caller_id=caller_id, credential_id=credential_id
+            )
+            if scope is None:
+                raise PolicyConflictError
+            existing_grants = repository.list_credential_library_selections(
                 home_library_id=library_id, caller_id=caller_id, credential_id=credential_id
             )
             replacement = CredentialIssuer(repository, clock=lambda: now).issue(
@@ -663,6 +687,9 @@ class AdminActionService:
                     "caller_id": caller_id,
                     "home_library_id": library_id,
                     "mode": "library_grants",
+                    "read_mode": scope.read_mode,
+                    "write_mode": scope.write_mode,
+                    "scope_revision": 0,
                     "created_at": now,
                 },
             )
@@ -703,6 +730,91 @@ class AdminActionService:
             credential_id=replacement.credential.id,
         )
 
+    def set_agent_scope_as_master(
+        self,
+        library_id: str,
+        caller_id: str,
+        credential_id: str,
+        request: MasterSetAgentLibraryScopeInput,
+        *,
+        master_session: MasterAdminSession,
+    ) -> bool:
+        """Atomically replace both selection policies, guarding stale and ABA forms."""
+        with immediate_transaction(self._engine) as connection:
+            now = self._clock()
+            self._require_current_admin_session(
+                connection, master_session, master_session.audit_fingerprint()
+            )
+            repository = AuthRepository(connection)
+            caller = repository.get_caller(library_id, caller_id)
+            current = repository.get_credential(library_id, caller_id, credential_id)
+            if caller is None or caller.kind is not CallerKind.AGENT or current is None:
+                raise ResourceNotFoundError
+            if (
+                caller.disabled_at is not None
+                or current.created_at > now
+                or (current.expires_at is not None and current.expires_at <= now)
+                or current.revoked_at is not None
+                or current.rotated_at is not None
+            ):
+                raise CredentialLifecycleError
+            scope = repository.get_credential_library_scope(
+                home_library_id=library_id, caller_id=caller_id, credential_id=credential_id
+            )
+            if scope is None:
+                raise PolicyConflictError
+            if scope.revision != request.expected_scope_revision:
+                raise GrantVersionConflictError
+            selections = [(key, "read") for key in request.read_libraries] + [
+                (key, "write") for key in request.write_libraries
+            ]
+            if any(not repository.library_exists(key) for key, _ in selections):
+                raise ResourceNotFoundError
+            if (
+                scope.read_mode == request.read_mode
+                and scope.write_mode == request.write_mode
+                and set(scope.read_libraries) == set(request.read_libraries)
+                and set(scope.write_libraries) == set(request.write_libraries)
+            ):
+                return False
+            connection.execute(
+                update(CredentialLibraryPolicy)
+                .where(CredentialLibraryPolicy.credential_id == credential_id)
+                .values(
+                    read_mode=request.read_mode,
+                    write_mode=request.write_mode,
+                    scope_revision=scope.revision + 1,
+                )
+            )
+            connection.execute(
+                delete(CredentialLibraryGrant).where(
+                    CredentialLibraryGrant.credential_id == credential_id
+                )
+            )
+            for target_id, action in selections:
+                connection.execute(
+                    insert(CredentialLibraryGrant),
+                    {
+                        "credential_id": credential_id,
+                        "caller_id": caller_id,
+                        "home_library_id": library_id,
+                        "target_library_id": target_id,
+                        "action": action,
+                        "created_at": now,
+                    },
+                )
+            MasterAuditRepository(connection).add_success(
+                identity_id=master_session.identity_id,
+                session_generation=master_session.session_generation,
+                session_fingerprint=master_session.audit_fingerprint(),
+                action="auth.agent_credential.scope_update",
+                target_type="credential",
+                target_id=credential_id,
+                occurred_at=now,
+                event_id=uuid4().hex,
+            )
+        return True
+
     def set_agent_grants_as_master(
         self,
         library_id: str,
@@ -734,6 +846,24 @@ class AdminActionService:
                 raise CredentialLifecycleError
             if not repository.has_library_grant_policy(library_id, caller_id, credential_id):
                 raise PolicyConflictError
+            scope = repository.get_credential_library_scope(
+                home_library_id=library_id, caller_id=caller_id, credential_id=credential_id
+            )
+            if scope is None or scope.read_mode != "include" or scope.write_mode != "include":
+                raise ScopeEditorRequiredError
+            if (
+                connection.scalar(
+                    select(MasterAuditEvent.id)
+                    .where(
+                        MasterAuditEvent.action == "auth.agent_credential.scope_update",
+                        MasterAuditEvent.target_type == "credential",
+                        MasterAuditEvent.target_id == credential_id,
+                    )
+                    .limit(1)
+                )
+                is not None
+            ):
+                raise ScopeEditorRequiredError
             if not repository.library_exists(target_library_id):
                 raise ResourceNotFoundError
             existing = {
@@ -790,6 +920,11 @@ class AdminActionService:
                         "created_at": now,
                     },
                 )
+            connection.execute(
+                update(CredentialLibraryPolicy)
+                .where(CredentialLibraryPolicy.credential_id == credential_id)
+                .values(scope_revision=CredentialLibraryPolicy.scope_revision + 1)
+            )
             MasterAuditRepository(connection).add_success(
                 identity_id=master_session.identity_id,
                 session_generation=master_session.session_generation,

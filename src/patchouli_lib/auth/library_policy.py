@@ -21,6 +21,7 @@ from patchouli_lib.auth.models import (
     CredentialLibraryGrant,
     CredentialLibraryPolicy,
 )
+from patchouli_lib.library.models import Library
 
 
 class LibraryAction(StrEnum):
@@ -37,7 +38,7 @@ class LegacySectionPolicy:
 
 @dataclass(frozen=True, slots=True)
 class LibraryGrantPolicy:
-    """Independent per-Library rights. Missing grants deny both actions."""
+    """Effective independent per-Library rights after scope evaluation."""
 
     read: bool
     write: bool
@@ -117,14 +118,25 @@ def resolve_library_policy(
     if connection.execute(valid_credential).scalar_one_or_none() is None:
         return None
 
-    policy_exists = select(CredentialLibraryPolicy.credential_id).where(
+    policy_statement = select(
+        CredentialLibraryPolicy.read_mode, CredentialLibraryPolicy.write_mode
+    ).where(
         CredentialLibraryPolicy.credential_id == credential_id,
         CredentialLibraryPolicy.caller_id == caller_id,
         CredentialLibraryPolicy.home_library_id == home_library_id,
         CredentialLibraryPolicy.mode == "library_grants",
     )
-    if connection.execute(policy_exists).scalar_one_or_none() is None:
+    policy = connection.execute(policy_statement).one_or_none()
+    if policy is None:
         return LegacySectionPolicy()
+
+    if (
+        connection.execute(
+            select(Library.id).where(Library.id == target_library_id)
+        ).scalar_one_or_none()
+        is None
+    ):
+        return LibraryGrantPolicy(read=False, write=False)
 
     actions = connection.execute(
         select(CredentialLibraryGrant.action).where(
@@ -134,8 +146,20 @@ def resolve_library_policy(
             CredentialLibraryGrant.target_library_id == target_library_id,
         )
     ).scalars()
-    granted = frozenset(actions)
-    return LibraryGrantPolicy(read="read" in granted, write="write" in granted)
+    selected = frozenset(actions)
+    return LibraryGrantPolicy(
+        read=library_scope_allows(policy.read_mode, "read" in selected),
+        write=library_scope_allows(policy.write_mode, "write" in selected),
+    )
+
+
+def library_scope_allows(mode: str, selected: bool) -> bool:
+    """Evaluate one action's selected set, denying unknown modes defensively."""
+    if mode == "include":
+        return selected
+    if mode == "exclude":
+        return not selected
+    return False
 
 
 __all__ = [

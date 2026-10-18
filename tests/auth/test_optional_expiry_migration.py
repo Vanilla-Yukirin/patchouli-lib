@@ -83,8 +83,12 @@ def test_upgrade_and_finite_downgrade_preserve_exact_data_and_historical_schema(
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
         columns = {row[1]: row for row in connection.execute("PRAGMA table_info(auth_credentials)")}
         assert columns["expires_at"][3] == 0
-    assert validate_database(path).schema_revision == OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION
-    command.check(config)
+    assert (
+        validate_database(
+            path, schema_revision=OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION
+        ).schema_revision
+        == OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION
+    )
 
     command.downgrade(config, LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION)
     assert _snapshot(path) == before
@@ -92,7 +96,7 @@ def test_upgrade_and_finite_downgrade_preserve_exact_data_and_historical_schema(
     validate_database(path, schema_revision=LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION)
     command.upgrade(config, OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION)
     assert _snapshot(path) == before
-    validate_database(path)
+    validate_database(path, schema_revision=OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION)
 
 
 def test_no_expiry_accepts_later_use_but_keeps_timestamp_constraints_and_blocks_downgrade(
@@ -101,6 +105,7 @@ def test_no_expiry_accepts_later_use_but_keeps_timestamp_constraints_and_blocks_
     path = tmp_path / "unbounded.sqlite"
     engine = seed_complete_database(path, monkeypatch)
     engine.dispose()
+    command.downgrade(_config(path, monkeypatch), OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION)
     with closing(sqlite3.connect(path)) as connection:
         connection.execute(
             "UPDATE auth_credentials SET expires_at = NULL, last_used_at = 2000, "
@@ -120,13 +125,13 @@ def test_no_expiry_accepts_later_use_but_keeps_timestamp_constraints_and_blocks_
                     f"UPDATE auth_credentials SET {assignments} WHERE id = ?", ("e" * 32,)
                 )
             connection.rollback()
-    validate_database(path)
+    validate_database(path, schema_revision=OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION)
     before = _snapshot(path)
     config = _config(path, monkeypatch)
     with pytest.raises(RuntimeError, match="without expiry"):
         command.downgrade(config, LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION)
     assert _snapshot(path) == before
-    validate_database(path)
+    validate_database(path, schema_revision=OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION)
     # Revocation does not authorize silently discarding historical expiry state.
     with closing(sqlite3.connect(path)) as connection:
         connection.execute(
@@ -135,4 +140,4 @@ def test_no_expiry_accepts_later_use_but_keeps_timestamp_constraints_and_blocks_
         connection.commit()
     with pytest.raises(RuntimeError, match="without expiry"):
         command.downgrade(config, LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION)
-    validate_database(path)
+    validate_database(path, schema_revision=OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION)

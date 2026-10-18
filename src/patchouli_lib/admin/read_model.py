@@ -372,6 +372,9 @@ class CredentialItem:
     library_grants_policy: bool = False
     library_grants: tuple[CredentialLibraryGrantItem, ...] = ()
     grant_revisions: tuple[tuple[str, int], ...] = ()
+    read_mode: str = "include"
+    write_mode: str = "include"
+    scope_revision: int = 0
 
 
 @dataclass(frozen=True)
@@ -1013,14 +1016,20 @@ class AdminReadModel:
                 .mappings()
                 .all()
             )
-            policy_ids = set(
-                connection.scalars(
-                    select(CredentialLibraryPolicy.credential_id).where(
+            policies = {
+                policy["credential_id"]: policy
+                for policy in connection.execute(
+                    select(
+                        CredentialLibraryPolicy.credential_id,
+                        CredentialLibraryPolicy.read_mode,
+                        CredentialLibraryPolicy.write_mode,
+                        CredentialLibraryPolicy.scope_revision,
+                    ).where(
                         CredentialLibraryPolicy.home_library_id == library_id,
                         CredentialLibraryPolicy.caller_id == caller_id,
                     )
-                )
-            )
+                ).mappings()
+            }
             library_grant_rows = connection.execute(
                 select(
                     CredentialLibraryGrant.credential_id,
@@ -1085,7 +1094,22 @@ class AdminReadModel:
                 tuple(
                     CredentialItem(
                         **credential,
-                        library_grants_policy=credential["id"] in policy_ids,
+                        library_grants_policy=credential["id"] in policies,
+                        read_mode=(
+                            policies[credential["id"]]["read_mode"]
+                            if credential["id"] in policies
+                            else "include"
+                        ),
+                        write_mode=(
+                            policies[credential["id"]]["write_mode"]
+                            if credential["id"] in policies
+                            else "include"
+                        ),
+                        scope_revision=(
+                            policies[credential["id"]]["scope_revision"]
+                            if credential["id"] in policies
+                            else 0
+                        ),
                         library_grants=tuple(grants_by_credential.get(credential["id"], ())),
                         grant_revisions=tuple(
                             sorted(
