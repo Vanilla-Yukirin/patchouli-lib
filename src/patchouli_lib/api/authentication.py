@@ -8,7 +8,11 @@ from fastapi import Request
 from sqlalchemy import Connection, Engine
 
 from patchouli_lib.api.errors import authentication_required, invalid_token
-from patchouli_lib.auth.repository import AuthRepository, CredentialLibraryGrantSummary
+from patchouli_lib.auth.repository import (
+    AuthRepository,
+    CredentialLibraryGrantSummary,
+    CredentialLibraryScope,
+)
 from patchouli_lib.auth.schemas import (
     AuthenticatedCaller,
     CallerKind,
@@ -37,6 +41,7 @@ class AuthenticatedRequestContext:
     # Defaults preserve manually constructed legacy contexts in route tests.
     policy_mode: PolicyMode = "legacy_section"
     library_grants: tuple[CredentialLibraryGrantSummary, ...] = ()
+    library_scope: CredentialLibraryScope | None = None
 
     def __repr__(self) -> str:
         return (
@@ -137,6 +142,7 @@ class BearerAuthentication:
         repository = AuthRepository(connection)
         grants: tuple[SectionGrantRecord, ...] = ()
         library_grants: tuple[CredentialLibraryGrantSummary, ...] = ()
+        library_scope: CredentialLibraryScope | None = None
         policy_mode: PolicyMode = "operator"
         if authenticated.caller.kind is CallerKind.AGENT:
             home_library_id = authenticated.caller.library_id
@@ -149,6 +155,11 @@ class BearerAuthentication:
                     caller_id=caller_id,
                     credential_id=credential_id,
                 )
+                library_scope = repository.get_credential_library_scope(
+                    home_library_id=home_library_id,
+                    caller_id=caller_id,
+                    credential_id=credential_id,
+                )
             else:
                 policy_mode = "legacy_section"
                 grants = repository.list_grants(home_library_id, caller_id)
@@ -157,6 +168,7 @@ class BearerAuthentication:
             grants=grants,
             policy_mode=policy_mode,
             library_grants=library_grants,
+            library_scope=library_scope,
         )
 
 

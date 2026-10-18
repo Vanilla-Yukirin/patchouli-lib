@@ -30,6 +30,7 @@ from patchouli_lib.admin.contracts import (
     MasterRestoreArchiveFormInput,
     MasterRotateAgentCredentialInput,
     MasterSetAgentLibraryGrantsInput,
+    MasterSetAgentLibraryScopeInput,
     MasterTagBatchInput,
     MasterTagFormInput,
     MasterUpdateAgentInput,
@@ -112,6 +113,7 @@ from patchouli_lib.admin.service import (
     GrantVersionConflictError,
     PageTitleNotFoundError,
     PageTitleVersionConflictError,
+    ScopeEditorRequiredError,
 )
 from patchouli_lib.admin.session import AdminSession, AdminSessionCodec, MasterAdminSession
 from patchouli_lib.admin.tag_management import TagBatchConflictError
@@ -1192,7 +1194,7 @@ def create_admin_router(
             values = await _read_form(
                 request,
                 allowed_fields=frozenset(MasterProvisionAgentInput.model_fields) | {"csrf_token"},
-                repeatable_fields=frozenset({"grants"}),
+                repeatable_fields=frozenset({"grants", "read_libraries", "write_libraries"}),
                 max_fields=_MAX_AGENT_PROVISION_FORM_FIELDS,
             )
             _require_csrf(values, session)
@@ -1617,6 +1619,7 @@ def create_admin_router(
             ),
             locale=locale,
             status_code=status_code,
+            allow_self_script=True,
         )
         remember_requested_locale(page_response, request)
         return page_response
@@ -1626,6 +1629,62 @@ def create_admin_router(
         request: Request, library_id: str, caller_id: str, credential_id: str
     ) -> Response:
         return grant_editor(request, library_id, caller_id, credential_id)
+
+    @router.post("/libraries/{library_id}/callers/{caller_id}/credentials/{credential_id}/grants")
+    async def set_agent_library_scope(
+        request: Request, library_id: str, caller_id: str, credential_id: str
+    ) -> Response:
+        locale = locale_for(request)
+        if not _same_origin_submission(request):
+            return forbidden(request)
+        session = current_session(request)
+        if session is None:
+            return html(
+                login_page(locale=locale, message="Sign in again."), locale=locale, status_code=401
+            )
+        if not isinstance(session, MasterAdminSession):
+            return forbidden(request, "A master session is required.")
+        try:
+            values = await _read_form(
+                request,
+                allowed_fields=frozenset(MasterSetAgentLibraryScopeInput.model_fields)
+                | {"csrf_token"},
+                repeatable_fields=frozenset({"read_libraries", "write_libraries"}),
+                max_fields=_MAX_AGENT_PROVISION_FORM_FIELDS,
+            )
+            _require_csrf(values, session)
+            await run_in_threadpool(
+                service.set_agent_scope_as_master,
+                library_id,
+                caller_id,
+                credential_id,
+                MasterSetAgentLibraryScopeInput.model_validate(values),
+                master_session=session,
+            )
+        except _FormError as exc:
+            status, message = exc.status_code, exc.safe_message
+        except GrantVersionConflictError:
+            status, message = 409, "Grants changed since this page was opened. Review and retry."
+        except (ValidationError, ValueError):
+            status, message = 422, "Check the submitted fields and try again."
+        except AuthenticationError:
+            return html(
+                login_page(locale=locale, message="Sign in again."), locale=locale, status_code=401
+            )
+        except ResourceNotFoundError:
+            status, message = 404, "The requested local resource was not found."
+        except (PolicyConflictError, CredentialLifecycleError, IntegrityError):
+            status, message = 409, "The action conflicts with current local state."
+        except Exception:
+            status, message = 500, "The action could not be completed."
+        else:
+            return redirect(
+                f"/admin/libraries/{library_id}/callers/{caller_id}"
+                f"/credentials/{credential_id}/grants"
+            )
+        return grant_editor(
+            request, library_id, caller_id, credential_id, message=message, status_code=status
+        )
 
     @router.post(
         "/libraries/{library_id}/callers/{caller_id}/credentials/{credential_id}"
@@ -1669,6 +1728,9 @@ def create_admin_router(
             )
         except _FormError as exc:
             status, message = exc.status_code, exc.safe_message
+        except ScopeEditorRequiredError:
+            status, message = 409, "Use the complete read/write scope editor for this Token."
+            stale_grants = True
         except GrantVersionConflictError:
             status, message = 409, "Grants changed since this page was opened. Review and retry."
             stale_grants = True

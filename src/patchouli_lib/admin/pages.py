@@ -29,7 +29,6 @@ from patchouli_lib.admin.read_model import (
 from patchouli_lib.admin.request_log_filters import RequestLogFilters
 from patchouli_lib.admin.service import DeliveredCredential
 from patchouli_lib.api.agent_skill_routes import SkillBundle
-from patchouli_lib.auth.library_policy import LibraryAction, target_library_grants_digest
 from patchouli_lib.auth.schemas import SectionAction
 from patchouli_lib.identifiers import canonical_utc_wire
 from patchouli_lib.search.service_v2 import SearchPageV2
@@ -70,6 +69,34 @@ _DISABLE_AGENT_WARNING = (
 )
 
 REVEAL_SCRIPT = """
+document.querySelectorAll('[data-library-scope]').forEach((card) => {
+  const rows = [...card.querySelectorAll('.scope-library')];
+  const search = card.querySelector('.scope-search');
+  const summary = card.querySelector('.scope-summary');
+  const update = () => {
+    const mode = card.querySelector('input[type="radio"]:checked').value;
+    card.querySelector('.scope-help').textContent = mode === 'exclude'
+      ? card.dataset.excludeHelp : card.dataset.includeHelp;
+    const names = rows.filter(row => row.querySelector('input').checked)
+      .map(row => row.querySelector('span').textContent);
+    const countLabel = mode === 'exclude' ? card.dataset.excludedLabel : card.dataset.allowedLabel;
+    summary.textContent = countLabel
+      + ': ' + names.length
+      + (names.length ? ' — ' + names.join(', ') : '');
+    rows.forEach(row => {
+      row.hidden = !row.textContent.toLocaleLowerCase()
+        .includes(search.value.toLocaleLowerCase());
+    });
+  };
+  card.addEventListener('change', update);
+  card.querySelector('.scope-clear').addEventListener('click', () => {
+    rows.forEach(row => { row.querySelector('input').checked = false; });
+    update();
+  });
+  search.addEventListener('input', update);
+  window.addEventListener('pageshow', update);
+  update();
+});
 document.querySelectorAll('[data-lifetime-target]').forEach((checkbox) => {
   const duration = document.getElementById(checkbox.dataset.lifetimeTarget);
   if (!duration) return;
@@ -267,6 +294,17 @@ input, textarea, select {
 fieldset { border: 1px solid #d6ddd5; margin-top: .8rem; }
 fieldset label { display: flex; gap: .5rem; font-weight: 400; }
 fieldset input { width: auto; }
+.scope-card { border-radius: .7rem; background: #fff; padding: 1rem; min-width: 0; }
+.scope-card legend { font-weight: 750; }
+.scope-card .scope-search-label { display: block; }
+.scope-card .scope-search { width: 100%; }
+.scope-options { max-height: 16rem; overflow-y: auto; padding: .2rem; }
+.scope-options .scope-library { padding: .5rem; margin: 0; border-radius: .35rem; }
+.scope-options .scope-library:hover { background: #eef4ef; }
+.scope-library span { min-width: 0; overflow-wrap: anywhere; }
+.scope-library input { flex-shrink: 0; }
+.scope-options .scope-library[hidden] { display: none; }
+.scope-help, .scope-summary { font-size: .9rem; overflow-wrap: anywhere; }
 button {
   background: #2f6845;
   border: 0;
@@ -394,6 +432,12 @@ details summary { cursor: pointer; font-weight: 700; }
 
 
 _ZH_CN: dict[str, str] = {
+    "Use the complete read/write scope editor for this Token.": (
+        "请使用当前页面的完整读取／写入范围编辑器保存此 Token。"
+    ),
+    "Grants changed since this page was opened. Review and retry.": (
+        "权限已被其他操作更新，请核对当前范围后重新保存。"
+    ),
     "Create a document": "新建文档",
     "Update files": "更新文件",
     "A required form field is missing.": "缺少必填字段。",
@@ -1591,19 +1635,27 @@ def caller_page(
             else localize(locale, "Not rotated")
         )
         if item.library_grants_policy:
-            empty_grants = "无读取或写入权限" if locale == "zh-CN" else "No read or write grants."
-            action_labels = {"read": "读取", "write": "写入"} if locale == "zh-CN" else {}
-            grant_entries = "".join(
-                "<li>"
-                f"{escape(grant.library_name)} (<code>{escape(grant.library_id)}</code>)"
-                f" — {action_labels.get(grant.action, escape(grant.action))}</li>"
-                for grant in item.library_grants
-            )
-            policy_summary = (
-                f"<p>{'逐知识库授权' if locale == 'zh-CN' else 'Per-Library grants'}"
-                "</p>"
-                + (f"<ul>{grant_entries}</ul>" if grant_entries else f"<p>{empty_grants}</p>")
-            )
+            summaries = []
+            for action, mode in (("read", item.read_mode), ("write", item.write_mode)):
+                names = [g.library_name for g in item.library_grants if g.action == action]
+                label = (
+                    {"read": "读取", "write": "写入"}[action]
+                    if locale == "zh-CN"
+                    else action.title()
+                )
+                if mode == "exclude":
+                    summary = (
+                        "所有知识库（含未来新建）"
+                        if locale == "zh-CN"
+                        else "All Libraries, including future Libraries"
+                    )
+                    if names:
+                        summary += "；排除：" if locale == "zh-CN" else "; except: "
+                        summary += ", ".join(names)
+                else:
+                    summary = ", ".join(names) or ("无权限" if locale == "zh-CN" else "No access")
+                summaries.append(f"<p><strong>{label}</strong>：{escape(summary)}</p>")
+            policy_summary = "".join(summaries)
         else:
             policy_summary = (
                 "<p>旧版分区授权；不会自动获得整库权限。</p>"
@@ -1692,10 +1744,10 @@ def caller_page(
             rotate = (
                 f"<details><summary>{rotate_label}</summary>"
                 f"<p>{
-                    '旧 Token 将立即失效，新 Token 保留上面列出的逐知识库授权。'
+                    '旧 Token 将立即失效，新 Token 保留上面的读取和写入范围，包括未来知识库规则。'
                     if locale == 'zh-CN'
                     else 'The old Token stops working immediately; '
-                    'the new Token keeps exactly the per-Library grants listed above.'
+                    'the new Token keeps both scopes, including future-Library rules.'
                 }</p>"
                 f"<p><code>{escape(item.id)}</code></p>"
                 f'<form method="post" action="{escape(path, quote=True)}">'
@@ -1832,6 +1884,72 @@ def caller_page(
     )
 
 
+def _library_scope_fields(
+    libraries: tuple[LibraryItem, ...],
+    locale: AdminLocale,
+    credential: CredentialItem | None = None,
+) -> str:
+    cards = []
+    for action in ("read", "write"):
+        mode = getattr(credential, f"{action}_mode", "include")
+        selected = (
+            {grant.library_id for grant in credential.library_grants if grant.action == action}
+            if credential is not None
+            else set()
+        )
+        label = (
+            {"read": "读取范围", "write": "写入范围"}[action]
+            if locale == "zh-CN"
+            else f"{action.title()} scope"
+        )
+        include_label = "仅选定知识库" if locale == "zh-CN" else "Only selected Libraries"
+        exclude_label = (
+            "所有知识库（可排除）" if locale == "zh-CN" else "All Libraries (with exclusions)"
+        )
+        include_summary = (
+            "仅允许勾选的知识库；未选即无权限。切换模式后，勾选项作为允许项，请核对后保存。"
+            if locale == "zh-CN"
+            else "Only checked Libraries are allowed; empty means no access. "
+            "After switching modes, checked items become allowed; review before saving."
+        )
+        exclude_summary = (
+            "允许所有现在和未来的知识库；勾选项将被排除。切换模式后，请核对排除项再保存。"
+            if locale == "zh-CN"
+            else "Allow current and future Libraries; checked items are excluded. "
+            "After switching modes, review exclusions before saving."
+        )
+        options = "".join(
+            f'<label class="scope-library"><input type="checkbox" name="{action}_libraries" '
+            f'value="{escape(lib.id, quote=True)}"'
+            f"{' checked' if lib.id in selected else ''}><span>{escape(lib.name)}</span></label>"
+            for lib in libraries
+        )
+        search = "搜索知识库" if locale == "zh-CN" else "Search Libraries"
+        allowed_label = "允许知识库数量" if locale == "zh-CN" else "Allowed Library count"
+        excluded_label = "排除知识库数量" if locale == "zh-CN" else "Excluded Library count"
+        selected_label = excluded_label if mode == "exclude" else allowed_label
+        clear_label = "清空选择" if locale == "zh-CN" else "Clear selection"
+        cards.append(
+            f'<fieldset class="scope-card" data-library-scope '
+            f'data-include-help="{escape(include_summary, quote=True)}" '
+            f'data-exclude-help="{escape(exclude_summary, quote=True)}" '
+            f'data-allowed-label="{allowed_label}" data-excluded-label="{excluded_label}">'
+            f"<legend>{label}</legend>"
+            f'<label><input type="radio" name="{action}_mode" value="include"'
+            f"{' checked' if mode == 'include' else ''}>{include_label}</label>"
+            f'<label><input type="radio" name="{action}_mode" value="exclude"'
+            f"{' checked' if mode == 'exclude' else ''}>{exclude_label}</label>"
+            f'<p class="scope-help">{exclude_summary if mode == "exclude" else include_summary}</p>'
+            f'<label class="scope-search-label">{search}<input type="search" '
+            f'class="scope-search" aria-label="{label}：{search}"></label>'
+            f'<div class="scope-options">{options}</div>'
+            f'<button type="button" class="secondary scope-clear">{clear_label}</button>'
+            f'<p class="scope-summary" aria-live="polite">{selected_label}：{len(selected)}</p>'
+            "</fieldset>"
+        )
+    return '<div class="grid scope-grid">' + "".join(cards) + "</div>"
+
+
 def agent_grants_page(
     csrf_token: str,
     view: CallerView,
@@ -1843,57 +1961,30 @@ def agent_grants_page(
 ) -> str:
     title = "编辑 Token 授权" if locale == "zh-CN" else "Edit Token grants"
     guidance = (
-        "每个知识库单独保存读取和写入权限；未勾选即无权，写入不自动包含读取。"
-        "此设置只影响上方这一枚 Token。跨知识库写入目前仅文件集接口支持。"
+        "读取和写入分别设置；写入不自动包含读取。可设置读取所有知识库、仅写入指定库。"
+        "所有知识库模式包含未来新建的知识库。此设置只影响这一枚 Token。"
         if locale == "zh-CN"
-        else "Save read and write for each Library separately. Unchecked means no access; "
-        "write does not imply read. Only this Token changes. Cross-Library writes "
-        "currently work through the file-set API only."
+        else "Configure read and write independently; write does not imply read. "
+        "All Libraries includes future Libraries. Only this Token changes."
     )
     base_path = (
         f"/admin/libraries/{view.library_id}/callers/{view.id}/credentials/{credential.id}/grants"
     )
-    revisions = dict(credential.grant_revisions)
-    forms = []
-    for library in libraries:
-        actions = {
-            LibraryAction(grant.action)
-            for grant in credential.library_grants
-            if grant.library_id == library.id
-        }
-        digest = target_library_grants_digest(
-            view.library_id,
-            view.id,
-            credential.id,
-            library.id,
-            actions,
-            revisions.get(library.id, 0),
-        )
-        path = f"{base_path}/{library.id}"
-        checked_read = " checked" if LibraryAction.READ in actions else ""
-        checked_write = " checked" if LibraryAction.WRITE in actions else ""
-        read_label = "读取" if locale == "zh-CN" else "Read"
-        write_label = "写入" if locale == "zh-CN" else "Write"
-        save_label = "保存此知识库" if locale == "zh-CN" else "Save this Library"
-        forms.append(
-            '<section class="card">'
-            f"<h2>{escape(library.name)}</h2>"
-            f'<form method="post" action="{escape(path, quote=True)}">'
-            f"{_csrf(escape(csrf_token, quote=True))}"
-            f'<input type="hidden" name="expected_digest" value="{digest}">'
-            f'<label><input type="checkbox" name="read" value="true"{checked_read}> '
-            f"{read_label}</label> "
-            f'<label><input type="checkbox" name="write" value="true"{checked_write}> '
-            f"{write_label}</label> "
-            f'<button type="submit">{save_label}</button>'
-            "</form></section>"
-        )
+    save_label = "保存读取和写入范围" if locale == "zh-CN" else "Save read and write scopes"
+    form = (
+        f'<form method="post" action="{escape(base_path, quote=True)}">'
+        f"{_csrf(escape(csrf_token, quote=True))}"
+        f'<input type="hidden" name="expected_scope_revision" '
+        f'value="{credential.scope_revision}">'
+        f"{_library_scope_fields(libraries, locale, credential)}"
+        f'<button type="submit">{save_label}</button></form>'
+    )
     notice = "" if message is None else _notice(localize(locale, message), error=True)
     body = (
         f"<h1>{title}</h1>"
         f"<p>{escape(view.name)} · <code>{escape(credential.id)}</code></p>"
         f'<p class="section-help">{guidance}</p>'
-        f"{notice}{''.join(forms)}"
+        f"{notice}{form}"
         f'<p><a href="/admin/libraries/{escape(view.library_id, quote=True)}/callers/'
         f'{escape(view.id, quote=True)}">'
         f"{'返回 Agent 详情' if locale == 'zh-CN' else 'Back to Agent details'}</a></p>"
@@ -1905,6 +1996,7 @@ def agent_grants_page(
         base_path,
         body,
         crumbs=((localize(locale, "Libraries"), "/admin/libraries"),),
+        script_src="/admin/reveal.js",
     )
 
 
@@ -1926,7 +2018,7 @@ def callers_page(
             "<li>"
             f'<a href="/admin/libraries/{escape(item.library_id, quote=True)}/callers/'
             f'{escape(item.id, quote=True)}">{escape(item.name)}</a>'
-            f'<p class="meta">{escape(item.library_name)} · {kind} · {status}'
+            f'<p class="meta">{kind} · {status}'
             f" · {localize(locale, 'Created')}: {_time(item.created_at)}</p>"
             "</li>"
         )
@@ -1936,35 +2028,17 @@ def callers_page(
         else f"<p>{localize(locale, 'No identities yet.')}</p>"
     )
     master_form = ""
-    if allow_master_actions:
-        options = "".join(
-            f'<option value="{escape(library_item.id, quote=True)}">'
-            f"{escape(library_item.name)}</option>"
-            for library_item in libraries
-        )
-        grant_fields = []
-        for library_item in libraries:
-            library_id = escape(library_item.id, quote=True)
-            read_label = "读取" if locale == "zh-CN" else "Read"
-            write_label = "写入" if locale == "zh-CN" else "Write"
-            grant_fields.append(
-                "<fieldset>"
-                f"<legend>{escape(library_item.name)}</legend>"
-                f'<label><input type="checkbox" name="grants" value="{library_id}:read"> '
-                f"{read_label}</label>"
-                f'<label><input type="checkbox" name="grants" value="{library_id}:write"> '
-                f"{write_label}</label>"
-                "</fieldset>"
-            )
-        grants = "".join(grant_fields)
+    if allow_master_actions and libraries:
         guidance = (
-            "先选择 Agent 的归属知识库，再明确勾选每个知识库的读取和写入权限；"
-            "未勾选即无权限，写入不自动包含读取。新 Token 默认有效一年，也可选择永不过期，"
+            "读取和写入分别选择范围，写入不自动包含读取。仅选定模式未勾选即无权限；"
+            "所有知识库模式会包含以后新建的知识库，勾选项用于排除。"
+            "新 Token 默认有效一年，也可选择永不过期，"
             "可在详情页再次显示。"
             if locale == "zh-CN"
             else (
-                "Choose the Agent's home Library, then explicitly select read and write "
-                "for each Library. Unchecked means no access; write does not imply read. "
+                "Configure read and write independently; write does not imply read. "
+                "Only selected Libraries defaults to no access. All Libraries includes "
+                "future Libraries, excluding checked items. "
                 "The new Token lasts one year by default, or can be set to never expire, "
                 "and can be revealed again in details."
             )
@@ -1977,14 +2051,24 @@ def callers_page(
             f'<p class="section-help">{guidance}</p>'
             '<form method="post" action="/admin/agents/create" autocomplete="off">'
             f"{_csrf(escape(csrf_token, quote=True))}"
-            f"<label>{'归属知识库' if locale == 'zh-CN' else 'Home Library'}"
-            f'<select name="home_library_id" required>{options}</select></label>'
             f"{_text('agent_name', 'Agent name', locale)}"
             f"{_textarea('agent_description', 'Agent description', locale)}"
             f"{ttl_field}"
-            f"{grants}"
+            f"{_library_scope_fields(libraries, locale)}"
             f'<button type="submit">{submit_label}</button>'
             "</form></section>"
+        )
+    elif allow_master_actions:
+        master_form = (
+            '<section class="card"><p>'
+            + (
+                "请先创建一个知识库，再创建设备与身份。"
+                if locale == "zh-CN"
+                else "Create a Library before creating an Agent identity."
+            )
+            + '</p><a class="action-link" href="/admin/libraries">'
+            + localize(locale, "Libraries")
+            + "</a></section>"
         )
     credential_notice = (
         "新签发的有效 Agent Token 可以通过主会话再次显示；旧凭据无法从校验值还原。"
@@ -2106,7 +2190,7 @@ def guide_page(
 <p>首次设置主 Token 后，可按需创建知识库、分区和书籍。请把主 Token 保存在受控的
 本机位置；主 Token 轮换后，旧登录会话失效。</p>
 <p>旧版初始化与管理员凭据仅用于兼容；恢复管理员凭据会使此前仍有效的管理员凭据失效。</p>
-<p>为每个 Agent 明确选择归属知识库与目标知识库的独立读／写权限。
+<p>为每个 Agent 分别设置读取和写入范围：仅选定知识库，或所有知识库并排除指定项。
 请记录调用方 ID 和凭据 ID，以便之后查看、轮换或撤销凭据。</p>
 <p>此面板不能更新或回滚镜像、控制 Docker、恢复备份、执行 Shell 命令或部署。
 这些操作仍需通过独立的本地管理员流程完成。</p>
@@ -2149,7 +2233,7 @@ transport: stdio</pre>
 Keep the master Token in a controlled local store; rotating it invalidates old sessions.</p>
 <p>Legacy initialization and operator credentials remain for compatibility;
 recovering an operator credential invalidates prior active operator credentials.</p>
-<p>Choose each Agent's home Library and explicit read/write grants for target Libraries.
+<p>Choose independent read and write scopes: selected Libraries, or all with exclusions.
 Record caller and credential IDs for later reveal, rotation or revocation.</p>
 <p>This console has no image update or image rollback, Docker, backup restore, shell, or
 deployment controls. Those remain separate local operator procedures.</p>

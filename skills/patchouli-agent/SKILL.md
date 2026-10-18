@@ -37,6 +37,10 @@ description: 通过标准 HTTP 接入 PatchouliLib，验证设备身份、下载
 授权，绝不自动扩大为整库权限。`operator` 是管理员身份；不要为了弥补 Agent 权限
 不足而换用管理员凭据。旧服务缺少新版身份字段时标记权限模式未知，先核对实际契约。
 
+支持独立范围的服务以 `library_scope` 描述读取、写入各自的指定／排除规则，
+其中 exclude 的列表是排除项，不能作为获授权列表；当前有效权限仍以
+`library_grants` 为准。全部范围会覆盖未来库，发现变化后重新核对身份和权限。
+
 ## 内容操作
 
 - 先从已授权列表确认 Section、Book 与现有 Page；这些 ID 和 Revision、ETag 都是

@@ -274,6 +274,7 @@ def _discovery_policy(
     actions: tuple[str, ...],
     *,
     credential_id: str = "d" * 32,
+    read_mode: str = "include",
 ) -> None:
     with immediate_transaction(fixture.engine) as connection:
         connection.execute(
@@ -283,6 +284,7 @@ def _discovery_policy(
                 "caller_id": CALLER_ID,
                 "home_library_id": fixture.scope.library_id,
                 "mode": "library_grants",
+                "read_mode": read_mode,
                 "created_at": 1_000_000,
             },
         )
@@ -298,6 +300,45 @@ def _discovery_policy(
                     "created_at": 1_000_000,
                 },
             )
+
+
+@pytest.mark.parametrize("collection", ["sections", "books"])
+def test_exclusion_discovery_includes_future_libraries_and_rechecks_exclusions(
+    retrieval_api: RetrievalApi, collection: str
+) -> None:
+    # Configure before the target exists: no per-target grant is needed later.
+    _discovery_policy(retrieval_api, retrieval_api.scope.library_id, ("read",), read_mode="exclude")
+    library_id, section_id = _discovery_target(retrieval_api)
+    path = (
+        "/api/v1/sections" if collection == "sections" else f"/api/v1/sections/{section_id}/books"
+    )
+    first = _get(retrieval_api, path, params={"library_id": library_id, "limit": 1})
+    assert first.status_code == 200, first.text
+    cursor = first.json()["next_cursor"]
+    assert cursor is not None
+    _assert_problem(_get(retrieval_api, "/api/v1/sections"), 403, "insufficient_scope")
+    _assert_problem(
+        _get(retrieval_api, path, params={"library_id": "ff" * 16}),
+        403,
+        "insufficient_scope",
+    )
+    with immediate_transaction(retrieval_api.engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryGrant),
+            {
+                "credential_id": "d" * 32,
+                "caller_id": CALLER_ID,
+                "home_library_id": retrieval_api.scope.library_id,
+                "target_library_id": library_id,
+                "action": "read",
+                "created_at": 1_000_000,
+            },
+        )
+    _assert_problem(
+        _get(retrieval_api, path, params={"library_id": library_id, "cursor": cursor, "limit": 1}),
+        403,
+        "insufficient_scope",
+    )
 
 
 @pytest.mark.parametrize("collection", ["sections", "books"])

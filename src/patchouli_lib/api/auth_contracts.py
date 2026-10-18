@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -116,6 +116,14 @@ class EffectiveLibraryGrant(WireModel):
     actions: tuple[LibraryAction, ...]
 
 
+class LibraryScopeResponse(WireModel):
+    read_mode: Literal["include", "exclude"]
+    write_mode: Literal["include", "exclude"]
+    read_libraries: tuple[OpaqueIdentifier, ...]
+    write_libraries: tuple[OpaqueIdentifier, ...]
+    revision: Annotated[int, Field(ge=0)]
+
+
 class WhoAmIResponse(WireModel):
     caller_id: OpaqueIdentifier
     credential_id: OpaqueIdentifier
@@ -127,6 +135,7 @@ class WhoAmIResponse(WireModel):
     grants: tuple[EffectiveSectionGrant, ...]
     policy_mode: PolicyMode
     library_grants: tuple[EffectiveLibraryGrant, ...]
+    library_scope: LibraryScopeResponse | None = None
 
 
 def capabilities_response(configuration: CapabilityConfiguration) -> CapabilitiesResponse:
@@ -166,6 +175,7 @@ def _effective_grants(context: AuthenticatedRequestContext) -> tuple[EffectiveSe
 
 def whoami_response(context: AuthenticatedRequestContext) -> WhoAmIResponse:
     authenticated = context.authenticated
+    scope = context.library_scope
     return WhoAmIResponse(
         caller_id=authenticated.caller.id,
         credential_id=authenticated.credential.id,
@@ -183,6 +193,19 @@ def whoami_response(context: AuthenticatedRequestContext) -> WhoAmIResponse:
         library_grants=tuple(
             EffectiveLibraryGrant(library_id=grant.library_id, actions=grant.actions)
             for grant in context.library_grants
+        ),
+        library_scope=(
+            None
+            if scope is None
+            else LibraryScopeResponse.model_validate(
+                {
+                    "read_mode": scope.read_mode,
+                    "write_mode": scope.write_mode,
+                    "read_libraries": scope.read_libraries,
+                    "write_libraries": scope.write_libraries,
+                    "revision": scope.revision,
+                }
+            )
         ),
     )
 

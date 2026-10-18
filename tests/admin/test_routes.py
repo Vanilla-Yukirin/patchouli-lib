@@ -1485,8 +1485,9 @@ def test_master_session_provisions_agent_with_explicit_cross_library_grants(
     page = admin_web.client.get("/admin/agents?lang=zh-CN")
     assert page.status_code == 200
     assert 'action="/admin/agents/create"' in page.text
-    assert f'value="{home_id}:read"' in page.text
-    assert f'value="{target_id}:write"' in page.text
+    assert f'name="read_libraries" value="{home_id}"' in page.text
+    assert f'name="write_libraries" value="{target_id}"' in page.text
+    assert 'name="home_library_id"' not in page.text
     assert "写入不自动包含读取" in page.text
     assert 'name="never_expires" value="true"' in page.text
     assert 'src="/admin/reveal.js"' in page.text
@@ -1827,8 +1828,8 @@ def test_master_session_rotates_exact_library_agent_token_without_leaking_old_va
     detail = admin_web.client.get(detail_path + "?lang=zh-CN")
     assert detail.status_code == 200
     assert f'action="{rotate_path}"' in detail.text
-    assert "逐知识库授权" in detail.text
-    assert " — 读取" in detail.text
+    assert "读取和写入范围" in detail.text
+    assert "<strong>读取</strong>：Synthetic Rotation Library" in detail.text
     assert old_token not in detail.text
     form = {"csrf_token": csrf, "credential_ttl_seconds": "7200"}
     if unlimited:
@@ -1950,11 +1951,11 @@ def test_master_grant_editor_changes_only_target_token_with_csrf_and_stale_form_
     editor = admin_web.client.get(base + "?lang=zh-CN")
     assert editor.status_code == 200
     assert "编辑 Token 授权" in editor.text
-    assert f'action="{base}/{target_id}"' in editor.text
+    assert f'action="{base}"' in editor.text
     original_digest = target_library_grants_digest(
         home_id, caller_id, credential_id, target_id, (LibraryAction.WRITE,), 0
     )
-    assert f'name="expected_digest" value="{original_digest}"' in editor.text
+    assert 'name="expected_scope_revision" value="0"' in editor.text
     form = {"csrf_token": csrf, "expected_digest": original_digest, "read": "true"}
     assert (
         _post(

@@ -692,8 +692,10 @@ def test_library_policy_write_precheck_does_not_fall_back_to_old_section_grant(
         _problem(revoked, 403, "insufficient_scope")
 
 
+@pytest.mark.parametrize("write_mode", ["include", "exclude"])
 def test_explicit_cross_library_write_keeps_target_and_actor_home_distinct(
     file_set_http: FileSetHttp,
+    write_mode: str,
 ) -> None:
     with immediate_transaction(file_set_http.engine) as connection:
         ids = iter(("4" * 32, "5" * 32, "6" * 32))
@@ -715,20 +717,12 @@ def test_explicit_cross_library_write_keeps_target_and_actor_home_distinct(
                 "caller_id": "a" * 32,
                 "home_library_id": file_set_http.library_id,
                 "mode": "library_grants",
+                "read_mode": "exclude",
+                "write_mode": write_mode,
                 "created_at": NOW - 1,
             },
         )
-    target_path = (
-        f"/api/v1/libraries/{target.library.id}/sections/{target.section.id}"
-        f"/books/{target.book.id}/pages"
-    )
-    files = (("content.md", b"# Cross-Library synthetic content\n"),)
-    with TestClient(_app(file_set_http), raise_server_exceptions=False) as client:
-        denied = _create(
-            client, file_set_http, key="cross-library-denied", files=files, path=target_path
-        )
-        _problem(denied, 403, "insufficient_scope")
-        with immediate_transaction(file_set_http.engine) as connection:
+        if write_mode == "exclude":
             connection.execute(
                 insert(CredentialLibraryGrant),
                 {
@@ -740,6 +734,37 @@ def test_explicit_cross_library_write_keeps_target_and_actor_home_distinct(
                     "created_at": NOW - 1,
                 },
             )
+    target_path = (
+        f"/api/v1/libraries/{target.library.id}/sections/{target.section.id}"
+        f"/books/{target.book.id}/pages"
+    )
+    files = (("content.md", b"# Cross-Library synthetic content\n"),)
+    with TestClient(_app(file_set_http), raise_server_exceptions=False) as client:
+        denied = _create(
+            client, file_set_http, key="cross-library-denied", files=files, path=target_path
+        )
+        _problem(denied, 403, "insufficient_scope")
+        with immediate_transaction(file_set_http.engine) as connection:
+            if write_mode == "exclude":
+                connection.execute(
+                    delete(CredentialLibraryGrant).where(
+                        CredentialLibraryGrant.credential_id == "b" * 32,
+                        CredentialLibraryGrant.target_library_id == target.library.id,
+                        CredentialLibraryGrant.action == "write",
+                    )
+                )
+            else:
+                connection.execute(
+                    insert(CredentialLibraryGrant),
+                    {
+                        "credential_id": "b" * 32,
+                        "caller_id": "a" * 32,
+                        "home_library_id": file_set_http.library_id,
+                        "target_library_id": target.library.id,
+                        "action": "write",
+                        "created_at": NOW - 1,
+                    },
+                )
         created = _create(
             client, file_set_http, key="cross-library-create", files=files, path=target_path
         )
@@ -776,13 +801,26 @@ def test_explicit_cross_library_write_keeps_target_and_actor_home_distinct(
             row == (target.library.id, file_set_http.library_id) for row in replay_rows
         )
         with immediate_transaction(file_set_http.engine) as connection:
-            connection.execute(
-                delete(CredentialLibraryGrant).where(
-                    CredentialLibraryGrant.credential_id == "b" * 32,
-                    CredentialLibraryGrant.target_library_id == target.library.id,
-                    CredentialLibraryGrant.action == "write",
+            if write_mode == "exclude":
+                connection.execute(
+                    insert(CredentialLibraryGrant),
+                    {
+                        "credential_id": "b" * 32,
+                        "caller_id": "a" * 32,
+                        "home_library_id": file_set_http.library_id,
+                        "target_library_id": target.library.id,
+                        "action": "write",
+                        "created_at": NOW - 1,
+                    },
                 )
-            )
+            else:
+                connection.execute(
+                    delete(CredentialLibraryGrant).where(
+                        CredentialLibraryGrant.credential_id == "b" * 32,
+                        CredentialLibraryGrant.target_library_id == target.library.id,
+                        CredentialLibraryGrant.action == "write",
+                    )
+                )
         replay_denied = _create(
             client, file_set_http, key="cross-library-create", files=files, path=target_path
         )

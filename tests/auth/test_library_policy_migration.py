@@ -138,12 +138,29 @@ def test_existing_credential_migrates_without_implicit_grants_and_empty_round_tr
         }.issubset(inspect(engine).get_table_names())
         with engine.connect() as connection:
             assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
-            assert connection.scalar(select(CredentialLibraryPolicy)) is None
+            assert connection.scalar(select(CredentialLibraryPolicy.credential_id)) is None
             assert connection.scalar(select(CredentialLibraryGrant)) is None
             assert (
                 connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
                 == "20260929_0014"
             )
+    finally:
+        engine.dispose()
+    command.downgrade(config, "20260929_0013")
+    engine = build_engine(url)
+    try:
+        assert "auth_credential_library_policies" not in inspect(engine).get_table_names()
+        with engine.connect() as connection:
+            assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+    finally:
+        engine.dispose()
+    command.upgrade(config, "head")
+    command.check(config)
+    # Current authorization code runs only after the full migration chain;
+    # assertions above retain the exact historical 0014/0013 schema boundary.
+    engine = build_engine(url)
+    try:
+        with engine.connect() as connection:
             assert isinstance(
                 resolve_library_policy(
                     connection,
@@ -167,16 +184,6 @@ def test_existing_credential_migrates_without_implicit_grants_and_empty_round_tr
             assert authenticated.caller.id == CALLER
     finally:
         engine.dispose()
-    command.downgrade(config, "20260929_0013")
-    engine = build_engine(url)
-    try:
-        assert "auth_credential_library_policies" not in inspect(engine).get_table_names()
-        with engine.connect() as connection:
-            assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
-    finally:
-        engine.dispose()
-    command.upgrade(config, "head")
-    command.check(config)
 
 
 def test_downgrade_refuses_to_discard_credential_policy_data(
@@ -262,7 +269,7 @@ def test_downgrade_refuses_to_discard_credential_policy_data(
                 connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
                 == "20260929_0014"
             )
-            assert connection.scalar(select(CredentialLibraryPolicy)) is not None
+            assert connection.scalar(select(CredentialLibraryPolicy.credential_id)) is not None
             assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
     finally:
         engine.dispose()

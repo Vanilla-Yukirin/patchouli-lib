@@ -24,7 +24,7 @@ from retrieval_read.conftest import (
 )
 from retrieval_read.conftest import retrieval_engine as retrieval_engine_fixture
 from retrieval_read.conftest import retrieval_scope as retrieval_scope_fixture
-from sqlalchemy import Engine, insert
+from sqlalchemy import Engine, delete, insert
 from starlette.requests import Request
 from starlette.routing import Route
 
@@ -409,8 +409,10 @@ def test_current_page_auth_scope_and_recycle_bin_are_closed(file_set_api: FileSe
     )
 
 
+@pytest.mark.parametrize("read_mode", ["include", "exclude"])
 def test_opted_in_policy_scopes_reads_to_each_explicit_library(
     file_set_api: FileSetApi,
+    read_mode: str,
 ) -> None:
     scope = file_set_api.scope
     credential_id = "d" * 32
@@ -469,6 +471,7 @@ def test_opted_in_policy_scopes_reads_to_each_explicit_library(
                 "caller_id": CALLER_ID,
                 "home_library_id": scope.library_id,
                 "mode": "library_grants",
+                "read_mode": read_mode,
                 "created_at": 1_000_000,
             },
         )
@@ -483,6 +486,19 @@ def test_opted_in_policy_scopes_reads_to_each_explicit_library(
                 "created_at": 1_000_000,
             },
         )
+        if read_mode == "exclude":
+            for library_id in (scope.library_id, target_library_id):
+                connection.execute(
+                    insert(CredentialLibraryGrant),
+                    {
+                        "credential_id": credential_id,
+                        "caller_id": CALLER_ID,
+                        "home_library_id": scope.library_id,
+                        "target_library_id": library_id,
+                        "action": "read",
+                        "created_at": 1_000_000,
+                    },
+                )
 
     home_path = _base(file_set_api).split("/revisions/", 1)[0]
     target_path = (
@@ -497,17 +513,26 @@ def test_opted_in_policy_scopes_reads_to_each_explicit_library(
     _problem(_get(file_set_api, f"{target_revision_path}/content.md"), 404, "resource_not_found")
 
     with immediate_transaction(file_set_api.engine) as connection:
-        connection.execute(
-            insert(CredentialLibraryGrant),
-            {
-                "credential_id": credential_id,
-                "caller_id": CALLER_ID,
-                "home_library_id": scope.library_id,
-                "target_library_id": target_library_id,
-                "action": "read",
-                "created_at": 1_000_000,
-            },
-        )
+        if read_mode == "exclude":
+            connection.execute(
+                delete(CredentialLibraryGrant).where(
+                    CredentialLibraryGrant.credential_id == credential_id,
+                    CredentialLibraryGrant.target_library_id == target_library_id,
+                    CredentialLibraryGrant.action == "read",
+                )
+            )
+        else:
+            connection.execute(
+                insert(CredentialLibraryGrant),
+                {
+                    "credential_id": credential_id,
+                    "caller_id": CALLER_ID,
+                    "home_library_id": scope.library_id,
+                    "target_library_id": target_library_id,
+                    "action": "read",
+                    "created_at": 1_000_000,
+                },
+            )
     current = _get(file_set_api, target_path)
     assert current.status_code == 200, current.text
     assert current.json()["revision_id"] == target_revision.revision_id

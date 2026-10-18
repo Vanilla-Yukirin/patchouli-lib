@@ -280,6 +280,34 @@ class LibraryGrant:
 
 
 @dataclass(frozen=True, slots=True)
+class LibraryScope:
+    read_mode: Literal["include", "exclude"]
+    write_mode: Literal["include", "exclude"]
+    read_libraries: tuple[str, ...]
+    write_libraries: tuple[str, ...]
+    revision: int
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> LibraryScope:
+        read_mode = _string(data, "read_mode")
+        write_mode = _string(data, "write_mode")
+        if read_mode not in {"include", "exclude"} or write_mode not in {"include", "exclude"}:
+            raise ProtocolError("library scope contained an unknown mode")
+        read_libraries = _string_tuple(data, "read_libraries")
+        write_libraries = _string_tuple(data, "write_libraries")
+        revision = _integer(data, "revision")
+        if revision < 0 or any(not value for value in (*read_libraries, *write_libraries)):
+            raise ProtocolError("library scope contained an invalid selection or revision")
+        return cls(
+            read_mode=cast(Literal["include", "exclude"], read_mode),
+            write_mode=cast(Literal["include", "exclude"], write_mode),
+            read_libraries=read_libraries,
+            write_libraries=write_libraries,
+            revision=revision,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class WhoAmI:
     caller_id: str
     credential_id: str
@@ -291,6 +319,7 @@ class WhoAmI:
     library_grants: tuple[LibraryGrant, ...] | None = None
     name: str | None = field(default=None, repr=False)
     description: str | None = field(default=None, repr=False)
+    library_scope: LibraryScope | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> WhoAmI:
@@ -331,6 +360,11 @@ class WhoAmI:
             library_grants=library_grants,
             name=_optional_string(data, "name"),
             description=_optional_string(data, "description"),
+            library_scope=(
+                None
+                if data.get("library_scope") is None
+                else LibraryScope.from_dict(_object(data["library_scope"], context="library scope"))
+            ),
         )
 
 

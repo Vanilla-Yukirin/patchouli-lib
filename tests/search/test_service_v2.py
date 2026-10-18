@@ -9,7 +9,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from content.helpers import insert_page_graph, page_graph_values, seed_library_structure
-from sqlalchemy import Engine, insert
+from sqlalchemy import Engine, insert, update
 
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.session import AdminSessionCodec
@@ -291,6 +291,36 @@ def test_library_read_is_explicit_and_cross_library_results_are_stable(engine: E
         remote[1],
         local[1],
     ]
+
+
+def test_exclude_read_scope_sees_future_library_but_not_excluded_content(engine: Engine) -> None:
+    home = seed_library_structure(engine)
+    context = _agent(engine, home[0], home[1])
+    _page(engine, home, page_byte=0x11, title="needle excluded", content=b"needle")
+    _opt_in(engine, home[0])
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            update(CredentialLibraryPolicy)
+            .where(CredentialLibraryPolicy.credential_id == CREDENTIAL)
+            .values(read_mode="exclude", scope_revision=1)
+        )
+    _grant(engine, home[0], home[0], "read")
+    # This Library did not exist at grant time. No explicit row is needed for it.
+    future = seed_library_structure(engine, prefix="4", label="Future")
+    visible = _page(engine, future, page_byte=0x12, title="needle future", content=b"needle")
+    rebuild_search_index(engine, clock=lambda: CLOCK)
+    assert [item.page_id for item in _search(engine, context, keywords=["needle"])] == [visible[1]]
+    with pytest.raises(SearchScopeError):
+        _search(engine, context, keywords=["needle"], libraries=[home[0]])
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            update(CredentialLibraryPolicy)
+            .where(CredentialLibraryPolicy.credential_id == CREDENTIAL)
+            .values(read_mode="include", write_mode="exclude", scope_revision=2)
+        )
+    # Granting write-all must not make the future Library readable.
+    with pytest.raises(SearchScopeError):
+        _search(engine, context, keywords=["needle"], libraries=[future[0]])
 
 
 def test_short_literal_matches_exactly_within_its_own_field(engine: Engine) -> None:

@@ -26,6 +26,94 @@ _FILES = (
 )
 
 
+@pytest.mark.parametrize("setup_browser", ["proof"], indirect=True)
+def test_library_scope_cards_search_switch_clear_and_roundtrip(setup_browser: _Browser) -> None:
+    browser = setup_browser
+    _submit_setup(browser, proof=True)
+    paths = []
+    for name in ("Scope Alpha", "Scope Beta"):
+        _navigate(browser, "/admin/libraries", "document.querySelector('#name') !== null")
+        paths.append(
+            _submit_form(
+                browser,
+                "/admin/libraries",
+                {"name": name},
+                f"document.querySelector('h1')?.textContent === {json.dumps(name)}",
+            )
+        )
+    first, second = (path.rsplit("/", 1)[-1] for path in paths)
+    _navigate(browser, "/admin/agents", "document.querySelector('#agent_name') !== null")
+    _wait(
+        browser.tools,
+        "document.querySelector('[name=credential_ttl_seconds]').required",
+        description="the permission form script",
+    )
+    assert browser.tools.evaluate(f"""(() => {{
+      const cards = [...document.querySelectorAll('[data-library-scope]')];
+      const [read, write] = cards;
+      if (cards.length !== 2 || document.querySelector('[name=home_library_id]')) return false;
+      read.querySelector('input[value=exclude]').click();
+      if (!write.querySelector('input[value=include]').checked) return false;
+      const selected = read.querySelector('input[value="{first}"]');
+      selected.click();
+      const filter = read.querySelector('.scope-search');
+      filter.value = 'Beta'; filter.dispatchEvent(new Event('input', {{bubbles:true}}));
+      if (!selected.checked || !selected.closest('label').hidden) return false;
+      read.querySelector('.scope-clear').click();
+      if (selected.checked) return false;
+      if (read.querySelector('.scope-summary').textContent.includes('Alpha')) return false;
+      filter.value = ''; filter.dispatchEvent(new Event('input', {{bubbles:true}}));
+      selected.click();
+      read.querySelector('input[value=include]').click();
+      if (!selected.checked || !read.querySelector('.scope-help').textContent.includes('allowed'))
+        return false;
+      read.querySelector('input[value=exclude]').click();
+      write.querySelector('input[value="{second}"]').click();
+      document.querySelector('#agent_name').value = 'Scope Browser Agent';
+      document.querySelector('[name=never_expires]').click();
+      document.querySelector('form[action="/admin/agents/create"]').requestSubmit();
+      return true;
+    }})()""")
+    _wait(
+        browser.tools,
+        "document.querySelector('main code.secret') !== null",
+        description="scope Agent creation",
+    )
+    detail = browser.tools.evaluate(
+        "document.querySelector('main a[href*=\"/callers/\"]').getAttribute('href')"
+    )
+    assert isinstance(detail, str)
+    _navigate(browser, detail, "document.querySelector('a[href$=\"/grants\"]') !== null")
+    editor = browser.tools.evaluate(
+        "document.querySelector('a[href$=\"/grants\"]').getAttribute('href')"
+    )
+    assert isinstance(editor, str)
+    _navigate(browser, editor, "document.querySelector('[name=expected_scope_revision]') !== null")
+    assert browser.tools.evaluate(f"""(() => {{
+      const [read, write] = document.querySelectorAll('[data-library-scope]');
+      if (!read.querySelector('input[value=exclude]').checked
+        || !read.querySelector('input[value="{first}"]').checked
+        || !write.querySelector('input[value=include]').checked
+        || !write.querySelector('input[value="{second}"]').checked) return false;
+      write.querySelector('input[value=exclude]').click();
+      write.querySelector('.scope-clear').click();
+      document.querySelector('form[action$="/grants"]').requestSubmit();
+      return true;
+    }})()""")
+    _wait(
+        browser.tools,
+        "document.querySelector('[name=expected_scope_revision]')?.value === '1'",
+        description="saved read/write scope revision",
+    )
+    assert browser.tools.evaluate(f"""(() => {{
+      const [read, write] = document.querySelectorAll('[data-library-scope]');
+      return read.querySelector('input[value=exclude]').checked
+        && read.querySelector('input[value="{first}"]').checked
+        && write.querySelector('input[value=exclude]').checked
+        && write.querySelectorAll('input[type=checkbox]:checked').length === 0;
+    }})()""")
+
+
 def _submit_form(
     browser: _Browser,
     action: str,
@@ -44,8 +132,10 @@ def _submit_form(
             if (!control) return false;
             control.value = value;
           }}
-          for (const control of form.querySelectorAll('input[name=grants]'))
-            control.checked = {json.dumps(grants)}.includes(control.value);
+          for (const action of ['read', 'write']) {{
+            for (const control of form.querySelectorAll(`input[name=${{action}}_libraries]`))
+              control.checked = {json.dumps(grants)}.includes(`${{control.value}}:${{action}}`);
+          }}
           if (!form.checkValidity()) return false;
           document.documentElement.dataset.onboardingPending = 'yes';
           form.requestSubmit();
@@ -210,7 +300,6 @@ def test_real_browser_master_onboarding_to_cross_library_agent_http(
             browser,
             "/admin/agents/create",
             {
-                "home_library_id": home_id,
                 "agent_name": _AGENT,
                 "agent_description": "Synthetic cross-library onboarding",
                 "credential_ttl_seconds": "3600",
