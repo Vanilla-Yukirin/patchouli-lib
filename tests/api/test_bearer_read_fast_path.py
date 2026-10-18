@@ -116,7 +116,10 @@ def test_fast_read_keeps_caller_and_grants_in_one_snapshot_during_committed_revo
     original = BearerAuthentication._context
 
     def concurrent_change(
-        connection: Connection, authenticated: AuthenticatedCaller
+        connection: Connection,
+        authenticated: AuthenticatedCaller,
+        *,
+        include_library_scope: bool = False,
     ) -> AuthenticatedRequestContext:
         raw = connection.connection.driver_connection
         assert isinstance(raw, sqlite3.Connection) and raw.in_transaction
@@ -133,7 +136,7 @@ def test_fast_read_keeps_caller_and_grants_in_one_snapshot_during_committed_revo
                 auth_api.first_section_id,
                 SectionAction.PAGE_READ,
             )
-        return original(connection, authenticated)
+        return original(connection, authenticated, include_library_scope=include_library_scope)
 
     with monkeypatch.context() as context:
         context.setattr(BearerAuthentication, "_context", staticmethod(concurrent_change))
