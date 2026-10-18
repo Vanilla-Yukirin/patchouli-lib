@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
+from patchouli_lib.auth.library_policy import LibraryAction
 from patchouli_lib.auth.schemas import (
     MAX_RFC3339_TIMESTAMP_MICROSECONDS,
     SectionAction,
 )
-from patchouli_lib.library.schemas import BoundedText, OpaqueId, ResourceName
+from patchouli_lib.content.schemas import StrongPageETag
+from patchouli_lib.identifiers import parse_occurrence_time
+from patchouli_lib.library.schemas import BoundedText, OpaqueId, ResourceName, TimestampMicros
 
 CredentialTtlSeconds = Annotated[
     int,
@@ -26,6 +29,7 @@ class AdminActionInput(BaseModel):
 
 class BootstrapInput(AdminActionInput):
     library_name: ResourceName
+    library_description: BoundedText = ""
     section_name: ResourceName
     section_description: BoundedText = ""
     book_name: ResourceName
@@ -63,6 +67,42 @@ class ProvisionAgentInput(AdminActionInput):
         return self
 
 
+class MasterLibraryGrantInput(AdminActionInput):
+    library_id: OpaqueId
+    action: LibraryAction
+
+
+class MasterProvisionAgentInput(AdminActionInput):
+    home_library_id: OpaqueId
+    agent_name: ResourceName
+    agent_description: BoundedText = ""
+    credential_ttl_seconds: CredentialTtlSeconds
+    grants: tuple[MasterLibraryGrantInput, ...] = ()
+
+    @model_validator(mode="after")
+    def require_distinct_grants(self) -> Self:
+        pairs = {(grant.library_id, grant.action) for grant in self.grants}
+        if len(pairs) != len(self.grants):
+            raise ValueError("Library grants must be distinct.")
+        return self
+
+
+class MasterUpdateAgentInput(AdminActionInput):
+    name: ResourceName
+    description: BoundedText
+    expected_updated_at: TimestampMicros
+
+
+class MasterRotateAgentCredentialInput(AdminActionInput):
+    credential_ttl_seconds: CredentialTtlSeconds
+
+
+class MasterSetAgentLibraryGrantsInput(AdminActionInput):
+    expected_digest: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    read: bool = False
+    write: bool = False
+
+
 class RevokeAgentCredentialInput(AdminActionInput):
     library_name: ResourceName
     caller_id: OpaqueId
@@ -77,9 +117,131 @@ class RevokeAgentCredentialInput(AdminActionInput):
         return value
 
 
+class MasterTagFormInput(AdminActionInput):
+    name: Annotated[str, Field(min_length=1, max_length=100)]
+
+
+class TagFormInput(MasterTagFormInput):
+    operator_token: SecretStr = Field(min_length=1, max_length=256, repr=False)
+
+    @field_validator("operator_token", mode="before")
+    @classmethod
+    def reject_padded_operator_token(cls, value: object) -> object:
+        if isinstance(value, str) and value != value.strip():
+            raise ValueError("Operator credential must not contain whitespace.")
+        return value
+
+
+class MasterPageTagFormInput(AdminActionInput):
+    tag_id: OpaqueId
+    operation: Literal["attach", "detach"]
+
+
+class MasterUpdatePageTitleInput(AdminActionInput):
+    title: Annotated[str, Field(min_length=1)]
+    expected_updated_at: TimestampMicros
+
+    @field_validator("title")
+    @classmethod
+    def reject_nul_title(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("Page title must not contain NUL characters.")
+        return value
+
+
+class MasterCorrectOccurrenceInput(AdminActionInput):
+    """A required, explicit-timezone declaration and exact current precondition."""
+
+    occurred_at: Annotated[str, Field(min_length=1, max_length=64)]
+    expected_etag: StrongPageETag
+
+    @field_validator("occurred_at")
+    @classmethod
+    def require_valid_declaration(cls, value: str) -> str:
+        parse_occurrence_time(value)
+        return value
+
+    @field_validator("expected_etag", mode="before")
+    @classmethod
+    def reject_padded_precondition(cls, value: object) -> object:
+        if isinstance(value, str) and value != value.strip():
+            raise ValueError("ETag must not contain surrounding whitespace.")
+        return value
+
+
+class PageTagFormInput(MasterPageTagFormInput):
+    operator_token: SecretStr = Field(min_length=1, max_length=256, repr=False)
+
+    @field_validator("operator_token", mode="before")
+    @classmethod
+    def reject_padded_operator_token(cls, value: object) -> object:
+        if isinstance(value, str) and value != value.strip():
+            raise ValueError("Operator credential must not contain whitespace.")
+        return value
+
+
+class MasterRestoreArchiveFormInput(AdminActionInput):
+    """Conditional restore submitted by the authenticated master session."""
+
+    expected_etag: StrongPageETag
+
+    @field_validator("expected_etag", mode="before")
+    @classmethod
+    def reject_padded_precondition(cls, value: object) -> object:
+        if isinstance(value, str) and value != value.strip():
+            raise ValueError("Conditional restore values must not contain padding.")
+        return value
+
+    @field_validator("expected_etag")
+    @classmethod
+    def require_current_etag(cls, value: str) -> str:
+        if not value.startswith('"page-v2-'):
+            raise ValueError("A current Page ETag is required.")
+        return value
+
+
+class MasterDeletePageFormInput(MasterRestoreArchiveFormInput):
+    """Explicit confirmation and current ETag for a reversible Page deletion."""
+
+    confirm_delete: Literal["yes"]
+
+
+class RestoreArchiveFormInput(MasterRestoreArchiveFormInput):
+    """Legacy one-request Operator credential and idempotent restore values."""
+
+    idempotency_key: Annotated[str, Field(min_length=1, max_length=256)]
+    operator_token: SecretStr = Field(min_length=1, max_length=256, repr=False)
+
+    @field_validator("idempotency_key", mode="before")
+    @classmethod
+    def reject_padded_idempotency_key(cls, value: object) -> object:
+        if isinstance(value, str) and value != value.strip():
+            raise ValueError("Conditional restore values must not contain padding.")
+        return value
+
+    @field_validator("operator_token", mode="before")
+    @classmethod
+    def reject_padded_operator_token(cls, value: object) -> object:
+        if isinstance(value, str) and value != value.strip():
+            raise ValueError("Operator credential must not contain whitespace.")
+        return value
+
+
 __all__ = [
+    "MasterDeletePageFormInput",
     "BootstrapInput",
     "ProvisionAgentInput",
     "RecoverOperatorInput",
     "RevokeAgentCredentialInput",
+    "TagFormInput",
+    "MasterTagFormInput",
+    "PageTagFormInput",
+    "MasterPageTagFormInput",
+    "MasterRestoreArchiveFormInput",
+    "RestoreArchiveFormInput",
+    "MasterLibraryGrantInput",
+    "MasterProvisionAgentInput",
+    "MasterUpdateAgentInput",
+    "MasterRotateAgentCredentialInput",
+    "MasterSetAgentLibraryGrantsInput",
 ]

@@ -1,5 +1,9 @@
 # 领域模型：Library、Section、Book、Page 与 Revision
 
+> 本文描述当前单 Markdown Page 的基线模型。维护者确认 Book 可以只有一个 Page，
+> 并提出 Page 可由同级的多个文件组成；详细目标和迁移门槛见
+> [下一阶段提案](proposals/next-phase-product-and-api.md)。多文件存储尚未实现。
+
 ## 概览
 
 ```text
@@ -36,6 +40,8 @@ Book 是稳定的上下文容器。
 - 创建 Page 前，目标 Book 必须已经存在。
 - 移动 Page 只改变其 Book 归属，不复制或重写 Revision 历史。
 - 创建 Book 的成本较低，但已有 Book 的身份保持稳定。
+- Book 可以只有一个 Page，也可以容纳多个相关 Page；不要为了每篇 Page 强制新建
+  Book，也不要要求每个 Book 必须有若干 Page 才算有效。
 - 拆分和合并是明确、可审计的工作流。
 
 ## 页面（Page）

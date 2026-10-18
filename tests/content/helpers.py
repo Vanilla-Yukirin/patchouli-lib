@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from sqlalchemy import Connection, Engine, insert
+from sqlalchemy import Connection, Engine, insert, text
 
 from patchouli_lib.content.models import (
     Page,
@@ -41,6 +41,42 @@ def seed_library_structure(
         )
     )
     with immediate_transaction(engine) as connection:
+        columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(libraries)")}
+        if "description" not in columns:
+            library_id, section_id, book_id = (
+                next(identifiers),
+                next(identifiers),
+                next(identifiers),
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO libraries (id, name, created_at, updated_at) "
+                    "VALUES (:id, :name, 1000000, 1000000)"
+                ),
+                {"id": library_id, "name": f"{label} Synthetic Library"},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO sections "
+                    "(id, library_id, name, description, created_at, updated_at) "
+                    "VALUES (:id, :library_id, :name, '', 1000000, 1000000)"
+                ),
+                {"id": section_id, "library_id": library_id, "name": f"{label} Synthetic Section"},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO books "
+                    "(id, library_id, section_id, name, summary, created_at, updated_at) "
+                    "VALUES (:id, :library_id, :section_id, :name, '', 1000000, 1000000)"
+                ),
+                {
+                    "id": book_id,
+                    "library_id": library_id,
+                    "section_id": section_id,
+                    "name": f"{label} Synthetic Book",
+                },
+            )
+            return library_id, section_id, book_id
         result = LibrarySeedService(
             LibraryRepository(connection),
             id_factory=lambda: next(identifiers),

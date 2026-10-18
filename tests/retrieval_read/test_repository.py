@@ -47,3 +47,44 @@ def test_repository_keyset_is_bounded_deterministic_and_hides_tombstones(
         assert retrieval_scope.deleted_page_id not in {
             item.page_id for item in (*first.items, *second.items)
         }
+
+
+def test_revision_files_use_exact_library_page_and_revision_identity(
+    retrieval_engine: Engine,
+    retrieval_scope: RetrievalScope,
+) -> None:
+    with retrieval_engine.connect() as connection:
+        repository = RetrievalRepository(connection)
+        exact = repository.list_revision_files(
+            retrieval_scope.library_id,
+            retrieval_scope.first_page_uid,
+            retrieval_scope.first_revision_id,
+            1,
+        )
+        assert [(item.name, item.content) for item in exact] == [
+            ("content.md", retrieval_scope.historical_content.encode())
+        ]
+        assert repository.has_revision_file_seal(
+            retrieval_scope.library_id,
+            retrieval_scope.first_page_uid,
+            retrieval_scope.first_revision_id,
+            1,
+        )
+        for library_id, page_uid, revision_id, revision_number in (
+            ("f" * 32, retrieval_scope.first_page_uid, retrieval_scope.first_revision_id, 1),
+            (retrieval_scope.library_id, b"z" * 16, retrieval_scope.first_revision_id, 1),
+            (retrieval_scope.library_id, retrieval_scope.first_page_uid, "rev_" + "e" * 32, 1),
+            (
+                retrieval_scope.library_id,
+                retrieval_scope.first_page_uid,
+                retrieval_scope.first_revision_id,
+                2,
+            ),
+        ):
+            assert (
+                repository.list_revision_files(library_id, page_uid, revision_id, revision_number)
+                == ()
+            )
+            assert not repository.has_revision_file_seal(
+                library_id, page_uid, revision_id, revision_number
+            )

@@ -5,8 +5,13 @@ PatchouliLib 是一个面向人类与软件 Agent 的可自托管知识库。它
 
 > [!IMPORTANT]
 > PatchouliLib 已具备可运行的工程骨架、类型化 Agent 客户端、CLI、stdio MCP
-> 适配器、限定范围的归档写入接口、非搜索读取接口，以及实验性的本地备份、校验和
-> “恢复到全新目标”工具。全文检索与受支持的备份恢复策略仍未实现。各项能力究竟
+> 适配器、无密钥 AI 接入页与需设备 Token 的 Skill 下载、限定范围的归档写入接口、
+> 非搜索读取接口，以及实验性的本地备份、校验和“恢复到全新目标”工具。
+> 统一多文件 Page、主 Token 管理、逐知识库授权、回收站与字符倒排搜索已随
+> [PR #63](https://github.com/Vanilla-Yukirin/patchouli-lib/pull/63) 合并至 `main`；
+> 对应主分支验证与 OCI 镜像发布已完成。部署仍是管理员独立执行的操作，不能由
+> 镜像发布推断任何实例已经更新。
+> 受支持的正式备份恢复策略仍待确定。各项能力究竟
 > 属于“已实现”“实验中”还是“尚未实现”，以[当前路线图状态](ROADMAP.md)为准。
 
 [简体中文兼容入口](README.zh-CN.md)
@@ -29,11 +34,11 @@ PatchouliLib 围绕一组尽量稳定的小型原语展开：
 ```mermaid
 flowchart LR
     C["CLI / MCP / agent skill"] --> API["PatchouliLib API"]
-    API --> L["Library model"]
-    L --> R["Immutable revisions"]
-    L --> S["Search and summaries"]
-    L --> A["Audit trail"]
-    S --> X["Answers with citations"]
+    API --> L["知识库领域模型"]
+    L --> R["不可变版本"]
+    L --> S["检索与摘要"]
+    L --> A["审计记录"]
+    S --> X["带引用的回答"]
 ```
 
 ## 设计原则
@@ -80,9 +85,14 @@ python scripts/validate.py --container
 源码启动、Compose、CI、镜像发布，以及由管理员发起的私有更新契约，见
 [开发、验证与交付](docs/development-and-delivery.md)。
 
-项目还提供一个可选、受密码保护的[网页管理面板](docs/admin-web-console.md)，用于
-初始化、凭据生命周期操作和 Agent/MCP 指引。面板默认关闭，不具备部署、Docker、
-Shell 或备份恢复控制能力。
+项目还提供可选的[网页管理面板](docs/admin-web-console.md)，支持主 Token 登录、
+内容与版本管理、凭据生命周期操作和 Agent/MCP 指引；主身份尚未设置时保留旧密码
+兼容路径。面板默认关闭，不具备部署、Docker、Shell 或数据库备份恢复控制能力。
+公网入口使用 HTTPS；管理员控制的加密私网可按文档明确开启 HTTP，不要求另设
+TLS 反向代理。单人主 Token 登录、内容浏览及管理范围见该文档和路线图。
+
+公开的 `/connect` 页面提供不含凭据的本地 Agent 接入指令；Skill 文件和版本摘要清单
+必须使用有效设备 Token 下载。标准 HTTP 可直接使用，CLI/MCP 是可选适配器。
 
 ## 参与贡献
 

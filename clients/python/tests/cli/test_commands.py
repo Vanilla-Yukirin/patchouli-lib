@@ -13,6 +13,7 @@ from cli.conftest import (
     invoke_cli,
     protected_headers,
     sample_page,
+    whoami_body,
 )
 from patchouli_cli.errors import ExitCode
 
@@ -46,7 +47,9 @@ _PAGE_ID = "20260811t091500123z-synthetic-session"
                 "kind": "agent",
                 "expires_at": "2027-01-01T00:00:00.000000Z",
                 "policy_version": 3,
-                "grants": [{"section_id": "sec_synthetic", "actions": ["section:query"]}],
+                "policy_mode": "library_grants",
+                "library_grants": [{"library_id": "lib_synthetic", "actions": ["read", "write"]}],
+                "grants": [],
             },
             "whoami",
         ),
@@ -150,32 +153,63 @@ def test_read_command_surface_uses_shared_client_and_stable_json(
     if operation == "doctor":
         assert payload["data"]["credential_source"] == "environment"
         assert payload["data"]["profile"] == "default"
+    if operation == "whoami":
+        assert payload["data"]["policy_mode"] == "library_grants"
+        assert payload["data"]["library_grants"] == [
+            {"library_id": "lib_synthetic", "actions": ["read", "write"]}
+        ]
+        assert payload["data"]["grants"] == []
     if operation in {"page.current", "page.revision"}:
         assert payload["data"]["page"]["type"] == "archive"
         assert "page_type" not in payload["data"]["page"]
+        assert "occurrence_notice" not in payload["data"]
+
+
+def test_whoami_from_old_server_marks_library_policy_unknown(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/auth/whoami"
+        return httpx.Response(200, headers=protected_headers(), json=whoami_body())
+
+    result = invoke_cli(["--output", "json", "whoami"], handler=handler, tmp_path=tmp_path)
+
+    assert result.status == ExitCode.SUCCESS
+    identity = json.loads(result.stdout)["data"]
+    assert identity["policy_mode"] is None
+    assert identity["library_grants"] is None
+    assert identity["grants"][0]["actions"] == ["archive:write"]
 
 
 def test_search_reads_private_query_from_file_and_uses_post_json(tmp_path: Path) -> None:
     query_path = tmp_path / "query.txt"
-    query_path.write_text("synthetic private query\n", encoding="utf-8")
+    query_path.write_text('{"keywords":["synthetic private query"],"limit":5}\n', encoding="utf-8")
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
-        assert request.url.path == "/api/v1/sections/sec_synthetic/search"
+        assert request.url.path == "/api/v1/search"
         assert request.url.query == b""
-        assert json.loads(request.content) == {"query": "synthetic private query", "limit": 5}
+        assert json.loads(request.content)["keywords"] == ["synthetic private query"]
+        assert json.loads(request.content)["limit"] == 5
         return httpx.Response(
             200,
             headers=protected_headers(),
             json={
                 "items": [
                     {
-                        "page": sample_page()["page"],
-                        "citation": sample_page()["citation"],
-                        "snippet": "Synthetic snippet",
+                        "library_id": "a" * 32,
+                        "section_id": "sec_synthetic",
+                        "book_id": "book_synthetic",
+                        "page_id": "page_synthetic",
+                        "revision_id": "rev_synthetic",
+                        "revision_number": 1,
+                        "revision_files_href": (
+                            f"/api/v1/libraries/{'a' * 32}/sections/sec_synthetic"
+                            "/pages/page_synthetic/revisions/rev_synthetic/files"
+                        ),
+                        "title": "Synthetic",
+                        "occurred_at": 1_000_000,
+                        "match_sources": [{"kind": "title", "file_name": None}],
                     }
                 ],
-                "next_cursor": None,
             },
         )
 
@@ -183,14 +217,9 @@ def test_search_reads_private_query_from_file_and_uses_post_json(tmp_path: Path)
         [
             "--output",
             "json",
-            "section",
             "search",
-            "--section",
-            "sec_synthetic",
             "--query-file",
             "query.txt",
-            "--limit",
-            "5",
         ],
         handler=handler,
         tmp_path=tmp_path,
@@ -198,7 +227,26 @@ def test_search_reads_private_query_from_file_and_uses_post_json(tmp_path: Path)
 
     assert result.status == ExitCode.SUCCESS
     assert "query.txt" not in result.stdout + result.stderr
-    assert json.loads(result.stdout)["data"]["items"][0]["snippet"] == "Synthetic snippet"
+    assert json.loads(result.stdout)["data"]["items"][0]["revision_number"] == 1
+
+
+def test_search_rejects_duplicate_json_fields_before_network_request(tmp_path: Path) -> None:
+    (tmp_path / "query.txt").write_text(
+        '{"keywords":["synthetic"],"libraries":["lib_only"],"libraries":null}',
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected network request: {request.method}")
+
+    result = invoke_cli(
+        ["--output", "json", "search", "--query-file", "query.txt"],
+        handler=handler,
+        tmp_path=tmp_path,
+    )
+    assert result.status == ExitCode.VALIDATION
+    assert result.stdout == ""
+    assert "lib_only" not in result.stderr
 
 
 def test_doctor_rejects_an_unadvertised_api_version(tmp_path: Path) -> None:
@@ -216,24 +264,19 @@ def test_doctor_rejects_an_unadvertised_api_version(tmp_path: Path) -> None:
 
 def test_search_can_take_its_single_sensitive_value_from_stdin(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert json.loads(request.content)["query"] == "stdin query"
-        return httpx.Response(
-            200, headers=protected_headers(), json={"items": [], "next_cursor": None}
-        )
+        assert json.loads(request.content)["keywords"] == ["stdin query"]
+        return httpx.Response(200, headers=protected_headers(), json={"items": []})
 
     result = invoke_cli(
         [
             "--output",
             "json",
-            "section",
             "search",
-            "--section",
-            "sec_synthetic",
             "--query-stdin",
         ],
         handler=handler,
         tmp_path=tmp_path,
-        stdin="stdin query\n",
+        stdin='{"keywords":["stdin query"]}\n',
     )
     assert result.status == ExitCode.SUCCESS
 
@@ -274,6 +317,58 @@ def test_archive_content_stdin_preserves_exact_bytes(tmp_path: Path) -> None:
         stdin=expected,
     )
     assert result.status == ExitCode.SUCCESS
+
+
+def test_archive_create_without_time_omits_field_and_surfaces_server_notice(tmp_path: Path) -> None:
+    (tmp_path / "metadata.json").write_text(
+        '{"title":"Synthetic session","source":{"kind":"conversation"}}', encoding="utf-8"
+    )
+    (tmp_path / "content.md").write_text("# Synthetic archive", encoding="utf-8")
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert b'"occurred_at"' not in request.content
+        assert b'"source":{"kind":"conversation"}' in request.content
+        response = sample_page()
+        response["occurrence_notice"] = {
+            "source": "server_utc",
+            "warning_code": "occurred_at_defaulted",
+        }
+        return httpx.Response(
+            201,
+            headers=protected_headers(
+                Location=f"/api/v1/sections/sec_synthetic/pages/{_PAGE_ID}",
+                ETag='"revision-synthetic-1"',
+            ),
+            json=response,
+        )
+
+    result = invoke_cli(
+        [
+            "--output",
+            "json",
+            "archive",
+            "create",
+            "--section",
+            "sec_synthetic",
+            "--book",
+            "book_synthetic",
+            "--metadata-file",
+            "metadata.json",
+            "--content-file",
+            "content.md",
+        ],
+        handler=handler,
+        tmp_path=tmp_path,
+        observed_requests=requests,
+    )
+    assert result.status == ExitCode.SUCCESS
+    assert len(requests) == 2  # whoami plus create
+    payload = json.loads(result.stdout)
+    assert payload["data"]["occurrence_notice"] == {
+        "source": "server_utc",
+        "warning_code": "occurred_at_defaulted",
+    }
 
 
 def test_archive_create_journals_before_request_and_reuses_exact_key(tmp_path: Path) -> None:
@@ -335,6 +430,7 @@ def test_archive_create_journals_before_request_and_reuses_exact_key(tmp_path: P
         observed_requests=requests,
     )
     first_payload = json.loads(first.stdout)
+    assert "occurrence_notice" not in first_payload["data"]
     operation_id = first_payload["metadata"]["operation_id"]
     second = invoke_cli(
         [*base_args, "--operation-id", operation_id],

@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 import subprocess
 import threading
 import time
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
+from alembic import command
 from sqlalchemy import Engine, create_engine, text
 
+from patchouli_lib.admin.service import AdminActionService
 from patchouli_lib.backup import (
     BACKUP_FILENAME,
     MANIFEST_FILENAME,
@@ -29,9 +33,21 @@ from patchouli_lib.backup import (
     verify_backup_bundle,
 )
 from patchouli_lib.backup import service as backup_service
-from patchouli_lib.backup.manifest import MAX_MANIFEST_BYTES
+from patchouli_lib.backup.manifest import (
+    FILE_SET_SCHEMA_REVISION,
+    LEGACY_SCHEMA_REVISION,
+    LIFECYCLE_SCHEMA_REVISION,
+    MAX_MANIFEST_BYTES,
+    PREVIOUS_SCHEMA_REVISION,
+    SUPPORTED_SCHEMA_REVISION,
+    BackupManifestV1,
+)
+from patchouli_lib.content.file_manifest import build_file_manifest
+from patchouli_lib.database import immediate_transaction
+from patchouli_lib.library.schemas import CreateLibraryInput
+from patchouli_lib.search.index_v2 import rebuild_search_index
 
-from .conftest import APP_VERSION
+from .conftest import APP_VERSION, _config
 
 
 def identity() -> BackupArtifactIdentity:
@@ -45,6 +61,452 @@ def _create(engine: Engine, path: Path) -> BackupResult:
         artifact_identity=identity(),
         app_version=APP_VERSION,
     )
+
+
+def _add_second_revision_with_binary_file(engine: Engine) -> tuple[bytes, bytes]:
+    """Append a synthetic Revision while keeping its historic Source link."""
+
+    markdown = b"# Revised synthetic archive\n"
+    binary = b"\x00\xff\x81synthetic image bytes\x00"
+    revision_id = "rev_" + "55" * 16
+    source_id = "6" * 32
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            text(
+                "INSERT INTO revisions (library_id, revision_id, page_uid, "
+                "revision_number, content_md, content_size_bytes, content_sha256, "
+                "created_at) SELECT library_id, :revision_id, page_uid, 2, "
+                ":content, :size, :digest, 3000000 FROM revisions "
+                "WHERE revision_number = 1"
+            ),
+            {
+                "revision_id": revision_id,
+                "content": markdown,
+                "size": len(markdown),
+                "digest": hashlib.sha256(markdown).digest(),
+            },
+        )
+        connection.execute(
+            text(
+                "UPDATE pages SET current_revision_id = :revision_id, "
+                "current_revision_number = 2, updated_at = 3000000"
+            ),
+            {"revision_id": revision_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO page_sources (library_id, source_id, page_uid, "
+                "revision_id, revision_number, kind, locator, captured_at, created_at) "
+                "SELECT library_id, :source_id, page_uid, :revision_id, 2, "
+                "'synthetic', 'urn:synthetic:revision-2', captured_at, 3000000 "
+                "FROM page_sources WHERE revision_number = 1 LIMIT 1"
+            ),
+            {"source_id": source_id, "revision_id": revision_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO revision_files (library_id, page_uid, revision_id, "
+                "revision_number, filename, content_bytes, size_bytes, content_sha256) "
+                "SELECT library_id, page_uid, revision_id, revision_number, "
+                "'image.bin', :content, :size, :digest FROM revisions "
+                "WHERE revision_number = 2"
+            ),
+            {
+                "content": binary,
+                "size": len(binary),
+                "digest": hashlib.sha256(binary).digest(),
+            },
+        )
+    return markdown, binary
+
+
+def _append_binary_file_set(engine: Engine) -> tuple[str, tuple[tuple[str, bytes], ...]]:
+    """Append a 0013 snapshot with no Markdown and an exact Source."""
+
+    revision_id = "rev_" + "77" * 16
+    files = (("chart.png", b"\x89PNG\r\n\x1a\n"), ("资料.bin", b"\x00\xff\x81payload"))
+    manifest = build_file_manifest(files)
+    with immediate_transaction(engine) as connection:
+        connection.execute(
+            text(
+                "INSERT INTO revisions (library_id, revision_id, page_uid, "
+                "revision_number, content_md, content_size_bytes, content_sha256, "
+                "created_at) SELECT library_id, :revision_id, page_uid, 2, "
+                "NULL, NULL, NULL, 3000000 FROM revisions WHERE revision_number = 1"
+            ),
+            {"revision_id": revision_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO revision_file_sets "
+                "(library_id, page_uid, revision_id, revision_number, storage_format, "
+                "file_count, total_size_bytes, snapshot_sha256) "
+                "SELECT library_id, page_uid, revision_id, 2, 'file_set_v1', "
+                ":file_count, :total_size, :snapshot_sha FROM revisions "
+                "WHERE revision_id = :revision_id"
+            ),
+            {
+                "revision_id": revision_id,
+                "file_count": len(manifest.files),
+                "total_size": manifest.total_size_bytes,
+                "snapshot_sha": manifest.snapshot_sha256,
+            },
+        )
+        for file in manifest.files:
+            connection.execute(
+                text(
+                    "INSERT INTO revision_files "
+                    "(library_id, page_uid, revision_id, revision_number, filename, "
+                    "content_bytes, size_bytes, content_sha256) "
+                    "SELECT library_id, page_uid, revision_id, 2, :name, :content, "
+                    ":size, :digest FROM revisions WHERE revision_id = :revision_id"
+                ),
+                {
+                    "revision_id": revision_id,
+                    "name": file.name,
+                    "content": file.content,
+                    "size": file.content_size_bytes,
+                    "digest": file.content_sha256,
+                },
+            )
+        connection.execute(
+            text(
+                "INSERT INTO revision_file_seals "
+                "(library_id, page_uid, revision_id, revision_number) "
+                "SELECT library_id, page_uid, revision_id, 2 FROM revisions "
+                "WHERE revision_id = :revision_id"
+            ),
+            {"revision_id": revision_id},
+        )
+        connection.execute(
+            text(
+                "UPDATE pages SET current_revision_id = :revision_id, "
+                "current_revision_number = 2, updated_at = 3000000"
+            ),
+            {"revision_id": revision_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO page_sources "
+                "(library_id, source_id, page_uid, revision_id, revision_number, "
+                "kind, locator, captured_at, created_at) "
+                "SELECT library_id, :source_id, page_uid, revision_id, 2, "
+                "'synthetic', 'urn:synthetic:binary-snapshot', 3000000, 3000000 "
+                "FROM revisions WHERE revision_id = :revision_id"
+            ),
+            {"source_id": "8" * 32, "revision_id": revision_id},
+        )
+    return revision_id, files
+
+
+def _legacy_bundle_with_binary_file(
+    engine: Engine,
+    bundle: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[bytes, bytes]:
+    """Build a genuine 0007 backup fixture, preserving its extra file bytes."""
+
+    source_database = engine.url.database
+    assert source_database is not None
+    source_path = Path(source_database)
+    command.downgrade(_config(source_path, monkeypatch), LEGACY_SCHEMA_REVISION)
+    revised_markdown, binary = _add_second_revision_with_binary_file(engine)
+
+    # Current create_backup intentionally refuses 0007. An old-format bundle
+    # is assembled from SQLite's online backup API and canonical v1 metadata
+    # so verify/restore compatibility can still be tested without weakening
+    # today's default creation contract.
+    bundle.mkdir()
+    database = bundle / BACKUP_FILENAME
+    with closing(sqlite3.connect(source_path)) as source:
+        source_journal_mode = source.execute("PRAGMA journal_mode").fetchone()[0]
+        with closing(sqlite3.connect(database)) as destination:
+            source.backup(destination)
+            destination.execute("PRAGMA journal_mode = DELETE")
+            destination.commit()
+    data = database.read_bytes()
+    artifact = identity()
+    manifest = BackupManifestV1(
+        schema_version=1,
+        backup_filename=BACKUP_FILENAME,
+        byte_size=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        created_at="2026-08-13T12:34:56.123456Z",
+        app_version=APP_VERSION,
+        schema_revision=LEGACY_SCHEMA_REVISION,
+        sqlite_version=sqlite3.sqlite_version,
+        source_journal_mode=source_journal_mode,
+        artifact_identity=artifact.identity,
+        artifact_digest=artifact.digest,
+    )
+    (bundle / MANIFEST_FILENAME).write_bytes(manifest.canonical_bytes())
+    return revised_markdown, binary
+
+
+def test_0008_bundle_remains_explicitly_verifiable_and_restorable(
+    complete_engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_database = complete_engine.url.database
+    assert source_database is not None
+    source_path = Path(source_database)
+    command.downgrade(_config(source_path, monkeypatch), PREVIOUS_SCHEMA_REVISION)
+
+    bundle = tmp_path / "previous-bundle"
+    bundle.mkdir()
+    database = bundle / BACKUP_FILENAME
+    with closing(sqlite3.connect(source_path)) as source:
+        journal_mode = source.execute("PRAGMA journal_mode").fetchone()[0]
+        with closing(sqlite3.connect(database)) as destination:
+            source.backup(destination)
+            destination.execute("PRAGMA journal_mode = DELETE")
+            destination.commit()
+    data = database.read_bytes()
+    artifact = identity()
+    manifest = BackupManifestV1(
+        schema_version=1,
+        backup_filename=BACKUP_FILENAME,
+        byte_size=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        created_at="2026-08-13T12:34:56.123456Z",
+        app_version=APP_VERSION,
+        schema_revision=PREVIOUS_SCHEMA_REVISION,
+        sqlite_version=sqlite3.sqlite_version,
+        source_journal_mode=journal_mode,
+        artifact_identity=artifact.identity,
+        artifact_digest=artifact.digest,
+    )
+    (bundle / MANIFEST_FILENAME).write_bytes(manifest.canonical_bytes())
+
+    with pytest.raises(BackupManifestError):
+        verify_backup_bundle(bundle, app_version=APP_VERSION)
+    assert (
+        verify_backup_bundle(
+            bundle, app_version=APP_VERSION, schema_revision=PREVIOUS_SCHEMA_REVISION
+        )
+        == manifest
+    )
+    restored = tmp_path / "previous-restored.sqlite"
+    with pytest.raises(BackupManifestError):
+        restore_backup(bundle, restored, app_version=APP_VERSION)
+    restore_backup(
+        bundle, restored, app_version=APP_VERSION, schema_revision=PREVIOUS_SCHEMA_REVISION
+    )
+    validate_database(restored, schema_revision=PREVIOUS_SCHEMA_REVISION)
+    with closing(sqlite3.connect(restored)) as connection:
+        assert connection.execute("SELECT content_md FROM revisions").fetchone() == (
+            b"# Synthetic archive\n\nExact bytes.\n",
+        )
+        assert connection.execute("SELECT count(*) FROM revision_file_seals").fetchone() == (1,)
+
+
+def test_0012_bundle_remains_explicitly_verifiable_and_restorable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "lifecycle-source.sqlite"
+    command.upgrade(_config(source_path, monkeypatch), LIFECYCLE_SCHEMA_REVISION)
+
+    bundle = tmp_path / "lifecycle-bundle"
+    bundle.mkdir()
+    database = bundle / BACKUP_FILENAME
+    with closing(sqlite3.connect(source_path)) as source:
+        journal_mode = source.execute("PRAGMA journal_mode").fetchone()[0]
+        with closing(sqlite3.connect(database)) as destination:
+            source.backup(destination)
+            destination.execute("PRAGMA journal_mode = DELETE")
+            destination.commit()
+    data = database.read_bytes()
+    artifact = identity()
+    manifest = BackupManifestV1(
+        schema_version=1,
+        backup_filename=BACKUP_FILENAME,
+        byte_size=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        created_at="2026-08-13T12:34:56.123456Z",
+        app_version=APP_VERSION,
+        schema_revision=LIFECYCLE_SCHEMA_REVISION,
+        sqlite_version=sqlite3.sqlite_version,
+        source_journal_mode=journal_mode,
+        artifact_identity=artifact.identity,
+        artifact_digest=artifact.digest,
+    )
+    (bundle / MANIFEST_FILENAME).write_bytes(manifest.canonical_bytes())
+
+    with pytest.raises(BackupManifestError):
+        verify_backup_bundle(bundle, app_version=APP_VERSION)
+    assert (
+        verify_backup_bundle(
+            bundle, app_version=APP_VERSION, schema_revision=LIFECYCLE_SCHEMA_REVISION
+        )
+        == manifest
+    )
+    restored = tmp_path / "lifecycle-restored.sqlite"
+    restore_backup(
+        bundle, restored, app_version=APP_VERSION, schema_revision=LIFECYCLE_SCHEMA_REVISION
+    )
+    validate_database(restored, schema_revision=LIFECYCLE_SCHEMA_REVISION)
+
+
+def test_0014_backup_restores_exact_binary_file_set(
+    complete_engine: Engine,
+    tmp_path: Path,
+) -> None:
+    revision_id, files = _append_binary_file_set(complete_engine)
+    bundle = tmp_path / "binary-bundle"
+    result = _create(complete_engine, bundle)
+    assert result.manifest.schema_revision == SUPPORTED_SCHEMA_REVISION
+    assert verify_backup_bundle(bundle, app_version=APP_VERSION) == result.manifest
+
+    restored = tmp_path / "binary-restored.sqlite"
+    restore_backup(bundle, restored, app_version=APP_VERSION)
+    validate_database(restored)
+    with closing(sqlite3.connect(restored)) as connection:
+        legacy = connection.execute(
+            "SELECT content_md, content_size_bytes, content_sha256 FROM revisions "
+            "WHERE revision_id = ?",
+            (revision_id,),
+        ).fetchone()
+        assert legacy == (None, None, None)
+        restored_files = connection.execute(
+            "SELECT filename, content_bytes FROM revision_files WHERE revision_id = ?",
+            (revision_id,),
+        ).fetchall()
+        assert sorted(restored_files) == sorted(files)
+        stored_manifest = connection.execute(
+            "SELECT file_count, total_size_bytes, snapshot_sha256 "
+            "FROM revision_file_sets WHERE revision_id = ?",
+            (revision_id,),
+        ).fetchone()
+        expected = build_file_manifest(files)
+        assert stored_manifest == (
+            len(files),
+            expected.total_size_bytes,
+            expected.snapshot_sha256,
+        )
+        assert connection.execute(
+            "SELECT count(*) FROM page_sources WHERE revision_id = ?", (revision_id,)
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT count(*) FROM revision_file_seals WHERE revision_id = ?", (revision_id,)
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT count(*) FROM revision_file_seal_guards WHERE revision_id = ?",
+            (revision_id,),
+        ).fetchone() == (1,)
+
+
+def test_0013_binary_file_set_bundle_remains_verifiable_and_restorable(
+    complete_engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_database = complete_engine.url.database
+    assert source_database is not None
+    source_path = Path(source_database)
+    command.downgrade(_config(source_path, monkeypatch), FILE_SET_SCHEMA_REVISION)
+    revision_id, files = _append_binary_file_set(complete_engine)
+
+    bundle = tmp_path / "historical-file-set-bundle"
+    bundle.mkdir()
+    database = bundle / BACKUP_FILENAME
+    with closing(sqlite3.connect(source_path)) as source:
+        journal_mode = source.execute("PRAGMA journal_mode").fetchone()[0]
+        with closing(sqlite3.connect(database)) as destination:
+            source.backup(destination)
+            destination.execute("PRAGMA journal_mode = DELETE")
+            destination.commit()
+    data = database.read_bytes()
+    artifact = identity()
+    manifest = BackupManifestV1(
+        schema_version=1,
+        backup_filename=BACKUP_FILENAME,
+        byte_size=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        created_at="2026-08-13T12:34:56.123456Z",
+        app_version=APP_VERSION,
+        schema_revision=FILE_SET_SCHEMA_REVISION,
+        sqlite_version=sqlite3.sqlite_version,
+        source_journal_mode=journal_mode,
+        artifact_identity=artifact.identity,
+        artifact_digest=artifact.digest,
+    )
+    (bundle / MANIFEST_FILENAME).write_bytes(manifest.canonical_bytes())
+
+    with pytest.raises(BackupManifestError):
+        verify_backup_bundle(bundle, app_version=APP_VERSION)
+    assert (
+        verify_backup_bundle(
+            bundle, app_version=APP_VERSION, schema_revision=FILE_SET_SCHEMA_REVISION
+        )
+        == manifest
+    )
+    restored = tmp_path / "historical-file-set-restored.sqlite"
+    restore_backup(
+        bundle, restored, app_version=APP_VERSION, schema_revision=FILE_SET_SCHEMA_REVISION
+    )
+    assert validate_database(
+        restored, schema_revision=FILE_SET_SCHEMA_REVISION
+    ).schema_revision == (FILE_SET_SCHEMA_REVISION)
+    with closing(sqlite3.connect(restored)) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            FILE_SET_SCHEMA_REVISION,
+        )
+        restored_files = connection.execute(
+            "SELECT filename, content_bytes FROM revision_files WHERE revision_id = ?",
+            (revision_id,),
+        ).fetchall()
+        assert sorted(restored_files) == sorted(files)
+
+
+def test_0014_bundle_rejects_forged_snapshot_digest_even_with_rehashed_outer_manifest(
+    complete_engine: Engine,
+    tmp_path: Path,
+) -> None:
+    _append_binary_file_set(complete_engine)
+    bundle = tmp_path / "forged-binary-bundle"
+    result = _create(complete_engine, bundle)
+    with closing(sqlite3.connect(result.database_path)) as connection:
+        trigger = connection.execute(
+            "SELECT sql FROM sqlite_schema WHERE type = 'trigger' "
+            "AND name = 'trg_revision_file_sets_no_update'"
+        ).fetchone()
+        assert trigger is not None and isinstance(trigger[0], str)
+        connection.execute("DROP TRIGGER trg_revision_file_sets_no_update")
+        connection.execute(
+            "UPDATE revision_file_sets SET snapshot_sha256 = zeroblob(32) WHERE revision_number = 2"
+        )
+        connection.execute(trigger[0])
+        connection.commit()
+    data = result.database_path.read_bytes()
+    forged_outer = replace(
+        result.manifest,
+        byte_size=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+    )
+    result.manifest_path.write_bytes(forged_outer.canonical_bytes())
+
+    with pytest.raises(BackupDatabaseError):
+        verify_backup_bundle(bundle, app_version=APP_VERSION)
+    destination = tmp_path / "forged-binary-restored.sqlite"
+    with pytest.raises(BackupDatabaseError):
+        restore_backup(bundle, destination, app_version=APP_VERSION)
+    assert not destination.exists()
+
+
+def test_new_backup_restores_admin_structure_audit(complete_engine: Engine, tmp_path: Path) -> None:
+    created = AdminActionService(complete_engine).create_library(
+        CreateLibraryInput(name="Synthetic extra Library"), session_fingerprint=b"s" * 32
+    )
+    bundle = tmp_path / "admin-audit-bundle"
+    _create(complete_engine, bundle)
+    restored = tmp_path / "admin-audit-restored.sqlite"
+    restore_backup(bundle, restored, app_version=APP_VERSION)
+    with closing(sqlite3.connect(restored)) as connection:
+        assert connection.execute(
+            "SELECT action, library_id, session_fingerprint FROM admin_structure_audit_events"
+        ).fetchone() == ("library.create", created.id, b"s" * 32)
 
 
 @pytest.mark.parametrize("journal_mode", ["delete", "wal"])
@@ -71,6 +533,8 @@ def test_live_backup_and_restore_preserve_complete_domain_state(
     restore_result = restore_backup(bundle, restored, app_version=APP_VERSION)
     assert restore_result.destination_path == restored
     validate_database(restored)
+    with pytest.raises(BackupDatabaseError):
+        validate_database(restored, schema_revision=LEGACY_SCHEMA_REVISION)
 
     with closing(sqlite3.connect(restored)) as sqlite_connection:
         assert sqlite_connection.execute("SELECT count(*) FROM auth_callers").fetchone() == (2,)
@@ -83,12 +547,18 @@ def test_live_backup_and_restore_preserve_complete_domain_state(
         )
         assert sqlite_connection.execute("SELECT count(*) FROM pages").fetchone() == (1,)
         assert sqlite_connection.execute("SELECT count(*) FROM revisions").fetchone() == (1,)
+        assert sqlite_connection.execute("SELECT count(*) FROM revision_file_seals").fetchone() == (
+            1,
+        )
+        assert sqlite_connection.execute(
+            "SELECT count(*) FROM revision_file_seal_guards"
+        ).fetchone() == (1,)
         assert sqlite_connection.execute("SELECT count(*) FROM page_sources").fetchone() == (1,)
         assert sqlite_connection.execute("SELECT count(*) FROM idempotency_records").fetchone() == (
             1,
         )
         assert sqlite_connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "20260813_0006",
+            SUPPORTED_SCHEMA_REVISION,
         )
         assert sqlite_connection.execute(
             "SELECT revision_id, revision_number, locator FROM page_sources"
@@ -102,6 +572,40 @@ def test_live_backup_and_restore_preserve_complete_domain_state(
             "FROM auth_credentials WHERE id = ?",
             ("d" * 32,),
         ).fetchone() == (20, 20, "e" * 32)
+
+
+def test_backup_discards_only_disposable_search_projection(
+    complete_engine: Engine, tmp_path: Path
+) -> None:
+    rebuild_search_index(complete_engine)
+    with complete_engine.connect() as connection:
+        assert connection.exec_driver_sql("SELECT ready FROM search_meta").scalar_one() == 1
+        source_documents = connection.exec_driver_sql(
+            "SELECT count(*) FROM search_documents"
+        ).scalar_one()
+        assert source_documents > 0
+
+    bundle = tmp_path / "search-bundle"
+    _create(complete_engine, bundle)
+    verify_backup_bundle(bundle, app_version=APP_VERSION)
+    restored = tmp_path / "search-restored.sqlite"
+    restore_backup(bundle, restored, app_version=APP_VERSION)
+    validate_database(restored)
+
+    with closing(sqlite3.connect(restored)) as artifact:
+        assert artifact.execute("SELECT active_generation, ready FROM search_meta").fetchone() == (
+            None,
+            0,
+        )
+        assert artifact.execute("SELECT count(*) FROM search_documents").fetchone() == (0,)
+        assert artifact.execute("SELECT count(*) FROM search_terms").fetchone() == (0,)
+        assert artifact.execute("SELECT count(*) FROM pages").fetchone() == (1,)
+    with complete_engine.connect() as connection:
+        assert connection.exec_driver_sql("SELECT ready FROM search_meta").scalar_one() == 1
+        assert (
+            connection.exec_driver_sql("SELECT count(*) FROM search_documents").scalar_one()
+            == source_documents
+        )
 
 
 def test_online_backup_observes_one_consistent_concurrent_snapshot(
@@ -150,6 +654,69 @@ def test_online_backup_observes_one_consistent_concurrent_snapshot(
         ).fetchone()
     assert last_used_at == updated_at
     assert last_used_at in {20, 21}
+
+
+def test_backup_restore_preserves_every_revision_file_byte(
+    complete_engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = tmp_path / "multifile-bundle"
+    revised_markdown, binary = _legacy_bundle_with_binary_file(complete_engine, bundle, monkeypatch)
+    refused_bundle = tmp_path / "new-backup-refuses-0007"
+    with pytest.raises(BackupDatabaseError):
+        _create(complete_engine, refused_bundle)
+    assert not refused_bundle.exists()
+    with pytest.raises(BackupManifestError):
+        verify_backup_bundle(bundle, app_version=APP_VERSION)
+    assert (
+        verify_backup_bundle(
+            bundle, app_version=APP_VERSION, schema_revision=LEGACY_SCHEMA_REVISION
+        ).schema_revision
+        == LEGACY_SCHEMA_REVISION
+    )
+    restored = tmp_path / "multifile-restored.sqlite"
+    with pytest.raises(BackupManifestError):
+        restore_backup(bundle, restored, app_version=APP_VERSION)
+    restore_backup(
+        bundle, restored, app_version=APP_VERSION, schema_revision=LEGACY_SCHEMA_REVISION
+    )
+    validate_database(restored, schema_revision=LEGACY_SCHEMA_REVISION)
+
+    with closing(sqlite3.connect(restored)) as connection:
+        revisions = connection.execute(
+            "SELECT revision_number, content_md FROM revisions ORDER BY revision_number"
+        ).fetchall()
+        files = connection.execute(
+            "SELECT revision_number, filename, content_bytes, size_bytes, content_sha256 "
+            "FROM revision_files ORDER BY revision_number, filename"
+        ).fetchall()
+        sources = connection.execute(
+            "SELECT revision_number FROM page_sources ORDER BY revision_number"
+        ).fetchall()
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "20260929_0007",
+        )
+
+    assert revisions == [(1, b"# Synthetic archive\n\nExact bytes.\n"), (2, revised_markdown)]
+    assert sources == [(1,), (2,)]
+    assert files == [
+        (
+            1,
+            "content.md",
+            revisions[0][1],
+            len(revisions[0][1]),
+            hashlib.sha256(revisions[0][1]).digest(),
+        ),
+        (
+            2,
+            "content.md",
+            revised_markdown,
+            len(revised_markdown),
+            hashlib.sha256(revised_markdown).digest(),
+        ),
+        (2, "image.bin", binary, len(binary), hashlib.sha256(binary).digest()),
+    ]
 
 
 def test_configuration_rejects_memory_relative_and_existing_destinations(

@@ -7,3 +7,11 @@
 !src/**
 !migrations/**
 !docker/**
+!skills
+!skills/patchouli-agent
+!skills/patchouli-agent/**
+
+# Exclusions must follow the allowlist so re-included trees stay free of local artifacts.
+**/.tmp-*
+**/__pycache__
+**/*.py[cod]

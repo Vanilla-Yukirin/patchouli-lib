@@ -73,7 +73,6 @@ def test_admin_console_is_disabled_when_all_admin_values_are_absent_or_blank() -
             "environment": "test",
             "admin_password_hash": "",
             "admin_session_signing_secret": "",
-            "admin_origin": "",
         }
     )
 
@@ -81,58 +80,98 @@ def test_admin_console_is_disabled_when_all_admin_values_are_absent_or_blank() -
     assert not blank.admin_enabled
 
 
-def test_admin_console_requires_complete_redacted_configuration() -> None:
+def test_admin_console_accepts_legacy_password_with_signing_secret() -> None:
     configured = Settings.model_validate(
         {
             "environment": "production",
             "retrieval_cursor_signing_secret": "r" * 32,
             "admin_password_hash": _ADMIN_PASSWORD_HASH,
             "admin_session_signing_secret": "s" * 32,
-            "admin_origin": "https://admin.example.invalid/",
         }
     )
 
     assert configured.admin_enabled
-    assert configured.admin_origin == "https://admin.example.invalid"
     assert _ADMIN_PASSWORD_HASH not in repr(configured)
     assert "s" * 32 not in repr(configured)
 
 
-@pytest.mark.parametrize(
-    ("configured_origin", "expected_origin"),
-    [
-        ("HTTPS://Admin.Example.Invalid/", "https://admin.example.invalid"),
-        ("https://admin.example.invalid:443", "https://admin.example.invalid"),
-        ("http://Admin.Example.Invalid:80/", "http://admin.example.invalid"),
-        ("https://Admin.Example.Invalid:8443/", "https://admin.example.invalid:8443"),
-    ],
-)
-def test_admin_origin_is_normalized_to_browser_serialization(
-    configured_origin: str,
-    expected_origin: str,
-) -> None:
-    settings = Settings.model_validate(
+def test_admin_console_accepts_signing_secret_without_legacy_password() -> None:
+    configured = Settings.model_validate(
         {
-            "environment": "test",
-            "admin_password_hash": _ADMIN_PASSWORD_HASH,
+            "environment": "production",
+            "retrieval_cursor_signing_secret": "r" * 32,
             "admin_session_signing_secret": "s" * 32,
-            "admin_origin": configured_origin,
         }
     )
 
-    assert settings.admin_origin == expected_origin
+    assert configured.admin_enabled
+    assert configured.admin_password_hash is None
+    assert "s" * 32 not in repr(configured)
 
 
-def test_admin_origin_rejects_non_ascii_hostname() -> None:
-    with pytest.raises(ValidationError, match="ASCII"):
+@pytest.mark.parametrize("proof", [None, "", SecretStr("")])
+def test_admin_setup_token_has_no_default_and_blank_values_disable_it(
+    proof: str | SecretStr | None,
+) -> None:
+    settings = Settings.model_validate({"environment": "test", "admin_setup_token": proof})
+    assert settings.admin_setup_token is None
+    assert not settings.admin_enabled
+
+
+@pytest.mark.parametrize("proof", ["p" * 32, "p" * 1_024, "界" * 11])
+def test_admin_setup_token_is_separate_optional_redacted_utf8_material(proof: str) -> None:
+    settings = Settings.model_validate(
+        {
+            "environment": "test",
+            "admin_setup_token": proof,
+            "admin_session_signing_secret": "s" * 32,
+        }
+    )
+    assert isinstance(settings.admin_setup_token, SecretStr)
+    assert settings.admin_setup_token.get_secret_value() == proof
+    assert proof not in repr(settings)
+
+
+@pytest.mark.parametrize("proof", ["p" * 31, "p" * 1_025, "界" * 342, "p" * 32 + "\ud800"])
+def test_admin_setup_token_rejects_invalid_utf8_byte_length_without_echo(proof: str) -> None:
+    with pytest.raises(ValidationError) as error:
         Settings.model_validate(
             {
                 "environment": "test",
-                "admin_password_hash": _ADMIN_PASSWORD_HASH,
+                "admin_setup_token": proof,
                 "admin_session_signing_secret": "s" * 32,
-                "admin_origin": "https://bücher.example.invalid",
             }
         )
+    assert proof not in str(error.value)
+
+
+@pytest.mark.parametrize("signing_secret", [None, "same synthetic shared secret material 0001"])
+def test_admin_setup_token_requires_an_independent_session_secret(
+    signing_secret: str | None,
+) -> None:
+    proof = "same synthetic shared secret material 0001"
+    with pytest.raises(ValidationError, match="admin setup token") as error:
+        Settings.model_validate(
+            {
+                "environment": "test",
+                "admin_setup_token": proof,
+                "admin_session_signing_secret": signing_secret,
+            }
+        )
+    assert proof not in str(error.value)
+
+
+def test_admin_setup_token_is_loaded_from_prefixed_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proof = "synthetic environment setup material 0001"
+    monkeypatch.setenv("PATCHOULI_ENVIRONMENT", "test")
+    monkeypatch.setenv("PATCHOULI_ADMIN_SETUP_TOKEN", proof)
+    monkeypatch.setenv("PATCHOULI_ADMIN_SESSION_SIGNING_SECRET", "s" * 32)
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.admin_setup_token is not None
+    assert settings.admin_setup_token.get_secret_value() == proof
+    assert proof not in repr(settings)
 
 
 @pytest.mark.parametrize(
@@ -140,38 +179,12 @@ def test_admin_origin_rejects_non_ascii_hostname() -> None:
     [
         {"admin_password_hash": _ADMIN_PASSWORD_HASH},
         {
-            "admin_password_hash": _ADMIN_PASSWORD_HASH,
-            "admin_session_signing_secret": "s" * 32,
-        },
-        {
             "admin_password_hash": "short",
             "admin_session_signing_secret": "s" * 32,
-            "admin_origin": "https://admin.example.invalid",
         },
         {
             "admin_password_hash": _ADMIN_PASSWORD_HASH,
             "admin_session_signing_secret": "short",
-            "admin_origin": "https://admin.example.invalid",
-        },
-        {
-            "admin_password_hash": _ADMIN_PASSWORD_HASH,
-            "admin_session_signing_secret": "s" * 32,
-            "admin_origin": "https://user@example.invalid",
-        },
-        {
-            "admin_password_hash": _ADMIN_PASSWORD_HASH,
-            "admin_session_signing_secret": "s" * 32,
-            "admin_origin": "https://admin.example.invalid/path",
-        },
-        {
-            "admin_password_hash": _ADMIN_PASSWORD_HASH,
-            "admin_session_signing_secret": "s" * 32,
-            "admin_origin": "https://admin.example.invalid:invalid",
-        },
-        {
-            "admin_password_hash": _ADMIN_PASSWORD_HASH,
-            "admin_session_signing_secret": "s" * 32,
-            "admin_origin": " https://admin.example.invalid",
         },
     ],
 )
@@ -182,14 +195,28 @@ def test_admin_console_rejects_incomplete_or_unsafe_configuration(
         Settings.model_validate({"environment": "test", **values})
 
 
-def test_production_admin_console_requires_https_origin() -> None:
-    with pytest.raises(ValidationError, match="must use HTTPS"):
-        Settings.model_validate(
-            {
-                "environment": "production",
-                "retrieval_cursor_signing_secret": "r" * 32,
-                "admin_password_hash": _ADMIN_PASSWORD_HASH,
-                "admin_session_signing_secret": "s" * 32,
-                "admin_origin": "http://admin.example.invalid",
-            }
-        )
+def test_admin_http_cookie_option_defaults_off_and_remains_explicit() -> None:
+    values = {
+        "environment": "production",
+        "retrieval_cursor_signing_secret": "r" * 32,
+        "admin_password_hash": _ADMIN_PASSWORD_HASH,
+        "admin_session_signing_secret": "s" * 32,
+    }
+    assert not Settings.model_validate(values).admin_allow_private_http
+    configured = Settings.model_validate({**values, "admin_allow_private_http": True})
+    assert configured.admin_allow_private_http
+    assert configured.admin_enabled
+
+
+@pytest.mark.parametrize(
+    "legacy_value", ["http://100.64.0.7:8080", "https://old.example.invalid", "not-an-origin"]
+)
+def test_legacy_origin_environment_is_ignored(
+    monkeypatch: pytest.MonkeyPatch, legacy_value: str
+) -> None:
+    monkeypatch.setenv("PATCHOULI_ADMIN_ORIGIN", legacy_value)
+    monkeypatch.setenv("PATCHOULI_ADMIN_PASSWORD_HASH", _ADMIN_PASSWORD_HASH)
+    monkeypatch.setenv("PATCHOULI_ADMIN_SESSION_SIGNING_SECRET", "s" * 32)
+    configured = Settings()
+    assert configured.admin_enabled
+    assert "admin_origin" not in Settings.model_fields

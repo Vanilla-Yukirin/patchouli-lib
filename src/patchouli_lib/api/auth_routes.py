@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
@@ -23,6 +24,7 @@ def create_auth_router(
     engine: Engine,
     *,
     capability_configuration: CapabilityConfiguration = DEFAULT_CAPABILITY_CONFIGURATION,
+    search_ready: Callable[[], bool] | None = None,
     clock: Clock = utc_microseconds,
 ) -> APIRouter:
     """Create protected diagnostic routes bound to an application-owned Engine."""
@@ -34,7 +36,12 @@ def create_auth_router(
     def capabilities(
         _context: Annotated[AuthenticatedRequestContext, Depends(authenticate)],
     ) -> CapabilitiesResponse:
-        return capabilities_response(capability_configuration)
+        if search_ready is None or not search_ready():
+            return capabilities_response(capability_configuration)
+        with_search = capability_configuration.model_copy(
+            update={"features": tuple(sorted({*capability_configuration.features, "search"}))}
+        )
+        return capabilities_response(with_search)
 
     @router.get("/auth/whoami", response_model=WhoAmIResponse)
     def whoami(

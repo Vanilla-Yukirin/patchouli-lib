@@ -131,6 +131,7 @@ class SectionGrantRecord(NewSectionGrant):
 class NewAuditEvent(AuthSchema):
     id: OpaqueId
     library_id: OpaqueId
+    actor_home_library_id: OpaqueId
     actor_caller_id: OpaqueId
     actor_credential_id: OpaqueId
     target_caller_id: OpaqueId | None = None

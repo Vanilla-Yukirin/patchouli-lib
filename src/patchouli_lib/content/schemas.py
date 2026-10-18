@@ -28,6 +28,7 @@ from patchouli_lib.identifiers import (
     canonical_utc_wire,
     generate_page_id,
     page_id_registry_digest,
+    page_id_timestamp_prefix,
     validate_page_id,
     validate_page_uid,
     validate_revision_id,
@@ -59,7 +60,7 @@ IdempotencyDigest = Annotated[StrictBytes, Field(min_length=32, max_length=32)]
 RequestId = Annotated[str, Field(pattern=r"^req_[0-9a-f]{32}$")]
 StrongPageETag = Annotated[
     str,
-    Field(min_length=74, max_length=74, pattern=r'^"page-v1-[0-9a-f]{64}"$'),
+    Field(min_length=74, max_length=74, pattern=r'^"page-v[12]-[0-9a-f]{64}"$'),
 ]
 
 _SOURCE_KIND_PATTERN = re.compile(r"\A\S(?:.*\S)?\Z", re.DOTALL)
@@ -174,8 +175,6 @@ class _PageStorage(ContentSchema):
 
     @model_validator(mode="after")
     def require_consistent_floor_and_lifecycle(self) -> Self:
-        if self.id_timestamp_micros != (self.occurred_at // 1_000) * 1_000:
-            raise ValueError("Page identifier timestamp is inconsistent.")
         if self.updated_at < self.created_at:
             raise ValueError("Page update time precedes creation time.")
         if (
@@ -193,6 +192,8 @@ class NewPage(_PageStorage):
 
     @model_validator(mode="after")
     def require_consistent_generated_identity(self) -> Self:
+        if self.id_timestamp_micros != (self.occurred_at // 1_000) * 1_000:
+            raise ValueError("Initial Page identifier timestamp is inconsistent.")
         occurrence = OccurrenceTime(
             utc_microseconds=self.occurred_at,
             canonical_utc=canonical_utc_wire(self.occurred_at),
@@ -214,7 +215,85 @@ class NewPage(_PageStorage):
 class PageRecord(_PageStorage):
     """Validate a stored Page without recomputing identity after title changes."""
 
-    pass
+    @model_validator(mode="after")
+    def require_stable_identifier_components(self) -> Self:
+        suffix = "" if self.collision_ordinal == 1 else f"-{self.collision_ordinal}"
+        expected = f"{page_id_timestamp_prefix(self.id_timestamp_micros)}-{self.base_slug}{suffix}"
+        if self.id_scheme != PAGE_ID_SCHEME or self.page_id != expected:
+            raise ValueError("Page identifier metadata is inconsistent.")
+        return self
+
+
+class PageOccurrenceCorrectionCommand(ContentSchema):
+    """Storage instruction; an authenticated service must authorize the actor."""
+
+    library_id: OpaqueId
+    page_uid: PageUid
+    old_occurred_at: OccurrenceMicros
+    new_occurred_at: OccurrenceMicros
+    actor_caller_id: OpaqueId | None = None
+    actor_home_library_id: OpaqueId | None = None
+    master_audit_event_id: OpaqueId | None = None
+    corrected_at: StoredTimestamp
+
+    @model_validator(mode="after")
+    def require_actual_change_and_valid_time(self) -> Self:
+        if self.old_occurred_at == self.new_occurred_at:
+            raise ValueError("Page occurrence correction must change the timestamp.")
+        if not (
+            (
+                self.actor_caller_id is not None
+                and self.actor_home_library_id is not None
+                and self.master_audit_event_id is None
+            )
+            or (
+                self.actor_caller_id is None
+                and self.actor_home_library_id is None
+                and self.master_audit_event_id is not None
+            )
+        ):
+            raise ValueError("Page occurrence correction must identify exactly one actor kind.")
+        canonical_utc_wire(self.corrected_at)
+        return self
+
+
+class PageOccurrenceCorrectionRecord(PageOccurrenceCorrectionCommand):
+    sequence: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+    at_revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+
+
+class PageLifecycleEventRecord(ContentSchema):
+    """Immutable proof of one Page tombstone transition."""
+
+    library_id: OpaqueId
+    page_uid: PageUid
+    sequence: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+    action: Literal["delete", "restore"]
+    section_id: OpaqueId
+    old_deleted_at: StoredTimestamp | None
+    old_updated_at: StoredTimestamp
+    changed_at: StoredTimestamp
+    at_revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+    occurred_at_at_event: OccurrenceMicros
+    actor_caller_id: OpaqueId | None
+    actor_home_library_id: OpaqueId | None
+    master_audit_event_id: OpaqueId | None = None
+    request_id: RequestId
+
+    @model_validator(mode="after")
+    def require_actual_transition(self) -> Self:
+        if self.changed_at <= self.old_updated_at:
+            raise ValueError("Page lifecycle time must strictly advance.")
+        if (self.action == "delete") != (self.old_deleted_at is None):
+            raise ValueError("Page lifecycle action does not match the prior state.")
+        caller_actor = self.actor_caller_id is not None and self.actor_home_library_id is not None
+        master_actor = self.master_audit_event_id is not None
+        if caller_actor == master_actor or (
+            (self.actor_caller_id is None) != (self.actor_home_library_id is None)
+        ):
+            raise ValueError("Page lifecycle event needs exactly one actor kind.")
+        canonical_utc_wire(self.changed_at)
+        return self
 
 
 class NewRevision(MarkdownContent):
@@ -377,7 +456,7 @@ class CreateArchiveCommand(ContentSchema):
     section_id: OpaqueId
     book_id: OpaqueId
     title: Annotated[str, Field(min_length=1)]
-    occurred_at: OccurrenceMicros
+    occurred_at: OccurrenceMicros | None = None
     content_md: Annotated[
         StrictBytes,
         Field(min_length=1, max_length=MAX_MARKDOWN_BYTES, repr=False),
@@ -427,6 +506,37 @@ class AppendArchiveRevisionCommand(ContentSchema):
     def require_valid_markdown(cls, value: bytes) -> bytes:
         MarkdownContent.from_bytes(value)
         return value
+
+
+class CorrectArchiveOccurrenceCommand(ContentSchema):
+    """Authorized metadata correction without creating a content Revision."""
+
+    library_id: OpaqueId
+    section_id: OpaqueId
+    page_id: PageId
+    expected_etag: StrongPageETag
+    occurred_at: OccurrenceMicros
+    request_id: RequestId
+
+    @field_validator("page_id")
+    @classmethod
+    def require_page_id(cls, value: str) -> str:
+        return validate_page_id(value)
+
+
+class PageLifecycleCommand(ContentSchema):
+    """One conditional Archive Page tombstone operation."""
+
+    library_id: OpaqueId
+    section_id: OpaqueId
+    page_id: PageId
+    expected_etag: StrongPageETag
+    request_id: RequestId
+
+    @field_validator("page_id")
+    @classmethod
+    def require_page_id(cls, value: str) -> str:
+        return validate_page_id(value)
 
 
 class ArchiveIdempotencyKey(ContentSchema):
@@ -487,10 +597,18 @@ class ArchiveCitation(ContentSchema):
         return validate_api_v1_path(value)
 
 
+class ArchiveOccurrenceNotice(ContentSchema):
+    """The declared Page time was supplied by the server, not the caller."""
+
+    source: Literal["server_utc"] = "server_utc"
+    warning_code: Literal["occurred_at_defaulted"] = "occurred_at_defaulted"
+
+
 class ArchiveResponseBody(ContentSchema):
     page: ArchivePageView
     revision: ArchiveRevisionView
     citation: ArchiveCitation
+    occurrence_notice: ArchiveOccurrenceNotice | None = None
 
     @model_validator(mode="after")
     def require_consistent_identity(self) -> Self:
@@ -504,6 +622,75 @@ class ArchiveResponseBody(ContentSchema):
             or self.citation.revision_number != self.page.current_revision_number
         ):
             raise ValueError("Archive response identity is inconsistent.")
+        return self
+
+
+class OccurrenceCorrectionResponseBody(ContentSchema):
+    """Current identity and citation only; a write grant does not imply Page read."""
+
+    section_id: OpaqueId
+    page_id: PageId
+    previous_occurred_at: str
+    occurred_at: str
+    current_revision_id: RevisionId
+    current_revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+    citation: ArchiveCitation
+
+    @field_validator("previous_occurred_at", "occurred_at")
+    @classmethod
+    def require_canonical_occurrence(cls, value: str) -> str:
+        from patchouli_lib.identifiers import parse_occurrence_time
+
+        if parse_occurrence_time(value).canonical_utc != value:
+            raise ValueError("Occurrence timestamp must be canonical UTC text.")
+        return value
+
+    @model_validator(mode="after")
+    def require_consistent_citation(self) -> Self:
+        if (
+            self.previous_occurred_at == self.occurred_at
+            or self.citation.section_id != self.section_id
+            or self.citation.page_id != self.page_id
+            or self.citation.revision_id != self.current_revision_id
+            or self.citation.revision_number != self.current_revision_number
+        ):
+            raise ValueError("Occurrence correction response identity is inconsistent.")
+        return self
+
+
+class PageLifecycleResponseBody(ContentSchema):
+    """No content bytes: a write grant does not imply Page read access."""
+
+    section_id: OpaqueId
+    page_id: PageId
+    state: Literal["trashed", "active"]
+    deleted_at: str | None
+    updated_at: str
+    current_revision_id: RevisionId
+    current_revision_number: Annotated[int, Field(ge=1, le=(1 << 63) - 1)]
+    citation: ArchiveCitation
+
+    @field_validator("deleted_at", "updated_at")
+    @classmethod
+    def require_canonical_time(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        from patchouli_lib.identifiers import parse_occurrence_time
+
+        if parse_occurrence_time(value).canonical_utc != value:
+            raise ValueError("Page lifecycle time must be canonical UTC text.")
+        return value
+
+    @model_validator(mode="after")
+    def require_consistent_identity_and_state(self) -> Self:
+        if (
+            (self.state == "trashed") != (self.deleted_at is not None)
+            or self.citation.section_id != self.section_id
+            or self.citation.page_id != self.page_id
+            or self.citation.revision_id != self.current_revision_id
+            or self.citation.revision_number != self.current_revision_number
+        ):
+            raise ValueError("Page lifecycle response identity or state is inconsistent.")
         return self
 
 
@@ -542,10 +729,12 @@ __all__ = [
     "ArchiveMutationReplay",
     "ArchiveMutationResult",
     "ArchiveMutationSuccess",
+    "ArchiveOccurrenceNotice",
     "ArchivePageView",
     "ArchiveResponseBody",
     "ArchiveRevisionView",
     "ArchiveSourceInput",
+    "CorrectArchiveOccurrenceCommand",
     "CreateArchiveCommand",
     "MarkdownContent",
     "NewPage",
@@ -553,8 +742,14 @@ __all__ = [
     "NewPageIdentifier",
     "NewPageSource",
     "NewRevision",
+    "OccurrenceCorrectionResponseBody",
+    "PageLifecycleCommand",
+    "PageLifecycleEventRecord",
+    "PageLifecycleResponseBody",
     "PageIdCollisionCounterRecord",
     "PageIdentifierRecord",
+    "PageOccurrenceCorrectionCommand",
+    "PageOccurrenceCorrectionRecord",
     "PageRecord",
     "PageSourceRecord",
     "RevisionRecord",

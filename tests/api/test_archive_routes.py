@@ -14,23 +14,36 @@ from typing import Any, cast
 import anyio
 import httpx2
 import pytest
+from alembic import command
+from alembic.config import Config
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import Connection, Engine, func, select
+from sqlalchemy import Connection, Engine, delete, func, insert, select
 
 from patchouli_lib.api.archive_routes import (
     MAX_ARCHIVE_METADATA_BYTES,
     MAX_ARCHIVE_MULTIPART_BYTES,
     ArchiveServiceFactory,
+    _require_archive_access,
     create_archive_router,
 )
+from patchouli_lib.api.authentication import AuthenticatedRequestContext
 from patchouli_lib.api.contracts import PROTECTED_CACHE_CONTROL
-from patchouli_lib.api.errors import ProblemDetails, install_api_exception_handlers
+from patchouli_lib.api.errors import (
+    ApplicationProblem,
+    ProblemDetails,
+    install_api_exception_handlers,
+)
 from patchouli_lib.api.request_ids import REQUEST_ID_HEADER, RequestIDMiddleware
-from patchouli_lib.auth.models import AuditEvent, Credential
+from patchouli_lib.auth.models import (
+    AuditEvent,
+    Credential,
+    CredentialLibraryGrant,
+    CredentialLibraryPolicy,
+)
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import CallerKind, NewCaller, NewSectionGrant, SectionAction
-from patchouli_lib.auth.service import CredentialIssuer
+from patchouli_lib.auth.service import AuthenticationService, CredentialIssuer
 from patchouli_lib.content import (
     ArchiveIdempotencyKey,
     ArchiveMutationSuccess,
@@ -38,14 +51,19 @@ from patchouli_lib.content import (
     ArchiveSourceInput,
     CreateArchiveCommand,
 )
+from patchouli_lib.content.file_set_service import FileSetRevisionService
 from patchouli_lib.content.models import MAX_MARKDOWN_BYTES, Page, PageSource, Revision
+from patchouli_lib.content.repository import ContentRepository
+from patchouli_lib.content.schemas import NewPageSource
+from patchouli_lib.content.service import legacy_page_current_etag
 from patchouli_lib.database import build_engine, immediate_transaction
 from patchouli_lib.idempotency.models import IdempotencyRecord
 from patchouli_lib.idempotency.schemas import digest_idempotency_key
-from patchouli_lib.identifiers import parse_occurrence_time
+from patchouli_lib.identifiers import canonical_utc_wire, parse_occurrence_time
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import LibraryStructureSeed, NewBook, NewSection
 from patchouli_lib.library.service import LibrarySeedService
+from patchouli_lib.retrieval.cursor import CursorCodec
 
 REQUEST_ID = f"req_{'9' * 32}"
 OPERATION_TIME = 1_776_000_000_000_000
@@ -57,6 +75,7 @@ CREATE_METADATA = {
     "source": {"kind": "synthetic", "locator": "urn:synthetic:archive"},
 }
 CONTENT = b"# Synthetic archive\r\n\r\nExact bytes.\n"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,9 +126,12 @@ def _add_caller(
 
 
 @pytest.fixture
-def archive_api(tmp_path: Path) -> Iterator[ArchiveApiFixture]:
-    engine = build_engine(f"sqlite:///{(tmp_path / 'archive-routes.db').as_posix()}")
-    Page.metadata.create_all(engine)
+def archive_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[ArchiveApiFixture]:
+    database_url = f"sqlite:///{(tmp_path / 'archive-routes.db').as_posix()}"
+    monkeypatch.setenv("PATCHOULI_DATABASE_URL", database_url)
+    monkeypatch.setenv("PATCHOULI_ENVIRONMENT", "test")
+    command.upgrade(Config(str(REPOSITORY_ROOT / "alembic.ini")), "head")
+    engine = build_engine(database_url)
     try:
         identifiers = iter(("1" * 32, "2" * 32, "3" * 32))
         with immediate_transaction(engine) as connection:
@@ -227,6 +249,8 @@ def _build_app(
     *,
     request_id_factory: Callable[[], str] = lambda: REQUEST_ID,
     service_factory: ArchiveServiceFactory | None = None,
+    clock: Callable[[], int] = lambda: OPERATION_TIME,
+    cursor_codec: CursorCodec | None = None,
 ) -> FastAPI:
     application = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     install_api_exception_handlers(application)
@@ -237,8 +261,9 @@ def _build_app(
     application.include_router(
         create_archive_router(
             fixture.engine,
-            clock=lambda: OPERATION_TIME,
+            clock=clock,
             service_factory=service_factory,
+            cursor_codec=cursor_codec,
         )
     )
     return application
@@ -333,6 +358,46 @@ def _counts(engine: Engine) -> dict[str, int]:
         }
 
 
+def _opt_in_writer(fixture: ArchiveApiFixture) -> None:
+    with immediate_transaction(fixture.engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryPolicy),
+            {
+                "credential_id": fixture.writer_credential_id,
+                "caller_id": fixture.writer_id,
+                "home_library_id": fixture.library_id,
+                "mode": "library_grants",
+                "created_at": ISSUED_TIME,
+            },
+        )
+
+
+def _grant_writer_library(fixture: ArchiveApiFixture, action: str) -> None:
+    with immediate_transaction(fixture.engine) as connection:
+        connection.execute(
+            insert(CredentialLibraryGrant),
+            {
+                "credential_id": fixture.writer_credential_id,
+                "caller_id": fixture.writer_id,
+                "home_library_id": fixture.library_id,
+                "target_library_id": fixture.library_id,
+                "action": action,
+                "created_at": OPERATION_TIME - 1,
+            },
+        )
+
+
+def _remove_writer_library_grant(fixture: ArchiveApiFixture, action: str) -> None:
+    with immediate_transaction(fixture.engine) as connection:
+        connection.execute(
+            delete(CredentialLibraryGrant).where(
+                CredentialLibraryGrant.credential_id == fixture.writer_credential_id,
+                CredentialLibraryGrant.target_library_id == fixture.library_id,
+                CredentialLibraryGrant.action == action,
+            )
+        )
+
+
 def _seed_hidden_archive(fixture: ArchiveApiFixture) -> tuple[str, str]:
     with immediate_transaction(fixture.engine) as connection:
         result = ArchiveService(
@@ -391,6 +456,22 @@ def test_router_inventory_is_exact() -> None:
             "/api/v1/sections/{section_id}/pages/{page_id}/revisions",
             {"POST"},
         ),
+        (
+            "/api/v1/sections/{section_id}/pages/{page_id}/occurrence",
+            {"PATCH"},
+        ),
+        (
+            "/api/v1/sections/{section_id}/pages/{page_id}",
+            {"DELETE"},
+        ),
+        (
+            "/api/v1/sections/{section_id}/pages/{page_id}/restore",
+            {"POST"},
+        ),
+        (
+            "/api/v1/sections/{section_id}/trash/{page_id}",
+            {"GET"},
+        ),
     ]
 
 
@@ -429,7 +510,7 @@ def test_typed_client_multipart_create_and_response_parity(
     assert response.headers["Location"].startswith(
         f"/api/v1/sections/{archive_api.section_id}/pages/"
     )
-    assert response.headers["ETag"].startswith('"page-v1-')
+    assert response.headers["ETag"].startswith('"page-v2-')
     parsed = models.PageDocument.from_dict(response.json())
     parsed.require_current_revision()
     assert parsed.page.book_id == archive_api.book_id
@@ -510,6 +591,151 @@ def test_operator_visible_without_write_and_hidden_section_are_distinct(
         "audit_events": 0,
         "idempotency_records": 0,
     }
+
+
+def test_opted_in_archive_write_and_trash_read_do_not_fall_back_to_section_grants(
+    archive_api: ArchiveApiFixture,
+) -> None:
+    with immediate_transaction(archive_api.engine) as connection:
+        auth = AuthRepository(connection)
+        for action in (SectionAction.QUERY, SectionAction.PAGE_READ):
+            auth.add_grant(
+                NewSectionGrant(
+                    library_id=archive_api.library_id,
+                    caller_id=archive_api.writer_id,
+                    section_id=archive_api.section_id,
+                    action=action,
+                    created_at=OPERATION_TIME - 1,
+                )
+            )
+    _opt_in_writer(archive_api)
+    cursor_codec = CursorCodec(b"synthetic-archive-cursor-key-32bytes")
+    trash_path = f"/api/v1/sections/{archive_api.section_id}/trash"
+    with TestClient(
+        _build_app(archive_api, cursor_codec=cursor_codec), raise_server_exceptions=False
+    ) as client:
+        denied = _create(
+            client,
+            archive_api,
+            key="opted-in-no-write",
+            content=b"\xff",
+        )
+        foreign_denied = _create(
+            client,
+            archive_api,
+            key="opted-in-foreign-no-write",
+            path=_create_path(archive_api, section_id=archive_api.foreign_section_id),
+        )
+        _problem(denied, 403, "insufficient_scope")
+        _problem(foreign_denied, 403, "insufficient_scope")
+        assert _counts(archive_api.engine)["pages"] == 0
+
+        _grant_writer_library(archive_api, "write")
+        _problem(
+            _create(
+                client,
+                archive_api,
+                key="opted-in-foreign-with-write",
+                path=_create_path(archive_api, section_id=archive_api.foreign_section_id),
+            ),
+            404,
+            "resource_not_found",
+        )
+        created = _create(client, archive_api, key="opted-in-write")
+        assert created.status_code == 201
+        page_id = created.json()["page"]["page_id"]
+        deleted = client.delete(
+            f"/api/v1/sections/{archive_api.section_id}/pages/{page_id}",
+            headers=[
+                _authorization(archive_api.writer_token),
+                ("Idempotency-Key", "opted-in-delete"),
+                ("If-Match", created.headers["ETag"]),
+            ],
+        )
+        assert deleted.status_code == 200
+        _problem(
+            client.get(trash_path, headers=[_authorization(archive_api.writer_token)]),
+            403,
+            "insufficient_scope",
+        )
+        _problem(
+            client.get(
+                f"{trash_path}/{page_id}", headers=[_authorization(archive_api.writer_token)]
+            ),
+            403,
+            "insufficient_scope",
+        )
+
+        _grant_writer_library(archive_api, "read")
+        listing = client.get(trash_path, headers=[_authorization(archive_api.writer_token)])
+        detail = client.get(
+            f"{trash_path}/{page_id}", headers=[_authorization(archive_api.writer_token)]
+        )
+        assert listing.status_code == detail.status_code == 200
+        assert [item["page_id"] for item in listing.json()["items"]] == [page_id]
+        assert detail.json()["page_id"] == page_id
+        _problem(
+            client.get(
+                f"/api/v1/sections/{archive_api.foreign_section_id}/trash",
+                headers=[_authorization(archive_api.writer_token)],
+            ),
+            404,
+            "resource_not_found",
+        )
+
+        _remove_writer_library_grant(archive_api, "read")
+        _problem(
+            client.get(trash_path, headers=[_authorization(archive_api.writer_token)]),
+            403,
+            "insufficient_scope",
+        )
+        _problem(
+            client.get(
+                f"{trash_path}/{page_id}", headers=[_authorization(archive_api.writer_token)]
+            ),
+            403,
+            "insufficient_scope",
+        )
+        _remove_writer_library_grant(archive_api, "write")
+        _problem(
+            _create(client, archive_api, key="opted-in-write-revoked"),
+            403,
+            "insufficient_scope",
+        )
+
+
+def test_opted_in_write_revoked_inside_transaction_rolls_back(
+    archive_api: ArchiveApiFixture,
+) -> None:
+    _opt_in_writer(archive_api)
+    _grant_writer_library(archive_api, "write")
+
+    def factory(connection: Connection) -> ArchiveService:
+        connection.execute(
+            delete(CredentialLibraryGrant).where(
+                CredentialLibraryGrant.credential_id == archive_api.writer_credential_id,
+                CredentialLibraryGrant.target_library_id == archive_api.library_id,
+                CredentialLibraryGrant.action == "write",
+            )
+        )
+        return ArchiveService(connection, clock=lambda: OPERATION_TIME)
+
+    with TestClient(
+        _build_app(archive_api, service_factory=factory), raise_server_exceptions=False
+    ) as client:
+        response = _create(client, archive_api, key="opted-in-internal-revoke")
+    _problem(response, 403, "insufficient_scope")
+    assert _counts(archive_api.engine)["pages"] == 0
+    with archive_api.engine.connect() as connection:
+        assert (
+            connection.execute(
+                select(CredentialLibraryGrant.action).where(
+                    CredentialLibraryGrant.credential_id == archive_api.writer_credential_id,
+                    CredentialLibraryGrant.target_library_id == archive_api.library_id,
+                )
+            ).scalar_one()
+            == "write"
+        )
 
 
 def test_wrong_book_section_and_page_are_hidden_as_not_found(
@@ -733,6 +959,13 @@ def test_idempotency_key_rejects_non_ascii_raw_header(
             "request_validation_failed",
         ),
         ({"title": "Missing fields"}, CONTENT, 422, "request_validation_failed"),
+        ({**CREATE_METADATA, "occurred_at": None}, CONTENT, 422, "request_validation_failed"),
+        (
+            {**CREATE_METADATA, "occurred_at": "not-a-time"},
+            CONTENT,
+            422,
+            "request_validation_failed",
+        ),
         ({**CREATE_METADATA, "unknown": True}, CONTENT, 422, "request_validation_failed"),
         (CREATE_METADATA, b"", 422, "request_validation_failed"),
         (CREATE_METADATA, b"nul\x00body", 422, "request_validation_failed"),
@@ -1127,6 +1360,41 @@ def test_same_key_replay_uses_current_request_id_and_mismatch_is_409(
     }
 
 
+def test_missing_occurrence_uses_server_time_and_replays_without_recomputing(
+    archive_api: ArchiveApiFixture,
+) -> None:
+    current_time = [OPERATION_TIME]
+    metadata = {key: value for key, value in CREATE_METADATA.items() if key != "occurred_at"}
+    with TestClient(
+        _build_app(archive_api, clock=lambda: current_time[0]), raise_server_exceptions=False
+    ) as client:
+        created = _create(client, archive_api, key="default-time-key", metadata=metadata)
+        assert created.status_code == 201
+        assert created.json()["page"]["occurred_at"] == canonical_utc_wire(OPERATION_TIME)
+        assert created.json()["occurrence_notice"] == {
+            "source": "server_utc",
+            "warning_code": "occurred_at_defaulted",
+        }
+        current_time[0] += 5_000_000
+        replay = _create(client, archive_api, key="default-time-key", metadata=metadata)
+        assert replay.status_code == 201
+        assert replay.headers["Idempotency-Replayed"] == "true"
+        assert replay.content == created.content
+        explicit = _create(
+            client,
+            archive_api,
+            key="default-time-key",
+            metadata={**metadata, "occurred_at": canonical_utc_wire(OPERATION_TIME)},
+        )
+        _problem(explicit, 409, "idempotency_mismatch")
+    assert _counts(archive_api.engine)["pages"] == 1
+    with archive_api.engine.connect() as connection:
+        page = connection.execute(select(Page.created_at, Page.occurred_at)).one()
+        revision = connection.execute(select(Revision.created_at)).one()
+    assert page == (OPERATION_TIME, OPERATION_TIME)
+    assert revision == (OPERATION_TIME,)
+
+
 def test_same_key_metadata_source_conflicts_but_wrong_route_stays_hidden(
     archive_api: ArchiveApiFixture,
 ) -> None:
@@ -1176,6 +1444,22 @@ def test_revision_requires_strong_if_match_and_replays_old_etag_after_advance(
             ("Idempotency-Key", "revision-key"),
             ("Content-Type", media_type),
         ]
+        with archive_api.engine.connect() as connection:
+            page_uid = connection.execute(
+                select(Page.page_uid).where(
+                    Page.library_id == archive_api.library_id, Page.page_id == page_id
+                )
+            ).scalar_one()
+        old_format = legacy_page_current_etag(
+            page_uid,
+            created.json()["revision"]["revision_id"],
+            1,
+        )
+        old_version = client.post(
+            path,
+            headers=[*base_headers, ("If-Match", old_format)],
+            content=body,
+        )
         missing = client.post(path, headers=base_headers, content=body)
         malformed = [
             client.post(
@@ -1236,6 +1520,7 @@ def test_revision_requires_strong_if_match_and_replays_old_etag_after_advance(
             content=body,
         )
 
+    _problem(old_version, 412, "revision_conflict")
     _problem(missing, 428, "precondition_required")
     for response in malformed:
         _problem(response, 422, "request_validation_failed")
@@ -1247,6 +1532,156 @@ def test_revision_requires_strong_if_match_and_replays_old_etag_after_advance(
     assert replayed.headers["ETag"] == revised.headers["ETag"]
     assert replayed.headers["ETag"] != advanced.headers["ETag"]
     _problem(if_match_mismatch, 409, "idempotency_mismatch")
+
+
+def test_legacy_revision_route_refuses_current_file_set_after_authorization_and_etag(
+    archive_api: ArchiveApiFixture,
+) -> None:
+    with TestClient(_build_app(archive_api), raise_server_exceptions=False) as client:
+        created = _create(client, archive_api, key="file-set-guard-create")
+        assert created.status_code == 201
+        page_id = created.json()["page"]["page_id"]
+        path = f"/api/v1/sections/{archive_api.section_id}/pages/{page_id}/revisions"
+        with immediate_transaction(archive_api.engine) as connection:
+            page = ContentRepository(connection).get_page(archive_api.library_id, page_id)
+            assert page is not None
+            file_set_revision_id = f"rev_{'f' * 32}"
+            file_set = FileSetRevisionService(connection).append_existing_page(
+                library_id=archive_api.library_id,
+                page_id=page_id,
+                expected_etag=created.headers["ETag"],
+                files=(("content.md", b"# Multi-file\n"), ("private.bin", b"\x00\xff")),
+                revision_id=file_set_revision_id,
+                revision_at=OPERATION_TIME + 1,
+                source=NewPageSource(
+                    library_id=archive_api.library_id,
+                    source_id="9" * 32,
+                    page_uid=page.page_uid,
+                    revision_id=file_set_revision_id,
+                    revision_number=2,
+                    kind="synthetic file set",
+                    created_at=OPERATION_TIME + 1,
+                ),
+            )
+            assert file_set.changed
+        baseline = _counts(archive_api.engine)
+        media_type, body = _multipart({"source": {"kind": "synthetic revision"}}, b"# Old API\n")
+
+        def request(token: str | None, etag: str, key: str) -> Any:
+            headers = [
+                ("Idempotency-Key", key),
+                ("If-Match", etag),
+                ("Content-Type", media_type),
+            ]
+            if token is not None:
+                headers.insert(0, _authorization(token))
+            return client.post(path, headers=headers, content=body)
+
+        unauthorized = request(None, file_set.etag, "file-set-guard-no-token")
+        insufficient = request(archive_api.reader_token, file_set.etag, "file-set-guard-reader")
+        stale = request(archive_api.writer_token, created.headers["ETag"], "file-set-guard-stale")
+        unsupported = request(archive_api.writer_token, file_set.etag, "file-set-guard-current")
+
+    _problem(unauthorized, 401, "authentication_required")
+    _problem(insufficient, 403, "insufficient_scope")
+    _problem(stale, 412, "revision_conflict")
+    _problem(unsupported, 409, "revision_format_unsupported")
+    assert "private.bin" not in unsupported.text
+    assert "ETag" not in unsupported.headers
+    assert _counts(archive_api.engine) == baseline
+    with archive_api.engine.connect() as connection:
+        current = ContentRepository(connection).get_page(archive_api.library_id, page_id)
+        assert current is not None
+        assert current.current_revision_id == file_set_revision_id
+        assert current.current_revision_number == 2
+
+
+def test_deleted_page_rejects_fresh_revision_but_replays_prior_success_without_mutation(
+    archive_api: ArchiveApiFixture,
+) -> None:
+    media_type, body = _multipart(
+        {"source": {"kind": "synthetic revision before deletion"}},
+        b"# Revision before deletion\n",
+    )
+    with TestClient(_build_app(archive_api), raise_server_exceptions=False) as client:
+        created = _create(client, archive_api, key="deleted-page-create-key")
+        assert created.status_code == 201
+        page_id = created.json()["page"]["page_id"]
+        path = f"/api/v1/sections/{archive_api.section_id}/pages/{page_id}/revisions"
+
+        def headers(key: str, etag: str) -> list[tuple[str, str]]:
+            return [
+                _authorization(archive_api.writer_token),
+                ("Idempotency-Key", key),
+                ("If-Match", etag),
+                ("Content-Type", media_type),
+            ]
+
+        replay_headers = headers("deleted-page-revision-key", created.headers["ETag"])
+        revised = client.post(path, headers=replay_headers, content=body)
+        assert revised.status_code == 201
+        with immediate_transaction(archive_api.engine) as connection:
+            repository = ContentRepository(connection)
+            page = repository.get_page(archive_api.library_id, page_id)
+            assert page is not None
+            deleted, _ = repository.transition_page_lifecycle(
+                page,
+                action="delete",
+                actor_caller_id=archive_api.writer_id,
+                actor_home_library_id=archive_api.library_id,
+                request_id=REQUEST_ID,
+                changed_at=OPERATION_TIME + 1,
+            )
+        baseline = _counts(archive_api.engine)
+        replay = client.post(path, headers=replay_headers, content=body)
+        fresh = client.post(
+            path,
+            headers=headers("deleted-page-fresh-key", revised.headers["ETag"]),
+            content=body,
+        )
+
+    assert replay.status_code == 201
+    assert replay.headers["Idempotency-Replayed"] == "true"
+    assert replay.content == revised.content
+    _problem(fresh, 404, "resource_not_found")
+    assert _counts(archive_api.engine) == baseline
+    with archive_api.engine.connect() as connection:
+        current = connection.execute(
+            select(Page.current_revision_id, Page.current_revision_number, Page.deleted_at).where(
+                Page.library_id == archive_api.library_id, Page.page_id == page_id
+            )
+        ).one()
+    assert current == (revised.json()["revision"]["revision_id"], 2, deleted.deleted_at)
+
+
+def test_legacy_archive_preflight_uses_current_grants_not_captured_context(
+    archive_api: ArchiveApiFixture,
+) -> None:
+    with immediate_transaction(archive_api.engine) as connection:
+        repository = AuthRepository(connection)
+        service = AuthenticationService(repository, clock=lambda: OPERATION_TIME)
+        authenticated = service.authenticate(archive_api.writer_token)
+        context = AuthenticatedRequestContext(
+            authenticated=authenticated,
+            grants=repository.list_grants(archive_api.library_id, archive_api.writer_id),
+        )
+        assert repository.remove_grant(
+            archive_api.library_id,
+            archive_api.writer_id,
+            archive_api.section_id,
+            SectionAction.ARCHIVE_WRITE,
+        )
+    assert SectionAction.ARCHIVE_WRITE in {grant.action for grant in context.grants}
+    with pytest.raises(ApplicationProblem) as failure:
+        anyio.run(
+            _require_archive_access,
+            archive_api.engine,
+            context,
+            archive_api.section_id,
+            lambda: OPERATION_TIME,
+        )
+    assert failure.value.status_code == 404
+    assert failure.value.code == "resource_not_found"
 
 
 @pytest.mark.parametrize("mutation", ["revoke", "disable", "remove"])
@@ -1371,7 +1806,7 @@ def test_last_used_commits_after_envelope_validation_and_coalesces(
     assert last_used() == touched_at
 
 
-def test_cancellation_while_streaming_stops_before_database_work(
+def test_cancellation_while_streaming_stops_before_mutation(
     archive_api: ArchiveApiFixture,
 ) -> None:
     media_type, body = _multipart()
@@ -1403,7 +1838,7 @@ def test_cancellation_while_streaming_stops_before_database_work(
         last_used = connection.execute(
             select(Credential.last_used_at).where(Credential.id == archive_api.writer_credential_id)
         ).scalar_one()
-    assert last_used is None
+    assert last_used == OPERATION_TIME
     assert all(value == 0 for value in _counts(archive_api.engine).values())
 
 

@@ -19,7 +19,7 @@ Alpha 阶段的接口范围包括：
 
 ## 命令行（CLI）
 
-安装软件包后运行 `patchouli --help`。配置档是带版本的 TOML，只包含 HTTPS URL
+安装软件包后运行 `patchouli --help`。配置档是带版本的 TOML，默认使用 HTTPS URL
 origin（源站）和兼容性版本。这里的 origin 只含 scheme、host 和可选 port：
 
 ```toml
@@ -35,6 +35,22 @@ Windows 上的默认配置档路径遵循 `%APPDATA%`，POSIX 上遵循 `$XDG_CO
 `PATCHOULI_ENDPOINT` 和 `PATCHOULI_API_VERSION` 提供非机密的进程级覆盖值。配置
 若含令牌等未知字段会被拒绝。读取配置文件时只通过经过验证且非重解析的句柄执行一次；
 端点与 bearer 凭据一起使用前，文件及已有的上级目录链必须具有可信所有者和权限。
+
+### 加密私网 HTTP 入口
+
+如果服务只通过已建立的加密私网访问，可在指定配置档中加入
+`allow_private_http = true`，并将 `endpoint` 改成管理员给出的精确 HTTP IP 入口。
+进程环境变量 `PATCHOULI_ALLOW_PRIVATE_HTTP=true` 也可开启，`false` 可明确关闭；
+它同时适用于 CLI 和 MCP。默认仍只接受 HTTPS。
+
+直接使用 Python 时，向 `PatchouliClient(endpoint, allow_private_http=True)` 传入
+相同选择。HTTP 仅接受私有 IPv4、共享地址段、回环或 IPv6 唯一本地 IP，不接受域名、
+公网 IP 或通配地址。软件不会仅凭 IP 判定网络已经加密，部署方必须保证访问路径。
+
+HTTP 请求不读取环境代理配置，也不跟随重定向，以免把 Token 送到外部代理或另一入口。
+Token、限定权限、输入保护、重试和幂等规则不变。HTTPS 的证书验证和代理行为不变。
+
+### 凭据和调用
 
 调用方凭据没有命令行选项，解析顺序为：
 
@@ -54,8 +70,7 @@ patchouli whoami
 patchouli sections list [--limit N] [--cursor CURSOR]
 patchouli books list --section SECTION [--limit N] [--cursor CURSOR]
 patchouli pages list --section SECTION [--limit N] [--cursor CURSOR]
-patchouli section search --section SECTION (--query-file FILE | --query-stdin) \
-  [--limit N] [--cursor CURSOR]
+patchouli search (--query-file FILE | --query-stdin)
 patchouli page current --section SECTION --page PAGE
 patchouli page revision --section SECTION --page PAGE --revision NUMBER
 patchouli archive create --section SECTION --book BOOK \
@@ -73,6 +88,15 @@ patchouli archive revise --section SECTION --page PAGE --if-match '"strong-etag"
 请求元数据、幂等指纹、输出或诊断。每个路径组成部分都相对于已经验证的目录句柄遍历，
 因此并发替换路径名无法重定向已打开的读取。生产入口以二进制模式读取 stdin，避免
 Markdown 正文字节（包括换行符）被终端文本层规范化。
+
+搜索输入现在是 JSON 对象，例如
+`{"keywords":["技术","报告"],"tags_any":[],"libraries":null,"limit":20}`。
+可选时间字段 `occurred_from_us`／`occurred_before_us` 使用 UTC Unix 微秒。
+旧 `section search --section ...` 命令及其游标／片段响应已退役；请改用跨知识库
+`search`，返回当前 Page 的准确 Revision ID／序号和命中来源。
+服务未完成索引重建时会返回 `search_unavailable`，不是空结果。
+能力响应中的 `limits.max_query_bytes` 是兼容旧客户端保留的字段，不能用于截断新搜索；
+新搜索的请求、关键词及数组上限以索引就绪后公布的 `limits.search` 为准。
 
 `--output json` 会向 stdout 写入稳定的成功封装。供人阅读的输出也只用 stdout 返回
 数据。所有诊断都使用 stderr；错误输出经过脱敏，绝不显示内容、元数据、bearer 令牌
@@ -124,15 +148,16 @@ capabilities
 whoami
 sections_list
 books_list
-section_search
+pages_search
 page_current
 page_revision
 archive_create
 archive_revise
 ```
 
-工具绝不接受凭据、端点、日志路径、幂等键或本地文件路径。搜索查询和 Markdown 内容
-是有大小限制的内存 JSON 字符串。归档创建和修订是两个独立工具；修订需要强
+工具绝不接受凭据、端点、日志路径、幂等键或本地文件路径。`pages_search` 接受
+结构化关键词、Tag 身份、时间范围、Library 范围和 Top K；Markdown 内容是有大小
+限制的内存 JSON 字符串。归档创建和修订是两个独立工具；修订需要强
 `if_match`。返回的非机密 `operation_id` 可以提供给同一写入工具进行原样重放。
 调用方无关的日志绑定会在 `whoami` 前于本地检查，稳定调用方则在变更前检查。原始
 操作键始终是私有日志状态。
