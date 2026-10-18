@@ -30,6 +30,7 @@ from patchouli_lib.admin.contracts import (
     MasterRestoreArchiveFormInput,
     MasterRotateAgentCredentialInput,
     MasterSetAgentLibraryGrantsInput,
+    MasterTagBatchInput,
     MasterTagFormInput,
     MasterUpdateAgentInput,
     MasterUpdatePageTitleInput,
@@ -61,6 +62,7 @@ from patchouli_lib.admin.page_move_routes import create_master_page_move_router
 from patchouli_lib.admin.pages import (
     REVEAL_SCRIPT,
     STYLESHEET,
+    TAG_MANAGEMENT_SCRIPT,
     AdminLocale,
     MarkdownPreview,
     SearchFormValues,
@@ -89,6 +91,7 @@ from patchouli_lib.admin.pages import (
     section_page,
     tag_detail_page,
     tag_directory_page,
+    tags_index_page,
     trash_detail_page,
     trash_directory_page,
 )
@@ -111,6 +114,7 @@ from patchouli_lib.admin.service import (
     PageTitleVersionConflictError,
 )
 from patchouli_lib.admin.session import AdminSession, AdminSessionCodec, MasterAdminSession
+from patchouli_lib.admin.tag_management import TagBatchConflictError
 from patchouli_lib.api.agent_skill_routes import SkillBundle
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.service import AuthenticationError, AuthorizationError, utc_microseconds
@@ -1068,9 +1072,74 @@ def create_admin_router(
     def tags_index(request: Request) -> Response:
         return protected_page(
             request,
-            lambda csrf, locale: library_scope_index_page(
-                csrf, read_model.list_libraries(), section="tags", locale=locale
+            lambda csrf, locale: tags_index_page(
+                csrf,
+                read_model.list_tags(),
+                locale=locale,
+                master_mode=isinstance(current_session(request), MasterAdminSession),
             ),
+            allow_self_script=True,
+        )
+
+    @router.post("/tags/batch")
+    async def manage_tags(request: Request) -> Response:
+        locale = locale_for(request)
+        if not _same_origin_submission(request):
+            return forbidden(request)
+        session = current_session(request)
+        if session is None:
+            return html(
+                login_page(locale=locale, message="Sign in again."), locale=locale, status_code=401
+            )
+        if not isinstance(session, MasterAdminSession):
+            return forbidden(request, "A master session is required.")
+        try:
+            values = await _read_form(
+                request,
+                allowed_fields=frozenset(MasterTagBatchInput.model_fields) | {"csrf_token"},
+                max_bytes=1_048_576,
+            )
+            _require_csrf(values, session)
+            encoded = values.get("changes")
+            if not isinstance(encoded, str):
+                raise ValueError("Missing changes")
+            submitted = MasterTagBatchInput.model_validate(
+                {**values, "changes": json.loads(encoded)}
+            )
+            await run_in_threadpool(
+                service.manage_tags_as_master, submitted, master_session=session
+            )
+        except _FormError as exc:
+            status, message = exc.status_code, exc.safe_message
+        except TagBatchConflictError:
+            status, message = 409, "Tag changes conflict. Reload and check duplicate names."
+        except (ValidationError, ValueError, TagValidationError):
+            status, message = 422, "Check the submitted fields and try again."
+        except AuthenticationError:
+            status, message = 401, "Sign in again."
+        except TagNotFoundError:
+            status, message = 404, "The requested Tag or page was not found."
+        except Exception:
+            status, message = 500, "The action could not be completed."
+        else:
+            return redirect("/admin/tags")
+        if current_session(request) is None or status == 401:
+            response = html(
+                login_page(locale=locale, message="Sign in again."), locale=locale, status_code=401
+            )
+            _clear_cookie(response, secure=secure_cookie(request))
+            return response
+        return html(
+            tags_index_page(
+                session.csrf_token,
+                read_model.list_tags(),
+                locale=locale,
+                master_mode=True,
+                message=message,
+            ),
+            locale=locale,
+            status_code=status,
+            allow_self_script=True,
         )
 
     @router.get("/trash")
@@ -1100,6 +1169,7 @@ def create_admin_router(
                 allow_master_actions=isinstance(session, MasterAdminSession),
             ),
             locale=locale,
+            allow_self_script=True,
         )
         remember_requested_locale(page_response, request)
         return page_response
@@ -1175,6 +1245,7 @@ def create_admin_router(
             ),
             locale=locale,
             status_code=status,
+            allow_self_script=True,
         )
 
     @router.post("/libraries")
@@ -1526,7 +1597,7 @@ def create_admin_router(
             or credential is None
             or not credential.library_grants_policy
             or credential.created_at > now
-            or credential.expires_at <= now
+            or (credential.expires_at is not None and credential.expires_at <= now)
             or credential.revoked_at is not None
             or credential.rotated_at is not None
         ):
@@ -1674,7 +1745,7 @@ def create_admin_router(
                 if (
                     caller.disabled_at is not None
                     or credential.created_at > now
-                    or credential.expires_at <= now
+                    or (credential.expires_at is not None and credential.expires_at <= now)
                     or credential.revoked_at is not None
                     or credential.rotated_at is not None
                 ):
@@ -2971,6 +3042,12 @@ def create_admin_router(
             REVEAL_SCRIPT,
             media_type="application/javascript",
             headers=_SECURITY_HEADERS,
+        )
+
+    @router.get("/tags.js")
+    def tag_management_script() -> Response:
+        return PlainTextResponse(
+            TAG_MANAGEMENT_SCRIPT, media_type="application/javascript", headers=_SECURITY_HEADERS
         )
 
     router.include_router(

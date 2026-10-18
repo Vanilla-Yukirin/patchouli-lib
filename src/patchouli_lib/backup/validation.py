@@ -45,6 +45,7 @@ from patchouli_lib.backup.manifest import (
     MASTER_OCCURRENCE_SCHEMA_REVISION,
     MASTER_PAGE_DELETE_SCHEMA_REVISION,
     OCCURRENCE_SCHEMA_REVISION,
+    OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     PAGE_MOVE_SCHEMA_REVISION,
     PAGE_TITLE_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
@@ -815,6 +816,12 @@ _EXPECTED_SQL_HASHES_0029: Final = _EXPECTED_SQL_HASHES_0028 | {
     ): "13cc8f01fd8acfa1842f5fd563d088760cd21926361d09375066da7a48944a91",
 }
 
+_EXPECTED_SQL_HASHES_0031: Final = {
+    **_EXPECTED_SQL_HASHES_0029,
+    ("table", "auth_credentials"): (
+        "f3ecff52455393e1a11e7a217e6a683a5b76c345571df17c977f83a55f4f2561"
+    ),
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
     PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
@@ -840,6 +847,7 @@ _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     PAGE_MOVE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0028,
     CALLER_PAGE_MOVE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0029,
     LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0029,
+    OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0031,
 }
 _FILE_SET_REVISIONS: Final = frozenset(
     {
@@ -861,6 +869,7 @@ _FILE_SET_REVISIONS: Final = frozenset(
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     }
 )
 _MASTER_LIFECYCLE_REVISIONS: Final = frozenset(
@@ -877,6 +886,7 @@ _MASTER_LIFECYCLE_REVISIONS: Final = frozenset(
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     }
 )
 _LIFECYCLE_REVISIONS: Final = _FILE_SET_REVISIONS | {LIFECYCLE_SCHEMA_REVISION}
@@ -887,6 +897,7 @@ _MASTER_OCCURRENCE_REVISIONS: Final = frozenset(
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     }
 )
 
@@ -1381,6 +1392,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     }:
         for row in connection.execute(
             "SELECT library_id, page_uid, sequence, old_title, new_title, "
@@ -1482,6 +1494,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
                         PAGE_MOVE_SCHEMA_REVISION,
                         CALLER_PAGE_MOVE_SCHEMA_REVISION,
                         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+                        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
                     }
                 )
             ):
@@ -1512,7 +1525,11 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
             )
             new_route = (
                 lifecycle_route(action)[1]
-                if schema_revision == LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION
+                if schema_revision
+                in {
+                    LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+                    OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+                }
                 else route
             )
             replays = connection.execute(
@@ -1565,6 +1582,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
             PAGE_MOVE_SCHEMA_REVISION,
             CALLER_PAGE_MOVE_SCHEMA_REVISION,
             LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+            OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
         }:
             _page_timeline(connection, schema_revision, key[0], key[1])
             continue
@@ -1971,6 +1989,7 @@ def _require_master_audit(connection: sqlite3.Connection, schema_revision: str) 
                 PAGE_MOVE_SCHEMA_REVISION,
                 CALLER_PAGE_MOVE_SCHEMA_REVISION,
                 LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+                OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
             }:
                 raise BackupDatabaseError
             linked = connection.execute(
@@ -2017,6 +2036,7 @@ def _require_master_audit(connection: sqlite3.Connection, schema_revision: str) 
                 PAGE_MOVE_SCHEMA_REVISION,
                 CALLER_PAGE_MOVE_SCHEMA_REVISION,
                 LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+                OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
             }:
                 raise BackupDatabaseError
             linked_events = connection.execute(
@@ -2049,6 +2069,7 @@ def _require_master_audit(connection: sqlite3.Connection, schema_revision: str) 
                 PAGE_MOVE_SCHEMA_REVISION,
                 CALLER_PAGE_MOVE_SCHEMA_REVISION,
                 LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+                OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
             }
             and action == "content.page.title.edit"
         ):
@@ -2130,6 +2151,16 @@ def _require_actor_home_graph(connection: sqlite3.Connection, schema_revision: s
 
 
 def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) -> None:
+    # Null expiry is reserved for Agent identities, never legacy Operators.
+    invalid_unbounded_credentials = _one_integer(
+        connection,
+        "SELECT count(*) FROM auth_credentials AS k "
+        "LEFT JOIN auth_callers AS c ON c.id = k.caller_id AND c.library_id = k.library_id "
+        "WHERE k.expires_at IS NULL AND (c.id IS NULL OR c.kind != 'agent')",
+    )
+    if invalid_unbounded_credentials:
+        raise BackupDatabaseError
+
     invalid_bootstrap = _one_integer(
         connection,
         "SELECT count(*) FROM operator_bootstrap_markers AS m "
@@ -2169,6 +2200,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     }:
         invalid_library_policies = _one_integer(
             connection,
@@ -2199,6 +2231,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     }:
         _require_agent_token_values(connection)
 
@@ -2218,6 +2251,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     }:
         _require_master_identity(connection)
 
@@ -2236,6 +2270,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     }:
         _require_actor_home_graph(connection, schema_revision)
 
@@ -2253,6 +2288,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     }:
         _require_master_audit(connection, schema_revision)
 
@@ -2379,6 +2415,7 @@ def _require_lifecycle_replay(
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     }:
         state = _page_timeline(connection, schema_revision, library_id, page_uid).exact_state(
             changed_at
@@ -2521,6 +2558,7 @@ def _file_set_valid_current_etags(
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     }:
         for (changed_at,) in connection.execute(
             "SELECT changed_at FROM page_title_events "
@@ -2595,6 +2633,7 @@ def _require_file_set_replay(
                     PAGE_MOVE_SCHEMA_REVISION,
                     CALLER_PAGE_MOVE_SCHEMA_REVISION,
                     LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+                    OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
                 }
             ),
             body.page_id,
@@ -2622,6 +2661,7 @@ def _require_file_set_replay(
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     }:
         timeline = _page_timeline(connection, schema_revision, library_id, page_uid)
         state = timeline.match_active_etag(
@@ -2771,6 +2811,7 @@ def _page_title_at(
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     }:
         return current_title
     row = connection.execute(
@@ -2783,7 +2824,10 @@ def _page_title_at(
 
 
 def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: str) -> None:
-    if schema_revision == LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION:
+    if schema_revision in {
+        LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+    }:
         try:
             require_library_lifecycle_graph(connection, schema_revision=schema_revision)
         except (ValueError, RuntimeError, sqlite3.Error):
@@ -2847,7 +2891,10 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
             raise BackupDatabaseError from None
 
         if route in LIBRARY_LIFECYCLE_ROUTES:
-            if schema_revision != LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION:
+            if schema_revision not in {
+                LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+                OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+            }:
                 raise BackupDatabaseError
             # Full bidirectional proof was checked above, including exact bytes.
             continue
@@ -2856,6 +2903,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
             if schema_revision not in {
                 CALLER_PAGE_MOVE_SCHEMA_REVISION,
                 LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+                OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
             }:
                 raise BackupDatabaseError
             continue
@@ -2891,6 +2939,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
                             PAGE_MOVE_SCHEMA_REVISION,
                             CALLER_PAGE_MOVE_SCHEMA_REVISION,
                             LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+                            OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
                         }
                     ),
                     correction_body.page_id,
@@ -2913,6 +2962,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
                 PAGE_MOVE_SCHEMA_REVISION,
                 CALLER_PAGE_MOVE_SCHEMA_REVISION,
                 LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+                OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
             }:
                 state = _page_timeline(
                     connection, schema_revision, library_id, page_uid
@@ -3029,6 +3079,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
                         PAGE_MOVE_SCHEMA_REVISION,
                         CALLER_PAGE_MOVE_SCHEMA_REVISION,
                         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+                        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
                     }
                 ),
             ),
@@ -3052,6 +3103,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
             PAGE_MOVE_SCHEMA_REVISION,
             CALLER_PAGE_MOVE_SCHEMA_REVISION,
             LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+            OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
         }:
             state = _page_timeline(connection, schema_revision, library_id, row[0]).exact_state(
                 row[5]
@@ -3311,6 +3363,7 @@ def _require_page_moves(
     if schema_revision in {
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     }:
         _require_caller_move_graph(connection, schema_revision)
     cursor = connection.execute("SELECT * FROM admin_master_move_receipts")
@@ -3371,6 +3424,7 @@ def _validate_connection(
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     }:
         _require_library_descriptions(connection)
     if schema_revision in _LIFECYCLE_REVISIONS:
@@ -3390,6 +3444,7 @@ def _validate_connection(
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     }:
         _require_page_moves(connection, schema_revision=schema_revision)
     if schema_revision in {
@@ -3398,6 +3453,7 @@ def _validate_connection(
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     }:
         _require_master_file_set_receipts(connection)
     if schema_revision in {
@@ -3409,6 +3465,7 @@ def _validate_connection(
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     }:
         _require_request_log_graph(connection)
     if schema_revision in {
@@ -3419,6 +3476,7 @@ def _validate_connection(
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     }:
         _require_search_projection_reset(connection)
     return DatabaseValidationReport(

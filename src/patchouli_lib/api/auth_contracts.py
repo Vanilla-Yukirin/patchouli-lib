@@ -122,7 +122,7 @@ class WhoAmIResponse(WireModel):
     kind: CallerKind
     name: ResourceName = Field(repr=False)
     description: BoundedText = Field(repr=False)
-    expires_at: RFC3339UTC
+    expires_at: RFC3339UTC | None
     policy_version: Annotated[int, Field(ge=1)]
     grants: tuple[EffectiveSectionGrant, ...]
     policy_mode: PolicyMode
@@ -172,7 +172,11 @@ def whoami_response(context: AuthenticatedRequestContext) -> WhoAmIResponse:
         kind=authenticated.caller.kind,
         name=authenticated.caller.name,
         description=authenticated.caller.description,
-        expires_at=_timestamp_datetime(authenticated.credential.expires_at),
+        expires_at=(
+            None
+            if authenticated.credential.expires_at is None
+            else _timestamp_datetime(authenticated.credential.expires_at)
+        ),
         policy_version=authenticated.caller.policy_version,
         grants=_effective_grants(context),
         policy_mode=context.policy_mode,

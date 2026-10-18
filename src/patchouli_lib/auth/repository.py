@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import Connection, delete, insert, select, update
+from sqlalchemy import Connection, delete, insert, or_, select, update
 
 from patchouli_lib.auth.library_policy import LibraryAction, LibraryPolicy, resolve_library_policy
 from patchouli_lib.auth.models import (
@@ -302,7 +302,7 @@ class AuthRepository:
                 Credential.caller_id == caller_id,
                 Credential.library_id == library_id,
                 Credential.created_at <= active_at,
-                Credential.expires_at > active_at,
+                or_(Credential.expires_at.is_(None), Credential.expires_at > active_at),
                 Credential.revoked_at.is_(None),
                 Credential.rotated_at.is_(None),
                 Caller.kind == "agent",
@@ -343,7 +343,7 @@ class AuthRepository:
             Credential.library_id == library_id,
             Credential.caller_id == caller_id,
             Credential.created_at <= active_at,
-            Credential.expires_at > active_at,
+            or_(Credential.expires_at.is_(None), Credential.expires_at > active_at),
             Credential.revoked_at.is_(None),
             Credential.rotated_at.is_(None),
         )

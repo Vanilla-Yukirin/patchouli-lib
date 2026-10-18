@@ -28,6 +28,8 @@
 
 ## 工程文档
 
+- [标签浏览与批量管理](proposals/tag-management.md)：全局标签浏览、批量改名和删除，
+  知识库标签与回收站数量展示；本地实现，不新增备注字段。
 - [实施路线图与当前状态](../ROADMAP.md)
 - [下一阶段改造清单](next-phase-todo.md)：区分已合并能力、验收证据和后置事项。
 - [下一阶段管理后台、内容模型与 Agent 接入设计](proposals/next-phase-product-and-api.md)：
@@ -50,6 +52,7 @@
 - [ADR 0003：受限的网页管理面板](decisions/0003-admin-web-console.md)
 - [ADR 0004：Page 文件字节保存在 SQLite](decisions/0004-page-file-storage.md)
 - [管理面板入口简化提案](proposals/admin-request-origin.md)
+- [Agent Token 的可选无限有效期](proposals/non-expiring-agent-tokens.md)
 
 ADR 0004 确定多文件的 SQLite 存储方向；主分支已实现统一文件集写入、逐库授权及
 受保护的 Token 再次显示。旧 Archive 与旧 Section 凭据保留兼容边界，旧搜索入口

@@ -16,6 +16,8 @@ import pytest
 from test_master_setup_browser import _Browser, _navigate, _submit_setup, _wait
 from test_master_setup_browser import setup_browser as setup_browser
 
+from patchouli_lib.search.index_v2 import rebuild_search_index
+
 _AGENT = "Synthetic Onboarding Agent"
 _TITLE = "Synthetic onboarding multi-file Page"
 _FILES = (
@@ -148,8 +150,10 @@ def _multipart() -> tuple[str, bytes]:
 
 
 @pytest.mark.parametrize("setup_browser", ["proof"], indirect=True)
+@pytest.mark.parametrize("unlimited", [False, True])
 def test_real_browser_master_onboarding_to_cross_library_agent_http(
     setup_browser: _Browser,
+    unlimited: bool,
 ) -> None:
     browser = setup_browser
     _submit_setup(browser, proof=True)
@@ -183,6 +187,24 @@ def test_real_browser_master_onboarding_to_cross_library_agent_http(
     )
     section_id, book_id = (path.rsplit("/", 1)[-1] for path in (section_path, book_path))
     _navigate(browser, "/admin/agents", "document.querySelector('#agent_name') !== null")
+    if unlimited:
+        _wait(
+            browser.tools,
+            "document.querySelector('[name=credential_ttl_seconds]').required === true",
+            description="the lifetime control script",
+        )
+        assert browser.tools.evaluate(
+            """(() => {
+              const box = document.querySelector('[name=never_expires]');
+              const duration = document.querySelector('[name=credential_ttl_seconds]');
+              box.click();
+              if (!duration.disabled || duration.required) return false;
+              box.click();
+              if (duration.disabled || !duration.required) return false;
+              box.click();
+              return duration.disabled && !duration.required;
+            })()"""
+        )
     assert (
         _submit_form(
             browser,
@@ -245,6 +267,7 @@ def test_real_browser_master_onboarding_to_cross_library_agent_http(
     assert status == 200
     identity = _json(raw)
     assert identity["name"] == _AGENT
+    assert (identity["expires_at"] is None) == unlimited
     assert identity["caller_id"] == detail_path.rsplit("/", 1)[-1]
     assert identity["grants"] == []
     assert identity["policy_mode"] == "library_grants"
@@ -301,6 +324,18 @@ def test_real_browser_master_onboarding_to_cross_library_agent_http(
         summary = next(entry for entry in exact["files"] if entry["filename"] == filename)
         assert summary["content_sha256"] == sha256(content).hexdigest()
         assert summary["size_bytes"] == len(content)
+
+    rebuild_search_index(browser.engine)
+    status, _, raw = _http(
+        browser,
+        "/api/v1/search",
+        token=token,
+        method="POST",
+        body=json.dumps({"keywords": ["Synthetic onboarding"]}).encode(),
+        extra_headers={"Content-Type": "application/json"},
+    )
+    assert status == 200
+    assert any(item["page_id"] == created["page_id"] for item in _json(raw)["items"])
 
     _navigate(browser, "/admin", "document.querySelector('form[action$=logout]') !== null")
     activities = browser.tools.evaluate(

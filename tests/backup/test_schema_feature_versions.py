@@ -99,6 +99,7 @@ def test_future_default_does_not_relabel_historical_catalogues(
         PAGE_MOVE_SCHEMA_REVISION,
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
+        "20261018_0031",
     } == validation._MASTER_OCCURRENCE_REVISIONS
     assert MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION not in validation._MASTER_OCCURRENCE_REVISIONS
     assert _FUTURE_DEFAULT not in validation._EXPECTED_SQL_HASHES_BY_REVISION

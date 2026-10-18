@@ -72,11 +72,28 @@ class MasterLibraryGrantInput(AdminActionInput):
     action: LibraryAction
 
 
-class MasterProvisionAgentInput(AdminActionInput):
+class MasterCredentialLifetimeInput(AdminActionInput):
+    never_expires: bool = False
+    credential_ttl_seconds: CredentialTtlSeconds | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def ignore_duration_only_when_explicitly_unlimited(cls, value: object) -> object:
+        if isinstance(value, dict) and value.get("never_expires") in (True, "true", "on", "1"):
+            return {**value, "credential_ttl_seconds": None}
+        return value
+
+    @model_validator(mode="after")
+    def require_duration_when_limited(self) -> Self:
+        if not self.never_expires and self.credential_ttl_seconds is None:
+            raise ValueError("A finite credential requires a positive lifetime.")
+        return self
+
+
+class MasterProvisionAgentInput(MasterCredentialLifetimeInput):
     home_library_id: OpaqueId
     agent_name: ResourceName
     agent_description: BoundedText = ""
-    credential_ttl_seconds: CredentialTtlSeconds
     grants: tuple[MasterLibraryGrantInput, ...] = ()
 
     @model_validator(mode="after")
@@ -93,8 +110,8 @@ class MasterUpdateAgentInput(AdminActionInput):
     expected_updated_at: TimestampMicros
 
 
-class MasterRotateAgentCredentialInput(AdminActionInput):
-    credential_ttl_seconds: CredentialTtlSeconds
+class MasterRotateAgentCredentialInput(MasterCredentialLifetimeInput):
+    pass
 
 
 class MasterSetAgentLibraryGrantsInput(AdminActionInput):
@@ -119,6 +136,32 @@ class RevokeAgentCredentialInput(AdminActionInput):
 
 class MasterTagFormInput(AdminActionInput):
     name: Annotated[str, Field(min_length=1, max_length=100)]
+
+
+class MasterTagBatchChange(AdminActionInput):
+    model_config = ConfigDict(str_strip_whitespace=False)
+
+    library_id: OpaqueId
+    tag_id: OpaqueId
+    expected_name: Annotated[str, Field(min_length=1, max_length=100)]
+    new_name: Annotated[str, Field(min_length=1, max_length=100)] | None = None
+
+
+class MasterTagBatchInput(AdminActionInput):
+    operation: Literal["rename", "delete"]
+    changes: tuple[MasterTagBatchChange, ...] = Field(min_length=1, max_length=200)
+    confirm_delete: bool = False
+
+    @model_validator(mode="after")
+    def require_explicit_distinct_changes(self) -> Self:
+        if len({(item.library_id, item.tag_id) for item in self.changes}) != len(self.changes):
+            raise ValueError("Each Tag may appear only once in a batch.")
+        if self.operation == "delete":
+            if not self.confirm_delete or any(item.new_name is not None for item in self.changes):
+                raise ValueError("Tag deletion requires confirmation and no replacement names.")
+        elif any(item.new_name is None for item in self.changes):
+            raise ValueError("Every renamed Tag requires a replacement name.")
+        return self
 
 
 class TagFormInput(MasterTagFormInput):
@@ -235,6 +278,8 @@ __all__ = [
     "RevokeAgentCredentialInput",
     "TagFormInput",
     "MasterTagFormInput",
+    "MasterTagBatchChange",
+    "MasterTagBatchInput",
     "PageTagFormInput",
     "MasterPageTagFormInput",
     "MasterRestoreArchiveFormInput",

@@ -623,6 +623,7 @@ def test_master_rotation_rechecks_expiry_after_acquiring_write_transaction(
         )
         assert current is not None
         expires_at = current.expires_at
+        assert expires_at is not None
     observed_time = [expires_at - 1]
     late_service = AdminActionService(engine, clock=lambda: observed_time[0])
     original_transaction = immediate_transaction

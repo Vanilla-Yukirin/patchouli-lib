@@ -14,7 +14,7 @@ from patchouli_lib.auth.service import utc_microseconds
 from patchouli_lib.content.file_set_service import FileSetPreconditionFailedError
 from patchouli_lib.content.page_lifecycle_receipts import validate_library_lifecycle_receipt
 from patchouli_lib.content.page_lifecycle_schemas import (
-    LIBRARY_LIFECYCLE_REVISION,
+    LIBRARY_LIFECYCLE_REVISIONS,
     LibraryPageLifecycleBody,
     PageLifecycleCommand,
     lifecycle_fingerprint,
@@ -56,7 +56,7 @@ class CallerPageLifecycleService:
             raise RuntimeError("Caller lifecycle requires a concrete outer write transaction.")
         with self._connection.begin_nested():
             schema_revision = raw.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            if schema_revision != LIBRARY_LIFECYCLE_REVISION:
+            if schema_revision not in LIBRARY_LIFECYCLE_REVISIONS:
                 raise RuntimeError("Library lifecycle behavior version is unavailable.")
             now = self._clock()
             if type(now) is not int or now < 0:

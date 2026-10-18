@@ -421,7 +421,7 @@ class FileSetReadService:
             or current_credential.revoked_at is not None
             or current_credential.rotated_at is not None
             or now < current_credential.created_at
-            or now >= current_credential.expires_at
+            or (current_credential.expires_at is not None and now >= current_credential.expires_at)
         ):
             raise FileSetReadAuthenticationError
         return current, now
