@@ -31,7 +31,6 @@ TICKET_SCRIPT = """
     submit.disabled = true;
     result.textContent = form.dataset.loading;
     drawer.showModal();
-    const requestStarted = performance.now();
     try {
       const response = await fetch(form.action, {
         method: 'POST', body: new URLSearchParams(new FormData(form)),
@@ -40,7 +39,7 @@ TICKET_SCRIPT = """
       result.innerHTML = await response.text();
       if (response.ok) {
         const expiry = result.querySelector('[data-ticket-expires]');
-        expiryDeadline = requestStarted + Number(expiry.dataset.remainingMs);
+        expiryDeadline = performance.now() + Number(expiry.dataset.remainingMs);
         updateExpiry();
         expiryTimer = setInterval(updateExpiry, 1000);
       }
