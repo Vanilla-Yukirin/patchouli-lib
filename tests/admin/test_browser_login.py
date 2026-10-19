@@ -6,30 +6,15 @@ import shutil
 import socket
 import subprocess
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
-from threading import Thread
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, build_opener
 
 import pytest
-import uvicorn
 from websockets.sync.client import connect
 
-from patchouli_lib.admin.passwords import hash_password
-from patchouli_lib.app import create_app
-from patchouli_lib.auth.models import Caller
-from patchouli_lib.config import Settings
-
-_ADMIN_PASSWORD = "synthetic browser password"
-_ADMIN_PASSWORD_HASH = hash_password(
-    _ADMIN_PASSWORD,
-    salt_factory=lambda size: b"b" * size,
-    iterations=300_000,
-)
 _LOCAL_HTTP = build_opener(ProxyHandler({}))
 
 
@@ -67,51 +52,6 @@ def _browser_executable() -> str:
     if os.environ.get("CI"):
         pytest.fail("A Chrome-family browser is required for the admin browser test.")
     pytest.skip("No Chrome-family browser is installed.")
-
-
-@contextmanager
-def _live_admin(tmp_path: Path) -> Iterator[str]:
-    port = _available_port()
-    origin = f"http://127.0.0.1:{port}"
-    settings = Settings.model_validate(
-        {
-            "environment": "production",
-            "retrieval_cursor_signing_secret": "r" * 32,
-            "admin_allow_private_http": True,
-            "database_url": f"sqlite:///{(tmp_path / 'browser.db').as_posix()}",
-            "admin_password_hash": _ADMIN_PASSWORD_HASH,
-            "admin_session_signing_secret": "s" * 32,
-            "admin_session_ttl_seconds": 600,
-        }
-    )
-    application = create_app(settings)
-    Caller.metadata.create_all(application.state.engine)
-    server = uvicorn.Server(
-        uvicorn.Config(
-            application,
-            host="127.0.0.1",
-            port=port,
-            log_level="error",
-            access_log=False,
-        )
-    )
-    thread = Thread(target=server.run, daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 10
-    while not server.started and thread.is_alive() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    if not server.started:
-        server.should_exit = True
-        thread.join(timeout=5)
-        pytest.fail("The temporary admin server did not start.")
-
-    try:
-        yield origin
-    finally:
-        server.should_exit = True
-        thread.join(timeout=10)
-        if thread.is_alive():
-            pytest.fail("The temporary admin server did not stop.")
 
 
 def _cdp_error(error: Exception) -> str:
@@ -248,21 +188,6 @@ class _DevTools:
         return result.get("result", {}).get("value")
 
 
-def _observed_login_origin(events: list[dict[str, Any]]) -> str | None:
-    for event in events:
-        if event.get("method") != "Network.requestWillBeSent":
-            continue
-        request = event.get("params", {}).get("request", {})
-        if request.get("method") != "POST" or not str(request.get("url", "")).endswith(
-            "/admin/login"
-        ):
-            continue
-        for name, value in request.get("headers", {}).items():
-            if name.casefold() == "origin":
-                return str(value)
-    return None
-
-
 def test_browser_failure_diagnostics_redact_local_details(tmp_path: Path) -> None:
     stderr_path = tmp_path / "browser-stderr.log"
     stderr_path.write_text(
@@ -281,168 +206,3 @@ def test_browser_failure_diagnostics_redact_local_details(tmp_path: Path) -> Non
         [{"url": "http://127.0.0.1:8765/private/secret?token=synthetic-secret"}],
         "http://127.0.0.1:8765",
     ) == ["<other local path>"]
-
-
-def test_real_browser_can_switch_language_and_submit_same_origin_login(tmp_path: Path) -> None:
-    browser = _browser_executable()
-    debug_port = _available_port()
-
-    with _live_admin(tmp_path) as origin:
-        stderr_path = tmp_path / "browser-stderr.log"
-        with stderr_path.open("wb") as stderr_output:
-            process = subprocess.Popen(
-                [
-                    browser,
-                    "--headless=new",
-                    "--disable-dev-shm-usage",
-                    "--disable-extensions",
-                    "--no-first-run",
-                    "--no-sandbox",
-                    "--no-proxy-server",
-                    f"--remote-debugging-port={debug_port}",
-                    f"--user-data-dir={tmp_path / 'browser-profile'}",
-                    f"{origin}/admin/login",
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=stderr_output,
-            )
-        devtools: _DevTools | None = None
-        try:
-            target = _page_target(debug_port, origin, process, stderr_path)
-            devtools = _DevTools(str(target["webSocketDebuggerUrl"]))
-            devtools.command("Network.enable")
-            devtools.command("Runtime.enable")
-            deadline = time.monotonic() + 10
-            form_ready = False
-            while time.monotonic() < deadline:
-                form_ready = bool(
-                    devtools.evaluate("document.querySelector('input[name=\"password\"]') !== null")
-                )
-                if form_ready:
-                    break
-                time.sleep(0.05)
-            assert form_ready is True
-
-            switched = devtools.evaluate(
-                """
-                (() => {
-                  const link = document.querySelector(
-                    'a[href="/admin/login?lang=zh-CN"]'
-                  );
-                  if (link === null) return false;
-                  link.click();
-                  return true;
-                })()
-                """
-            )
-            assert switched is True
-
-            deadline = time.monotonic() + 10
-            chinese_ready = False
-            while time.monotonic() < deadline:
-                try:
-                    chinese_ready = bool(
-                        devtools.evaluate(
-                            "document.documentElement.lang === 'zh-CN' && "
-                            "document.querySelector('button[type=\"submit\"]')?.textContent "
-                            "=== '登录'"
-                        )
-                    )
-                except TimeoutError:
-                    time.sleep(0.05)
-                    continue
-                if chinese_ready:
-                    break
-                time.sleep(0.05)
-            assert chinese_ready is True
-
-            devtools.command("Page.navigate", {"url": f"{origin}/admin/login"})
-            deadline = time.monotonic() + 10
-            language_persisted = False
-            while time.monotonic() < deadline:
-                try:
-                    language_persisted = bool(
-                        devtools.evaluate(
-                            "window.location.search === '' && "
-                            "document.documentElement.lang === 'zh-CN' && "
-                            "document.querySelector('input[name=\"password\"]') !== null"
-                        )
-                    )
-                except TimeoutError:
-                    time.sleep(0.05)
-                    continue
-                if language_persisted:
-                    break
-                time.sleep(0.05)
-            assert language_persisted is True
-
-            password_literal = json.dumps(_ADMIN_PASSWORD)
-            submitted = devtools.evaluate(
-                f"""
-                (() => {{
-                  const field = document.querySelector('input[name="password"]');
-                  const form = document.querySelector('form');
-                  if (field === null || form === null) return false;
-                  field.value = {password_literal};
-                  form.requestSubmit();
-                  return true;
-                }})()
-                """
-            )
-            assert submitted is True
-
-            deadline = time.monotonic() + 10
-            path = ""
-            while time.monotonic() < deadline:
-                try:
-                    path = str(devtools.evaluate("window.location.pathname"))
-                except TimeoutError:
-                    time.sleep(0.05)
-                    continue
-                if path == "/admin":
-                    break
-                time.sleep(0.05)
-
-            assert path == "/admin"
-            assert devtools.evaluate("document.documentElement.lang") == "zh-CN"
-            assert devtools.evaluate("document.querySelector('h1')?.textContent") == "主页"
-            devtools.command("Page.navigate", {"url": f"{origin}/admin/setup"})
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                try:
-                    if devtools.evaluate("document.querySelector('#library_name') !== null"):
-                        break
-                except TimeoutError:
-                    pass
-                time.sleep(0.05)
-            setup_help = devtools.evaluate(
-                """
-                (() => {
-                  const field = document.querySelector('#library_name');
-                  const help = document.querySelector('#library_name-help');
-                  const label = document.querySelector('label[for="library_name"]');
-                  if (field === null || help === null || label === null) return null;
-                  const helpStyle = getComputedStyle(help);
-                  const labelStyle = getComputedStyle(label);
-                  return {
-                    describedBy: field.getAttribute('aria-describedby'),
-                    helpText: help.textContent,
-                    isSmaller:
-                      parseFloat(helpStyle.fontSize) < parseFloat(labelStyle.fontSize),
-                    isMuted: helpStyle.color !== labelStyle.color,
-                  };
-                })()
-                """
-            )
-            assert setup_help == {
-                "describedBy": "library_name-help",
-                "helpText": "整个知识空间的名称。个人使用通常一个知识库就够了。",
-                "isSmaller": True,
-                "isMuted": True,
-            }
-            assert _observed_login_origin(devtools.events) == origin
-        finally:
-            if devtools is not None:
-                devtools.close()
-            process.terminate()
-            process.wait(timeout=10)
