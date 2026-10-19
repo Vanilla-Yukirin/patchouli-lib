@@ -91,6 +91,11 @@ def test_tag_management_selection_filter_rename_delete(setup_browser: _Browser) 
         "document.body.textContent.includes('技术归档')",
         description="renaming a selected tag",
     )
+    _wait(
+        browser.tools,
+        "document.querySelector('form.tag-management [role=status]').textContent.length > 0",
+        description="the renamed page's tag controls",
+    )
     assert (
         browser.tools.evaluate(f"""(() => {{
       const row = document.querySelector('[data-library-id="{first}"]');

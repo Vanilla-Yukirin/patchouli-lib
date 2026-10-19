@@ -13,10 +13,11 @@ TICKET_SCRIPT = """
   const result = document.getElementById('ticket-result');
   const submit = form.querySelector('button');
   let expiryTimer;
+  let expiryDeadline;
   function updateExpiry() {
     const expiry = result.querySelector('[data-ticket-expires]');
     if (!expiry) return;
-    const seconds = Math.max(0, Math.ceil((Date.parse(expiry.dateTime) - Date.now()) / 1000));
+    const seconds = Math.max(0, Math.ceil((expiryDeadline - performance.now()) / 1000));
     const remaining = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
     expiry.textContent = seconds ? remaining
       : form.dataset.expired;
@@ -30,6 +31,7 @@ TICKET_SCRIPT = """
     submit.disabled = true;
     result.textContent = form.dataset.loading;
     drawer.showModal();
+    const requestStarted = performance.now();
     try {
       const response = await fetch(form.action, {
         method: 'POST', body: new URLSearchParams(new FormData(form)),
@@ -37,6 +39,8 @@ TICKET_SCRIPT = """
       });
       result.innerHTML = await response.text();
       if (response.ok) {
+        const expiry = result.querySelector('[data-ticket-expires]');
+        expiryDeadline = requestStarted + Number(expiry.dataset.remainingMs);
         updateExpiry();
         expiryTimer = setInterval(updateExpiry, 1000);
       }
@@ -96,6 +100,7 @@ def onboarding_ticket_page(
     if code is not None:
         assert expires_at is not None
         expiry = datetime.fromtimestamp(expires_at / 1_000_000, UTC).isoformat()
+        remaining_ms = max(0, (expires_at - int(datetime.now(UTC).timestamp() * 1_000_000)) // 1000)
         prompt = (
             f"请接入 PatchouliLib：{origin}\n接入小票：{code}\n"
             f"到期时间：{expiry}（只能兑换一次）。\n"
@@ -134,7 +139,8 @@ def onboarding_ticket_page(
         manual = "请手动复制选中的文本" if chinese else "Copy the selected text manually"
         body += (
             f"<p>{'剩余时间' if chinese else 'Time left'}: "
-            f'<time data-ticket-expires datetime="{expiry}" title="{expiry}">5:00</time></p>'
+            f'<time data-ticket-expires data-remaining-ms="{remaining_ms}" '
+            f'datetime="{expiry}" title="{expiry}">5:00</time></p>'
         )
         for key, value, label in (
             ("ticket-code", code, "复制小票" if chinese else "Copy ticket"),

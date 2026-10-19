@@ -1252,8 +1252,10 @@ def create_admin_router(
         )
 
     @router.get("/onboarding-tickets")
-    def onboarding_ticket_form() -> Response:
-        return redirect("/admin/agents")
+    def onboarding_ticket_form(request: Request) -> Response:
+        response = redirect("/admin/agents")
+        remember_requested_locale(response, request)
+        return response
 
     @router.post("/onboarding-tickets")
     async def create_onboarding_ticket(request: Request) -> Response:
