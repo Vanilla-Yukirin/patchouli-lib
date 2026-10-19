@@ -373,6 +373,7 @@ def test_real_browser_master_onboarding_to_cross_library_agent_http(
         "SKILL.md",
         "references/http.md",
         "references/local-token.md",
+        "references/onboarding-ticket.md",
     }
     for entry in entries:
         assert _http(browser, entry["href"])[0] == 401
