@@ -46,6 +46,7 @@ from patchouli_lib.backup.manifest import (
     MASTER_OCCURRENCE_SCHEMA_REVISION,
     MASTER_PAGE_DELETE_SCHEMA_REVISION,
     OCCURRENCE_SCHEMA_REVISION,
+    ONBOARDING_TICKETS_SCHEMA_REVISION,
     OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
     PAGE_MOVE_SCHEMA_REVISION,
     PAGE_TITLE_SCHEMA_REVISION,
@@ -831,6 +832,17 @@ _EXPECTED_SQL_HASHES_0032: Final = _EXPECTED_SQL_HASHES_0031 | {
         "729e7f45dac189e24268c5ba294a1c9966fd2caaa62fe0b7ecf761a2c7205442"
     ),
 }
+_EXPECTED_SQL_HASHES_0033: Final = _EXPECTED_SQL_HASHES_0032 | {
+    ("table", "auth_onboarding_tickets"): (
+        "02c1631ed40617dca62754ad9342953bd98f377853071d4e3c34e05f238df5bb"
+    ),
+    ("trigger", "trg_auth_onboarding_tickets_consume_once"): (
+        "048b5033d10fdaa1b57280b75df95b53938053635a802ddcf95c45d0413f95ba"
+    ),
+    ("trigger", "trg_auth_onboarding_tickets_no_delete"): (
+        "570bd31bef461495052ebe12223e2f935d082e25b5f62c60f817428b09f76563"
+    ),
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
     PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
@@ -858,6 +870,7 @@ _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0029,
     OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0031,
     LIBRARY_SCOPES_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0032,
+    ONBOARDING_TICKETS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0033,
 }
 _FILE_SET_REVISIONS: Final = frozenset(
     {
@@ -880,6 +893,7 @@ _FILE_SET_REVISIONS: Final = frozenset(
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }
 )
@@ -898,6 +912,7 @@ _MASTER_LIFECYCLE_REVISIONS: Final = frozenset(
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }
 )
@@ -910,6 +925,7 @@ _MASTER_OCCURRENCE_REVISIONS: Final = frozenset(
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }
 )
@@ -1406,6 +1422,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }:
         for row in connection.execute(
@@ -1509,6 +1526,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
                         CALLER_PAGE_MOVE_SCHEMA_REVISION,
                         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
                         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+                        ONBOARDING_TICKETS_SCHEMA_REVISION,
                         LIBRARY_SCOPES_SCHEMA_REVISION,
                     }
                 )
@@ -1544,6 +1562,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
                 in {
                     LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
                     OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+                    ONBOARDING_TICKETS_SCHEMA_REVISION,
                     LIBRARY_SCOPES_SCHEMA_REVISION,
                 }
                 else route
@@ -1599,6 +1618,7 @@ def _require_lifecycle_graph(connection: sqlite3.Connection, schema_revision: st
             CALLER_PAGE_MOVE_SCHEMA_REVISION,
             LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
             OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+            ONBOARDING_TICKETS_SCHEMA_REVISION,
             LIBRARY_SCOPES_SCHEMA_REVISION,
         }:
             _page_timeline(connection, schema_revision, key[0], key[1])
@@ -2007,6 +2027,7 @@ def _require_master_audit(connection: sqlite3.Connection, schema_revision: str) 
                 CALLER_PAGE_MOVE_SCHEMA_REVISION,
                 LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
                 OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+                ONBOARDING_TICKETS_SCHEMA_REVISION,
                 LIBRARY_SCOPES_SCHEMA_REVISION,
             }:
                 raise BackupDatabaseError
@@ -2055,6 +2076,7 @@ def _require_master_audit(connection: sqlite3.Connection, schema_revision: str) 
                 CALLER_PAGE_MOVE_SCHEMA_REVISION,
                 LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
                 OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+                ONBOARDING_TICKETS_SCHEMA_REVISION,
                 LIBRARY_SCOPES_SCHEMA_REVISION,
             }:
                 raise BackupDatabaseError
@@ -2089,6 +2111,7 @@ def _require_master_audit(connection: sqlite3.Connection, schema_revision: str) 
                 CALLER_PAGE_MOVE_SCHEMA_REVISION,
                 LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
                 OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+                ONBOARDING_TICKETS_SCHEMA_REVISION,
                 LIBRARY_SCOPES_SCHEMA_REVISION,
             }
             and action == "content.page.title.edit"
@@ -2170,8 +2193,79 @@ def _require_actor_home_graph(connection: sqlite3.Connection, schema_revision: s
         raise BackupDatabaseError
 
 
+def _require_onboarding_tickets(connection: sqlite3.Connection) -> None:
+    """Validate historical ticket records without comparing expiry to wall time."""
+    orphaned_creation = connection.execute(
+        "SELECT 1 FROM admin_master_audit_events a WHERE a.action = 'auth.onboarding.create' "
+        "AND NOT EXISTS (SELECT 1 FROM auth_onboarding_tickets t "
+        "WHERE a.target_type = 'onboarding_ticket' AND t.id = a.target_id "
+        "AND t.identity_id = a.identity_id AND t.session_generation = a.session_generation "
+        "AND t.session_fingerprint = a.session_fingerprint AND t.created_at = a.occurred_at) "
+        "LIMIT 1"
+    ).fetchone()
+    if orphaned_creation is not None:
+        raise BackupDatabaseError
+    for row in connection.execute(
+        "SELECT id, code_hash, identity_id, session_generation, session_fingerprint, "
+        "created_at, expires_at, consumed_at, credential_id FROM auth_onboarding_tickets"
+    ):
+        ticket_id, digest, identity, generation, fingerprint, created, expires, consumed, key = row
+        if (
+            not isinstance(ticket_id, str)
+            or len(ticket_id) != 32
+            or any(char not in "0123456789abcdef" for char in ticket_id)
+            or not isinstance(digest, bytes)
+            or len(digest) != 32
+            or not isinstance(identity, str)
+            or len(identity) != 32
+            or any(char not in "0123456789abcdef" for char in identity)
+            or type(generation) is not int
+            or generation < 1
+            or not isinstance(fingerprint, bytes)
+            or len(fingerprint) != 32
+            or type(created) is not int
+            or created < 0
+            or type(expires) is not int
+            or expires != created + 300_000_000
+        ):
+            raise BackupDatabaseError
+        creation = connection.execute(
+            "SELECT count(*) FROM admin_master_audit_events WHERE identity_id = ? "
+            "AND session_generation = ? AND session_fingerprint = ? "
+            "AND action = 'auth.onboarding.create' AND target_type = 'onboarding_ticket' "
+            "AND target_id = ? AND occurred_at = ?",
+            (identity, generation, fingerprint, ticket_id, created),
+        ).fetchone()
+        if creation != (1,):
+            raise BackupDatabaseError
+        if consumed is None and key is None:
+            continue
+        if (
+            type(consumed) is not int
+            or not created <= consumed < expires
+            or not isinstance(key, str)
+            or len(key) != 32
+            or any(char not in "0123456789abcdef" for char in key)
+        ):
+            raise BackupDatabaseError
+        issued = connection.execute(
+            "SELECT 1 FROM auth_credentials k JOIN auth_callers c "
+            "ON c.id = k.caller_id AND c.library_id = k.library_id "
+            "JOIN admin_master_audit_events a ON a.target_id = c.id "
+            "WHERE k.id = ? AND c.kind = 'agent' AND k.created_at = ? "
+            "AND a.identity_id = ? AND a.session_generation = ? "
+            "AND a.session_fingerprint = ? AND a.action = 'auth.agent.provision' "
+            "AND a.target_type = 'caller' AND a.occurred_at = ? LIMIT 1",
+            (key, consumed, identity, generation, fingerprint, consumed),
+        ).fetchone()
+        if issued is None:
+            raise BackupDatabaseError
+
+
 def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) -> None:
-    if schema_revision == LIBRARY_SCOPES_SCHEMA_REVISION:
+    if schema_revision == ONBOARDING_TICKETS_SCHEMA_REVISION:
+        _require_onboarding_tickets(connection)
+    if schema_revision in {LIBRARY_SCOPES_SCHEMA_REVISION, ONBOARDING_TICKETS_SCHEMA_REVISION}:
         for read_mode, write_mode, scope_revision in connection.execute(
             "SELECT read_mode, write_mode, scope_revision FROM auth_credential_library_policies"
         ):
@@ -2234,6 +2328,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }:
         invalid_library_policies = _one_integer(
@@ -2266,6 +2361,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }:
         _require_agent_token_values(connection)
@@ -2287,6 +2383,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }:
         _require_master_identity(connection)
@@ -2307,6 +2404,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }:
         _require_actor_home_graph(connection, schema_revision)
@@ -2326,6 +2424,7 @@ def _require_auth_graph(connection: sqlite3.Connection, schema_revision: str) ->
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }:
         _require_master_audit(connection, schema_revision)
@@ -2454,6 +2553,7 @@ def _require_lifecycle_replay(
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }:
         state = _page_timeline(connection, schema_revision, library_id, page_uid).exact_state(
@@ -2598,6 +2698,7 @@ def _file_set_valid_current_etags(
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }:
         for (changed_at,) in connection.execute(
@@ -2674,6 +2775,7 @@ def _require_file_set_replay(
                     CALLER_PAGE_MOVE_SCHEMA_REVISION,
                     LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
                     OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+                    ONBOARDING_TICKETS_SCHEMA_REVISION,
                     LIBRARY_SCOPES_SCHEMA_REVISION,
                 }
             ),
@@ -2703,6 +2805,7 @@ def _require_file_set_replay(
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }:
         timeline = _page_timeline(connection, schema_revision, library_id, page_uid)
@@ -2854,6 +2957,7 @@ def _page_title_at(
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }:
         return current_title
@@ -2870,6 +2974,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
     if schema_revision in {
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }:
         try:
@@ -2938,6 +3043,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
             if schema_revision not in {
                 LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
                 OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+                ONBOARDING_TICKETS_SCHEMA_REVISION,
                 LIBRARY_SCOPES_SCHEMA_REVISION,
             }:
                 raise BackupDatabaseError
@@ -2949,6 +3055,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
                 CALLER_PAGE_MOVE_SCHEMA_REVISION,
                 LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
                 OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+                ONBOARDING_TICKETS_SCHEMA_REVISION,
                 LIBRARY_SCOPES_SCHEMA_REVISION,
             }:
                 raise BackupDatabaseError
@@ -2986,6 +3093,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
                             CALLER_PAGE_MOVE_SCHEMA_REVISION,
                             LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
                             OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+                            ONBOARDING_TICKETS_SCHEMA_REVISION,
                             LIBRARY_SCOPES_SCHEMA_REVISION,
                         }
                     ),
@@ -3010,6 +3118,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
                 CALLER_PAGE_MOVE_SCHEMA_REVISION,
                 LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
                 OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+                ONBOARDING_TICKETS_SCHEMA_REVISION,
                 LIBRARY_SCOPES_SCHEMA_REVISION,
             }:
                 state = _page_timeline(
@@ -3128,6 +3237,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
                         CALLER_PAGE_MOVE_SCHEMA_REVISION,
                         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
                         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+                        ONBOARDING_TICKETS_SCHEMA_REVISION,
                         LIBRARY_SCOPES_SCHEMA_REVISION,
                     }
                 ),
@@ -3153,6 +3263,7 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
             CALLER_PAGE_MOVE_SCHEMA_REVISION,
             LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
             OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+            ONBOARDING_TICKETS_SCHEMA_REVISION,
             LIBRARY_SCOPES_SCHEMA_REVISION,
         }:
             state = _page_timeline(connection, schema_revision, library_id, row[0]).exact_state(
@@ -3414,6 +3525,7 @@ def _require_page_moves(
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }:
         _require_caller_move_graph(connection, schema_revision)
@@ -3476,6 +3588,7 @@ def _validate_connection(
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }:
         _require_library_descriptions(connection)
@@ -3497,6 +3610,7 @@ def _validate_connection(
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }:
         _require_page_moves(connection, schema_revision=schema_revision)
@@ -3507,6 +3621,7 @@ def _validate_connection(
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }:
         _require_master_file_set_receipts(connection)
@@ -3520,6 +3635,7 @@ def _validate_connection(
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }:
         _require_request_log_graph(connection)
@@ -3532,6 +3648,7 @@ def _validate_connection(
         CALLER_PAGE_MOVE_SCHEMA_REVISION,
         LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
         OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+        ONBOARDING_TICKETS_SCHEMA_REVISION,
         LIBRARY_SCOPES_SCHEMA_REVISION,
     }:
         _require_search_projection_reset(connection)

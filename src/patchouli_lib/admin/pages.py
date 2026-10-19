@@ -302,7 +302,38 @@ fieldset input { width: auto; }
 .scope-options .scope-library { padding: .5rem; margin: 0; border-radius: .35rem; }
 .scope-options .scope-library:hover { background: #eef4ef; }
 .scope-library span { min-width: 0; overflow-wrap: anywhere; }
-.scope-library input { flex-shrink: 0; }
+.scope-library input[type="checkbox"] {
+  appearance: none; display: inline-grid; place-content: center;
+  flex-shrink: 0; width: 1.2rem; height: 1.2rem; padding: 0;
+  margin: .15rem 0 0; border: 2px solid #87988b; border-radius: .2rem;
+  background: #fff; color: #fff; cursor: pointer;
+}
+.scope-library input[type="checkbox"]::before {
+  content: "✓"; font-size: 1rem; font-weight: 750; line-height: 1;
+  visibility: hidden;
+}
+.scope-library input[type="checkbox"]:checked { background: #2f6845; border-color: #2f6845; }
+.scope-library input[type="checkbox"]:checked::before { visibility: visible; }
+.scope-library input[type="checkbox"]:focus-visible {
+  outline: 3px solid #376bc3; outline-offset: 3px;
+}
+.scope-library:has(input:checked) { background: #eef4ef; }
+.scope-card:has(input[type="radio"][value="exclude"]:checked) .scope-library input::before {
+  content: "×";
+}
+.scope-card:has(input[type="radio"][value="exclude"]:checked) .scope-library input:checked {
+  background: #a52d35; border-color: #a52d35;
+}
+.scope-card:has(input[type="radio"][value="exclude"]:checked) .scope-library:has(input:checked) {
+  background: #fff0f0;
+}
+@media (forced-colors: active) {
+  .scope-library input[type="checkbox"] { forced-color-adjust: none; background: Canvas;
+    border-color: ButtonText; color: CanvasText; }
+  .scope-card .scope-library input[type="checkbox"]:checked { background: Highlight !important;
+    border-color: Highlight !important; color: HighlightText; }
+  .scope-library input[type="checkbox"]:focus-visible { outline-color: Highlight; }
+}
 .scope-options .scope-library[hidden] { display: none; }
 .scope-help, .scope-summary { font-size: .9rem; overflow-wrap: anywhere; }
 button {
@@ -822,7 +853,28 @@ _ZH_CN: dict[str, str] = {
 }
 
 
+_CREDENTIAL_LABELS: dict[str, tuple[str, str]] = {
+    "Identities": ("Credential management", "凭据管理"),
+    "Agent name": ("Credential name", "凭据名称"),
+    "Agent description": ("Credential description", "凭据说明"),
+    "Edit Agent": ("Edit credential identity", "编辑凭据身份"),
+    "Save Agent": ("Save credential identity", "保存凭据身份"),
+    "Agent / device": ("Credential identity", "凭据身份"),
+    "No identities yet.": ("No credentials yet.", "暂无凭据。"),
+    "Create Agent credential": ("Create credential", "创建凭据"),
+    "Provision an Agent": ("Create credential", "创建凭据"),
+    "Agent credential created": ("Credential created", "凭据已创建"),
+    "Agent credential rotated": ("Credential rotated", "凭据已轮换"),
+    "Agent credential revoked": ("Credential revoked", "凭据已撤销"),
+    "Disable this Agent identity": ("Disable this credential identity", "停用此凭据身份"),
+}
+
+
 def localize(locale: AdminLocale, text: str) -> str:
+    # Keep historical message keys and API field names stable while presenting
+    # the object users actually create: a credential, not an Agent process.
+    if text in _CREDENTIAL_LABELS:
+        return _CREDENTIAL_LABELS[text][locale == "zh-CN"]
     if locale == "zh-CN":
         return _ZH_CN.get(text, text)
     return text
@@ -1903,9 +1955,7 @@ def _library_scope_fields(
             else f"{action.title()} scope"
         )
         include_label = "仅选定知识库" if locale == "zh-CN" else "Only selected Libraries"
-        exclude_label = (
-            "所有知识库（可排除）" if locale == "zh-CN" else "All Libraries (with exclusions)"
-        )
+        exclude_label = "所有知识库" if locale == "zh-CN" else "All Libraries"
         include_summary = (
             "仅允许勾选的知识库；未选即无权限。切换模式后，勾选项作为允许项，请核对后保存。"
             if locale == "zh-CN"
@@ -1913,9 +1963,9 @@ def _library_scope_fields(
             "After switching modes, checked items become allowed; review before saving."
         )
         exclude_summary = (
-            "允许所有现在和未来的知识库；勾选项将被排除。切换模式后，请核对排除项再保存。"
+            "允许所有现在和未来的知识库；标 × 的知识库将被排除。切换模式后，请核对排除项再保存。"
             if locale == "zh-CN"
-            else "Allow current and future Libraries; checked items are excluded. "
+            else "Allow current and future Libraries; items marked × are excluded. "
             "After switching modes, review exclusions before saving."
         )
         options = "".join(
@@ -1987,7 +2037,7 @@ def agent_grants_page(
         f"{notice}{form}"
         f'<p><a href="/admin/libraries/{escape(view.library_id, quote=True)}/callers/'
         f'{escape(view.id, quote=True)}">'
-        f"{'返回 Agent 详情' if locale == 'zh-CN' else 'Back to Agent details'}</a></p>"
+        f"{'返回凭据详情' if locale == 'zh-CN' else 'Back to credential details'}</a></p>"
     )
     return _browser_document(
         csrf_token,
@@ -2044,10 +2094,10 @@ def callers_page(
             )
         )
         ttl_field = _credential_lifetime(locale)
-        submit_label = "创建 Agent 和 Token" if locale == "zh-CN" else "Create Agent and Token"
+        submit_label = "创建凭据" if locale == "zh-CN" else "Create credential"
         master_form = (
             '<section class="card">'
-            f"<h2>{'创建 Agent' if locale == 'zh-CN' else 'Create Agent'}</h2>"
+            f"<h2>{submit_label}</h2>"
             f'<p class="section-help">{guidance}</p>'
             '<form method="post" action="/admin/agents/create" autocomplete="off">'
             f"{_csrf(escape(csrf_token, quote=True))}"
@@ -2062,9 +2112,9 @@ def callers_page(
         master_form = (
             '<section class="card"><p>'
             + (
-                "请先创建一个知识库，再创建设备与身份。"
+                "请先创建一个知识库，再创建凭据。"
                 if locale == "zh-CN"
-                else "Create a Library before creating an Agent identity."
+                else "Create a Library before creating a credential."
             )
             + '</p><a class="action-link" href="/admin/libraries">'
             + localize(locale, "Libraries")
@@ -2079,13 +2129,29 @@ def callers_page(
         )
     )
     notice = "" if message is None else _notice(localize(locale, message), error=True)
+    ticket_link = (
+        '<section class="card"><h2>'
+        + ("接入小票" if locale == "zh-CN" else "Onboarding ticket")
+        + "</h2><p>"
+        + (
+            "把 5 分钟内有效的一次性小票交给 Agent，让它在本机兑换并保存凭据。"
+            if locale == "zh-CN"
+            else "Give an Agent a single-use ticket valid for 5 minutes to redeem and "
+            "save a credential locally."
+        )
+        + '</p><a class="action-link" href="/admin/onboarding-tickets">'
+        + ("生成接入小票" if locale == "zh-CN" else "Generate onboarding ticket")
+        + "</a></section>"
+        if allow_master_actions
+        else ""
+    )
     content = (
         f"{_header(escape(csrf_token, quote=True), locale, switch_path='/admin/agents')}"
         '<div class="admin-shell">'
         f"{_sidebar(locale, current='agents')}"
         f"<main><h1>{localize(locale, 'Identities')}</h1>"
         f'<p class="section-help">{credential_notice}</p>'
-        f"{notice}{master_form}{body}</main></div>"
+        f"{notice}{ticket_link}{master_form}{body}</main></div>"
     )
     return _document(
         localize(locale, "Identities"),
@@ -2107,9 +2173,9 @@ def credential_page(
     localized_heading = localize(locale, heading)
     credential_notice = (
         (
-            "此值可在 Agent 详情页经主会话再次显示。请勿把它放入网址、截图、日志或聊天。"
+            "此值可在凭据详情页经主会话再次显示。请勿把它放入网址、截图、日志或聊天。"
             if locale == "zh-CN"
-            else "This value can be revealed again from Agent details with a master session. "
+            else "This value can be revealed again from credential details with a master session. "
             "Keep it out of URLs, screenshots, logs, and chat."
         )
         if recoverable

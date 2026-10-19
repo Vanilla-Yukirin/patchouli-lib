@@ -134,6 +134,7 @@ def validate_master_file_set_receipt(
         (LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,),
         ("20261018_0031",),
         ("20261019_0032",),
+        ("20261019_0033",),
     }:
         try:
             timeline = load_page_state_timeline(

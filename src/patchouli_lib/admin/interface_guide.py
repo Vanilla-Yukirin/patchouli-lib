@@ -25,6 +25,20 @@ GuideLocale = Literal["en", "zh-CN"]
 _API_ENDPOINTS = (
     ("GET", "/api/v1/capabilities", "Service capabilities", "服务能力", "always"),
     (
+        "POST",
+        "/api/v1/onboarding/libraries",
+        "List Library names and IDs using a valid onboarding ticket",
+        "使用有效接入小票查询知识库名称与 ID",
+        "always",
+    ),
+    (
+        "POST",
+        "/api/v1/onboarding/redeem",
+        "Redeem an onboarding ticket for one ordinary credential",
+        "将接入小票兑换为一份普通凭据",
+        "always",
+    ),
+    (
         "DELETE",
         "/api/v1/libraries/{library_id}/pages/{page_id}",
         "Soft-delete a Page (explicit Library write grant required)",

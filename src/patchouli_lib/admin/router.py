@@ -59,6 +59,7 @@ from patchouli_lib.admin.master_token_store import (
     MasterTokenAlreadyInitialized,
     MasterTokenRepository,
 )
+from patchouli_lib.admin.onboarding_pages import TICKET_SCRIPT, onboarding_ticket_page
 from patchouli_lib.admin.page_move_routes import create_master_page_move_router
 from patchouli_lib.admin.pages import (
     REVEAL_SCRIPT,
@@ -118,6 +119,7 @@ from patchouli_lib.admin.service import (
 from patchouli_lib.admin.session import AdminSession, AdminSessionCodec, MasterAdminSession
 from patchouli_lib.admin.tag_management import TagBatchConflictError
 from patchouli_lib.api.agent_skill_routes import SkillBundle
+from patchouli_lib.auth.onboarding import OnboardingTicketService
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.service import AuthenticationError, AuthorizationError, utc_microseconds
 from patchouli_lib.config import Settings
@@ -1248,6 +1250,71 @@ def create_admin_router(
             status_code=status,
             allow_self_script=True,
         )
+
+    @router.get("/onboarding-tickets")
+    def onboarding_ticket_form(request: Request) -> Response:
+        session = current_session(request)
+        if session is None:
+            return redirect("/admin/login")
+        if not isinstance(session, MasterAdminSession):
+            return forbidden(request, "A master session is required.")
+        response = html(
+            onboarding_ticket_page(session.csrf_token, locale=locale_for(request)),
+            locale=locale_for(request),
+        )
+        response.headers["Referrer-Policy"] = "no-referrer"
+        remember_requested_locale(response, request)
+        return response
+
+    @router.post("/onboarding-tickets")
+    async def create_onboarding_ticket(request: Request) -> Response:
+        locale = locale_for(request)
+        if not _same_origin_submission(request):
+            return forbidden(request)
+        session = current_session(request)
+        if session is None:
+            return html(
+                login_page(locale=locale, message="Sign in again."),
+                locale=locale,
+                status_code=401,
+            )
+        if not isinstance(session, MasterAdminSession):
+            return forbidden(request, "A master session is required.")
+        try:
+            values = await _read_form(request, allowed_fields=frozenset({"csrf_token"}))
+            _require_csrf(values, session)
+            delivered = await run_in_threadpool(
+                OnboardingTicketService(engine).create, master_session=session
+            )
+        except _FormError as exc:
+            status, message = exc.status_code, exc.safe_message
+        except AuthenticationError:
+            status, message = 401, "Sign in again."
+        except Exception:
+            status, message = 500, "The action could not be completed."
+        else:
+            response = html(
+                onboarding_ticket_page(
+                    session.csrf_token,
+                    locale=locale,
+                    code=delivered.code,
+                    expires_at=delivered.expires_at,
+                    origin=str(request.base_url).rstrip("/"),
+                ),
+                locale=locale,
+                allow_self_script=True,
+            )
+            response.headers["Referrer-Policy"] = "no-referrer"
+            return response
+        response = html(
+            onboarding_ticket_page(
+                session.csrf_token, locale=locale, message=localize(locale, message)
+            ),
+            locale=locale,
+            status_code=status,
+        )
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
 
     @router.post("/libraries")
     async def create_library(request: Request) -> Response:
@@ -3109,6 +3176,12 @@ def create_admin_router(
     def tag_management_script() -> Response:
         return PlainTextResponse(
             TAG_MANAGEMENT_SCRIPT, media_type="application/javascript", headers=_SECURITY_HEADERS
+        )
+
+    @router.get("/onboarding-tickets.js")
+    def onboarding_ticket_script() -> Response:
+        return PlainTextResponse(
+            TICKET_SCRIPT, media_type="application/javascript", headers=_SECURITY_HEADERS
         )
 
     router.include_router(

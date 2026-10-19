@@ -239,12 +239,13 @@ Revision，核对标题、正文与引用。不要在成功核验前删除本次
 ## 本机 Python 标准库示例
 
 先把以下代码写进本机的 `patchouli_local.py`，将根地址交由用户通过环境变量设置。
-脚本在没有环境变量时会交互式输入 Token。不要把 Token 或真实地址回传给模型。
+脚本询问非秘密的 Token 变量名，只读取该变量。变量尚未配置时先按本机输入说明
+完成配置；不要把 Token 或真实地址回传给模型。
 
 ```python
-import getpass
 import json
 import os
+import re
 import urllib.request
 from urllib.parse import urlsplit
 
@@ -260,7 +261,12 @@ if (
     or parts.fragment
 ):
     raise SystemExit("PATCHOULI_BASE_URL 必须是服务入口的 origin")
-token = os.environ.get("PATCHOULI_TOKEN") or getpass.getpass("Patchouli device Token: ")
+variable_name = os.environ.get("PATCHOULI_TOKEN_VARIABLE") or input("Token variable name: ").strip()
+if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable_name, re.ASCII) is None:
+    raise SystemExit("Invalid variable name")
+token = os.environ.get(variable_name)
+if not token:
+    raise SystemExit("The selected Token variable is missing; configure it locally first.")
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -286,7 +292,10 @@ print(
         {
             "name": identity["name"],
             "kind": identity["kind"],
+            "credential_id": identity["credential_id"],
+            "expires_at": identity["expires_at"],
             "policy_mode": identity.get("policy_mode", "unknown"),
+            "library_scope": identity.get("library_scope"),
             "library_grants": identity.get("library_grants"),
             "legacy_section_grants": identity["grants"],
             "features": capabilities["features"],

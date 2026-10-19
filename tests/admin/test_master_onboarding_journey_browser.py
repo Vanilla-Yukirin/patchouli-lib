@@ -27,7 +27,10 @@ _FILES = (
 
 
 @pytest.mark.parametrize("setup_browser", ["proof"], indirect=True)
-def test_library_scope_cards_search_switch_clear_and_roundtrip(setup_browser: _Browser) -> None:
+@pytest.mark.parametrize("locale", ["en", "zh-CN"])
+def test_library_scope_cards_search_switch_clear_and_roundtrip(
+    setup_browser: _Browser, locale: str
+) -> None:
     browser = setup_browser
     _submit_setup(browser, proof=True)
     paths = []
@@ -42,12 +45,52 @@ def test_library_scope_cards_search_switch_clear_and_roundtrip(setup_browser: _B
             )
         )
     first, second = (path.rsplit("/", 1)[-1] for path in paths)
-    _navigate(browser, "/admin/agents", "document.querySelector('#agent_name') !== null")
+    _navigate(
+        browser, f"/admin/agents?lang={locale}", "document.querySelector('#agent_name') !== null"
+    )
     _wait(
         browser.tools,
         "document.querySelector('[name=credential_ttl_seconds]').required",
         description="the permission form script",
     )
+    all_libraries = "所有知识库" if locale == "zh-CN" else "All Libraries"
+    allowed_help = "允许" if locale == "zh-CN" else "allowed"
+    assert browser.tools.evaluate(f"""(() => {{
+      const cards = [...document.querySelectorAll('[data-library-scope]')];
+      return cards.every(card => card.querySelector('input[value=exclude]')
+        .closest('label').textContent.trim() === {json.dumps(all_libraries)});
+    }})()""")
+    # Native checkbox semantics and keyboard control survive the custom mark.
+    browser.tools.evaluate("document.querySelector('.scope-library input').focus(); true")
+    for event in ("keyDown", "keyUp"):
+        browser.tools.command(
+            "Input.dispatchKeyEvent", {"type": event, "key": " ", "code": "Space"}
+        )
+    assert browser.tools.evaluate("""(() => {
+      const input = document.querySelector('.scope-library input');
+      return input.checked && getComputedStyle(input, '::before').content.includes('✓')
+        && getComputedStyle(input, '::before').visibility === 'visible';
+    })()""")
+    browser.tools.command(
+        "Emulation.setEmulatedMedia", {"features": [{"name": "forced-colors", "value": "active"}]}
+    )
+    assert browser.tools.evaluate("""(() => {
+      const input = document.querySelector('.scope-library input');
+      const card = input.closest('[data-library-scope]');
+      card.querySelector('input[value=exclude]').click();
+      const style = getComputedStyle(input);
+      const visible = getComputedStyle(input, '::before').visibility === 'visible'
+        && getComputedStyle(input, '::before').content.includes('×')
+        && style.color !== style.backgroundColor;
+      card.querySelector('input[value=include]').click();
+      input.focus();
+      return visible;
+    })()""")
+    browser.tools.command("Emulation.setEmulatedMedia", {"features": []})
+    for event in ("keyDown", "keyUp"):
+        browser.tools.command(
+            "Input.dispatchKeyEvent", {"type": event, "key": " ", "code": "Space"}
+        )
     assert browser.tools.evaluate(f"""(() => {{
       const cards = [...document.querySelectorAll('[data-library-scope]')];
       const [read, write] = cards;
@@ -56,16 +99,21 @@ def test_library_scope_cards_search_switch_clear_and_roundtrip(setup_browser: _B
       if (!write.querySelector('input[value=include]').checked) return false;
       const selected = read.querySelector('input[value="{first}"]');
       selected.click();
+      if (!getComputedStyle(selected, '::before').content.includes('×')
+        || getComputedStyle(selected, '::before').visibility !== 'visible') return false;
       const filter = read.querySelector('.scope-search');
       filter.value = 'Beta'; filter.dispatchEvent(new Event('input', {{bubbles:true}}));
       if (!selected.checked || !selected.closest('label').hidden) return false;
       read.querySelector('.scope-clear').click();
-      if (selected.checked) return false;
+      if (selected.checked || getComputedStyle(selected, '::before').visibility !== 'hidden')
+        return false;
       if (read.querySelector('.scope-summary').textContent.includes('Alpha')) return false;
       filter.value = ''; filter.dispatchEvent(new Event('input', {{bubbles:true}}));
       selected.click();
       read.querySelector('input[value=include]').click();
-      if (!selected.checked || !read.querySelector('.scope-help').textContent.includes('allowed'))
+      if (!selected.checked
+        || !read.querySelector('.scope-help').textContent.includes({json.dumps(allowed_help)})
+        || !getComputedStyle(selected, '::before').content.includes('✓'))
         return false;
       read.querySelector('input[value=exclude]').click();
       write.querySelector('input[value="{second}"]').click();
@@ -95,7 +143,13 @@ def test_library_scope_cards_search_switch_clear_and_roundtrip(setup_browser: _B
         || !read.querySelector('input[value="{first}"]').checked
         || !write.querySelector('input[value=include]').checked
         || !write.querySelector('input[value="{second}"]').checked) return false;
+      if (!getComputedStyle(read.querySelector('input[value="{first}"]'), '::before')
+        .content.includes('×')
+        || !getComputedStyle(write.querySelector('input[value="{second}"]'), '::before')
+        .content.includes('✓')) return false;
       write.querySelector('input[value=exclude]').click();
+      if (!getComputedStyle(write.querySelector('input[value="{second}"]'), '::before')
+        .content.includes('×')) return false;
       write.querySelector('.scope-clear').click();
       document.querySelector('form[action$="/grants"]').requestSubmit();
       return true;
@@ -373,6 +427,7 @@ def test_real_browser_master_onboarding_to_cross_library_agent_http(
         "SKILL.md",
         "references/http.md",
         "references/local-token.md",
+        "references/onboarding-ticket.md",
     }
     for entry in entries:
         assert _http(browser, entry["href"])[0] == 401

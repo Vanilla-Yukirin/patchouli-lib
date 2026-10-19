@@ -61,7 +61,8 @@ def test_packaged_python_example_never_forwards_token_to_redirect(
         else:
             monkeypatch.delenv("PATCHOULI_BASE_URL", raising=False)
             monkeypatch.setattr("builtins.input", lambda _prompt: base)
-        monkeypatch.setenv("PATCHOULI_TOKEN", "synthetic-test-token")
+        monkeypatch.setenv("PATCHOULI_TOKEN_VARIABLE", "PATCHOULI_TOKEN_TEST_EXAMPLE")
+        monkeypatch.setenv("PATCHOULI_TOKEN_TEST_EXAMPLE", "synthetic-test-token")
         with pytest.raises(HTTPError) as error:
             exec(compile(match.group(1), "http.md example", "exec"), {"__name__": "__main__"})
         assert error.value.code == 302
@@ -72,3 +73,34 @@ def test_packaged_python_example_never_forwards_token_to_redirect(
             server.server_close()
         for thread in threads:
             thread.join(timeout=2)
+
+
+def test_packaged_example_does_not_fallback_to_another_token(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    reference = (
+        Path(__file__).resolve().parents[2] / "skills/patchouli-agent/references/http.md"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"## 本机 Python 标准库示例.*?```python\n(.*?)\n```", reference, re.S)
+    assert match is not None
+    monkeypatch.setenv("PATCHOULI_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("PATCHOULI_TOKEN_VARIABLE", "PATCHOULI_TOKEN_SELECTED")
+    monkeypatch.delenv("PATCHOULI_TOKEN_SELECTED", raising=False)
+    monkeypatch.setenv("PATCHOULI_TOKEN", "synthetic-other-agent-secret")
+    with pytest.raises(SystemExit, match="selected Token variable is missing"):
+        exec(compile(match.group(1), "http.md example", "exec"), {"__name__": "__main__"})
+    assert "synthetic-other-agent-secret" not in capsys.readouterr().out
+
+
+def test_packaged_example_rejects_invalid_variable_before_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reference = (
+        Path(__file__).resolve().parents[2] / "skills/patchouli-agent/references/http.md"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"## 本机 Python 标准库示例.*?```python\n(.*?)\n```", reference, re.S)
+    assert match is not None
+    monkeypatch.setenv("PATCHOULI_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("PATCHOULI_TOKEN_VARIABLE", "bad;name")
+    with pytest.raises(SystemExit, match="Invalid variable name"):
+        exec(compile(match.group(1), "http.md example", "exec"), {"__name__": "__main__"})

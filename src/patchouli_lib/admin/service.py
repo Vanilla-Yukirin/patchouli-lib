@@ -521,69 +521,89 @@ class AdminActionService:
             self._require_current_admin_session(
                 connection, master_session, master_session.audit_fingerprint()
             )
-            repository = AuthRepository(connection)
-            home_library_id = request.home_library_id or connection.scalar(
-                select(Library.id).order_by(Library.created_at, Library.id).limit(1)
+            return self.provision_agent_in_transaction(
+                connection,
+                request,
+                now=now,
+                identity_id=master_session.identity_id,
+                session_generation=master_session.session_generation,
+                session_fingerprint=master_session.audit_fingerprint(),
             )
-            if home_library_id is None or not repository.library_exists(home_library_id):
-                raise ResourceNotFoundError
-            selections = (
-                [(grant.library_id, grant.action.value) for grant in request.grants]
-                if request.grants
-                else [(key, "read") for key in request.read_libraries]
-                + [(key, "write") for key in request.write_libraries]
+
+    def provision_agent_in_transaction(
+        self,
+        connection: Connection,
+        request: MasterProvisionAgentInput,
+        *,
+        now: int,
+        identity_id: str,
+        session_generation: int,
+        session_fingerprint: bytes,
+    ) -> DeliveredCredential:
+        """Issue within an authorized transaction; caller owns admission and commit."""
+        repository = AuthRepository(connection)
+        home_library_id = request.home_library_id or connection.scalar(
+            select(Library.id).order_by(Library.created_at, Library.id).limit(1)
+        )
+        if home_library_id is None or not repository.library_exists(home_library_id):
+            raise ResourceNotFoundError
+        selections = (
+            [(grant.library_id, grant.action.value) for grant in request.grants]
+            if request.grants
+            else [(key, "read") for key in request.read_libraries]
+            + [(key, "write") for key in request.write_libraries]
+        )
+        if any(not repository.library_exists(key) for key, _ in selections):
+            raise ResourceNotFoundError
+        caller = repository.add_caller(
+            NewCaller(
+                id=new_opaque_id(),
+                library_id=home_library_id,
+                kind=CallerKind.AGENT,
+                name=request.agent_name,
+                description=request.agent_description,
+                created_at=now,
+                updated_at=now,
             )
-            if any(not repository.library_exists(key) for key, _ in selections):
-                raise ResourceNotFoundError
-            caller = repository.add_caller(
-                NewCaller(
-                    id=new_opaque_id(),
-                    library_id=home_library_id,
-                    kind=CallerKind.AGENT,
-                    name=request.agent_name,
-                    description=request.agent_description,
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
-            issued = CredentialIssuer(repository, clock=lambda: now).issue(
-                caller, expires_at=_master_credential_expiry(now, request)
-            )
+        )
+        issued = CredentialIssuer(repository, clock=lambda: now).issue(
+            caller, expires_at=_master_credential_expiry(now, request)
+        )
+        connection.execute(
+            insert(CredentialLibraryPolicy),
+            {
+                "credential_id": issued.credential.id,
+                "caller_id": caller.id,
+                "home_library_id": caller.library_id,
+                "mode": "library_grants",
+                "read_mode": request.read_mode,
+                "write_mode": request.write_mode,
+                "scope_revision": 0,
+                "created_at": now,
+            },
+        )
+        for target_library_id, action in selections:
             connection.execute(
-                insert(CredentialLibraryPolicy),
+                insert(CredentialLibraryGrant),
                 {
                     "credential_id": issued.credential.id,
                     "caller_id": caller.id,
                     "home_library_id": caller.library_id,
-                    "mode": "library_grants",
-                    "read_mode": request.read_mode,
-                    "write_mode": request.write_mode,
-                    "scope_revision": 0,
+                    "target_library_id": target_library_id,
+                    "action": action,
                     "created_at": now,
                 },
             )
-            for target_library_id, action in selections:
-                connection.execute(
-                    insert(CredentialLibraryGrant),
-                    {
-                        "credential_id": issued.credential.id,
-                        "caller_id": caller.id,
-                        "home_library_id": caller.library_id,
-                        "target_library_id": target_library_id,
-                        "action": action,
-                        "created_at": now,
-                    },
-                )
-            MasterAuditRepository(connection).add_success(
-                identity_id=master_session.identity_id,
-                session_generation=master_session.session_generation,
-                session_fingerprint=master_session.audit_fingerprint(),
-                action="auth.agent.provision",
-                target_type="caller",
-                target_id=caller.id,
-                occurred_at=now,
-                event_id=uuid4().hex,
-            )
+        MasterAuditRepository(connection).add_success(
+            identity_id=identity_id,
+            session_generation=session_generation,
+            session_fingerprint=session_fingerprint,
+            action="auth.agent.provision",
+            target_type="caller",
+            target_id=caller.id,
+            occurred_at=now,
+            event_id=uuid4().hex,
+        )
         return DeliveredCredential(
             value=issued.value,
             library_id=caller.library_id,

@@ -21,6 +21,7 @@ from patchouli_lib.backup import (
 from patchouli_lib.backup.manifest import (
     LIBRARY_SCOPES_SCHEMA_REVISION,
     OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
+    SUPPORTED_SCHEMA_REVISION,
 )
 
 POLICY = "auth_credential_library_policies"
@@ -67,15 +68,17 @@ def test_scope_upgrade_preserves_data_and_exact_0031_round_trip(
     assert {k: v for k, v in after.items() if k != POLICY} == {
         k: v for k, v in before.items() if k != POLICY
     }
-    assert validate_database(path).schema_revision == LIBRARY_SCOPES_SCHEMA_REVISION
-    command.check(config)
+    assert (
+        validate_database(path, schema_revision=LIBRARY_SCOPES_SCHEMA_REVISION).schema_revision
+        == LIBRARY_SCOPES_SCHEMA_REVISION
+    )
 
     command.downgrade(config, OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION)
     assert _snapshot(path) == before
     assert _schema(path) == old_schema
     validate_database(path, schema_revision=OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION)
     command.upgrade(config, LIBRARY_SCOPES_SCHEMA_REVISION)
-    validate_database(path)
+    validate_database(path, schema_revision=LIBRARY_SCOPES_SCHEMA_REVISION)
 
 
 @pytest.mark.parametrize("action", ["read", "write"])
@@ -85,6 +88,7 @@ def test_exclude_scope_blocks_lossy_downgrade_without_data_or_schema_changes(
     path = tmp_path / "exclude.sqlite"
     engine = seed_complete_database(path, monkeypatch)
     engine.dispose()
+    command.downgrade(_config(path, monkeypatch), LIBRARY_SCOPES_SCHEMA_REVISION)
     with closing(sqlite3.connect(path)) as connection:
         _add_policy(connection)
         connection.execute(f"UPDATE {POLICY} SET {action}_mode = 'exclude', scope_revision = 1")
@@ -94,7 +98,7 @@ def test_exclude_scope_blocks_lossy_downgrade_without_data_or_schema_changes(
         command.downgrade(_config(path, monkeypatch), OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION)
     assert _snapshot(path) == before
     assert _schema(path) == schema
-    validate_database(path)
+    validate_database(path, schema_revision=LIBRARY_SCOPES_SCHEMA_REVISION)
 
 
 def test_policy_scope_changes_enforce_integer_revisions_and_immutable_identity(
@@ -145,7 +149,7 @@ def test_backup_restore_preserves_independent_modes_grants_and_revision(
         bundle = _create(engine, tmp_path / "bundle")
     finally:
         engine.dispose()
-    assert bundle.manifest.schema_revision == LIBRARY_SCOPES_SCHEMA_REVISION
+    assert bundle.manifest.schema_revision == SUPPORTED_SCHEMA_REVISION
     verify_backup_bundle(bundle.bundle_path, app_version=APP_VERSION)
     restored = tmp_path / "restored.sqlite"
     restore_backup(bundle.bundle_path, restored, app_version=APP_VERSION)

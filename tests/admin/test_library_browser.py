@@ -431,7 +431,7 @@ def test_identity_browser_is_protected_and_shows_metadata_only(
     _login(client)
     empty = client.get("/admin/agents?lang=zh-CN")
     assert empty.status_code == 200
-    assert "暂无身份。" in empty.text
+    assert "暂无凭据。" in empty.text
     assert empty.headers["cache-control"] == "no-store, max-age=0"
 
     library_id, _, _ = _seed_structure(engine)
@@ -452,7 +452,7 @@ def test_identity_browser_is_protected_and_shows_metadata_only(
 
     page = client.get("/admin/agents?lang=zh-CN")
     assert page.status_code == 200
-    assert "设备与身份" in page.text
+    assert "凭据管理" in page.text
     assert "Reader &lt;device&gt;" in page.text
     assert "Reader <device>" not in page.text
     assert f"/admin/libraries/{library_id}/callers/{caller_id}" in page.text
