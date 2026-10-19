@@ -42,7 +42,9 @@ def seed_library_structure(
     )
     with immediate_transaction(engine) as connection:
         columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(libraries)")}
-        if "description" not in columns:
+        # Historical migration fixtures must seed only columns that existed at
+        # their pinned revision, without selecting through the current ORM.
+        if "readme" not in columns:
             library_id, section_id, book_id = (
                 next(identifiers),
                 next(identifiers),

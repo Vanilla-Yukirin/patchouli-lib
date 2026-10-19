@@ -10,6 +10,8 @@
 !skills
 !skills/patchouli-agent
 !skills/patchouli-agent/**
+!skills/patchouli-archive
+!skills/patchouli-archive/**
 
 # Exclusions must follow the allowlist so re-included trees stay free of local artifacts.
 **/.tmp-*

@@ -11,6 +11,7 @@ from test_library_edit import _post, _setup_master
 from test_library_edit import browser as browser
 
 from patchouli_lib.admin.markdown_preview import render_readme
+from patchouli_lib.admin.read_model import AdminReadModel
 from patchouli_lib.auth.models import MasterAuditEvent
 from patchouli_lib.library.models import Book, Library, Section
 
@@ -85,6 +86,21 @@ def test_three_level_readme_create_edit_conflict_and_preserved_description(
             "book.readme.update",
         }
         assert len(events) == 3
+        library_id = connection.scalar(select(Library.id))
+        section_id = connection.scalar(select(Section.id))
+        book_id = connection.scalar(select(Book.id))
+    assert library_id is not None and section_id is not None and book_id is not None
+    read_model = AdminReadModel(engine)
+    assert read_model.list_libraries()[0].readme == ""
+    library_view = read_model.get_library(library_id)
+    assert library_view is not None and library_view.library.readme == updated
+    assert library_view.sections[0].readme == ""
+    section_view = read_model.get_section(library_id, section_id)
+    assert section_view is not None and section_view.section.readme == updated
+    assert section_view.library.readme == "" and section_view.books[0].readme == ""
+    book_view = read_model.get_book_page(library_id, section_id, book_id)
+    assert book_view is not None and book_view.book.readme == updated
+    assert book_view.library.readme == "" and book_view.section.readme == ""
 
 
 def test_readme_renderer_blocks_network_images_and_unsafe_links() -> None:

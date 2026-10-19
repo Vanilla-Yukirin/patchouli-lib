@@ -199,12 +199,16 @@ def test_smoke_uses_distinct_volumes_and_cleans_every_resource() -> None:
 
 def test_dockerfile_has_fixed_non_root_identity_and_portable_directories() -> None:
     dockerfile = (REPOSITORY_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    dockerignore = (REPOSITORY_ROOT / ".dockerignore").read_text(encoding="utf-8")
 
     assert "groupadd --gid 10001 patchouli" in dockerfile
     assert "useradd --uid 10001 --gid 10001" in dockerfile
     assert "install -d -o 10001 -g 10001 /app /data /backups" in dockerfile
     assert "USER 10001:10001" in dockerfile
     assert "chown -R" not in dockerfile
+    for skill in ("patchouli-agent", "patchouli-archive"):
+        assert f"COPY skills/{skill} ./skills/{skill}" in dockerfile
+        assert f"!skills/{skill}/**" in dockerignore
 
 
 def test_internal_phases_round_trip_exact_semantic_state(

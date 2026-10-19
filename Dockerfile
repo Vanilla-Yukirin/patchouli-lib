@@ -16,6 +16,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 COPY src ./src
 COPY skills/patchouli-agent ./skills/patchouli-agent
+COPY skills/patchouli-archive ./skills/patchouli-archive
 COPY migrations ./migrations
 COPY alembic.ini ./
 RUN --mount=type=cache,target=/root/.cache/uv \

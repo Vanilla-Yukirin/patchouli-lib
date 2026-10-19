@@ -1132,7 +1132,7 @@ class AdminReadModel:
 
     def get_library(self, library_id: str) -> LibraryView | None:
         with self._engine.connect() as connection:
-            library = _get_library(connection, library_id)
+            library = _get_library(connection, library_id, include_readme=True)
             if library is None:
                 return None
             rows = connection.execute(
@@ -1141,7 +1141,6 @@ class AdminReadModel:
                     Section.name,
                     Section.description,
                     Section.updated_at,
-                    Section.readme,
                 )
                 .where(Section.library_id == library_id)
                 .order_by(Section.name, Section.id)
@@ -1222,11 +1221,11 @@ class AdminReadModel:
     def get_section(self, library_id: str, section_id: str) -> SectionView | None:
         with self._engine.connect() as connection:
             library = _get_library(connection, library_id)
-            section = _get_section(connection, library_id, section_id)
+            section = _get_section(connection, library_id, section_id, include_readme=True)
             if library is None or section is None:
                 return None
             rows = connection.execute(
-                select(Book.id, Book.name, Book.summary, Book.updated_at, Book.readme)
+                select(Book.id, Book.name, Book.summary, Book.updated_at)
                 .where(Book.library_id == library_id, Book.section_id == section_id)
                 .order_by(Book.name, Book.id)
             ).mappings()
@@ -1237,7 +1236,7 @@ class AdminReadModel:
         with self._engine.connect() as connection:
             library = _get_library(connection, library_id)
             section = _get_section(connection, library_id, section_id)
-            book = _get_book(connection, library_id, section_id, book_id)
+            book = _get_book(connection, library_id, section_id, book_id, include_readme=True)
             if library is None or section is None or book is None:
                 return None
             rows = connection.execute(
@@ -1267,7 +1266,7 @@ class AdminReadModel:
         with self._engine.connect() as connection:
             library = _get_library(connection, library_id)
             section = _get_section(connection, library_id, section_id)
-            book = _get_book(connection, library_id, section_id, book_id)
+            book = _get_book(connection, library_id, section_id, book_id, include_readme=True)
             if library is None or section is None or book is None:
                 return None
             scope = (
@@ -1772,29 +1771,26 @@ def _master_file_set_activity_revision(
     return receipt.revision_number
 
 
-def _library_summary_query() -> Select[Any]:
+def _library_summary_query(*, include_readme: bool = False) -> Select[Any]:
+    columns = [
+        Library.id,
+        Library.name,
+        Library.description,
+        Library.created_at,
+        Library.updated_at,
+    ]
+    if include_readme:
+        columns.append(Library.readme)
     return (
         select(
-            Library.id,
-            Library.name,
-            Library.description,
-            Library.created_at,
-            Library.updated_at,
-            Library.readme,
+            *columns,
             func.count(Page.page_uid).label("page_count"),
         )
         .outerjoin(
             Page,
             and_(Page.library_id == Library.id, Page.deleted_at.is_(None)),
         )
-        .group_by(
-            Library.id,
-            Library.name,
-            Library.description,
-            Library.created_at,
-            Library.updated_at,
-            Library.readme,
-        )
+        .group_by(*columns)
         .order_by(Library.name, Library.id)
     )
 
@@ -1896,21 +1892,28 @@ def _tag_summary_query(library_id: str | None = None) -> Select[Any]:
     return statement if library_id is None else statement.where(Tag.library_id == library_id)
 
 
-def _get_library(connection: Connection, library_id: str) -> LibraryItem | None:
+def _get_library(
+    connection: Connection, library_id: str, *, include_readme: bool = False
+) -> LibraryItem | None:
     row = (
-        connection.execute(_library_summary_query().where(Library.id == library_id))
+        connection.execute(
+            _library_summary_query(include_readme=include_readme).where(Library.id == library_id)
+        )
         .mappings()
         .one_or_none()
     )
     return None if row is None else _library_item(row)
 
 
-def _get_section(connection: Connection, library_id: str, section_id: str) -> SectionItem | None:
+def _get_section(
+    connection: Connection, library_id: str, section_id: str, *, include_readme: bool = False
+) -> SectionItem | None:
+    columns = [Section.id, Section.name, Section.description, Section.updated_at]
+    if include_readme:
+        columns.append(Section.readme)
     row = (
         connection.execute(
-            select(
-                Section.id, Section.name, Section.description, Section.updated_at, Section.readme
-            ).where(
+            select(*columns).where(
                 Section.library_id == library_id,
                 Section.id == section_id,
             )
@@ -1922,11 +1925,19 @@ def _get_section(connection: Connection, library_id: str, section_id: str) -> Se
 
 
 def _get_book(
-    connection: Connection, library_id: str, section_id: str, book_id: str
+    connection: Connection,
+    library_id: str,
+    section_id: str,
+    book_id: str,
+    *,
+    include_readme: bool = False,
 ) -> BookItem | None:
+    columns = [Book.id, Book.name, Book.summary, Book.updated_at]
+    if include_readme:
+        columns.append(Book.readme)
     row = (
         connection.execute(
-            select(Book.id, Book.name, Book.summary, Book.updated_at, Book.readme).where(
+            select(*columns).where(
                 Book.library_id == library_id,
                 Book.section_id == section_id,
                 Book.id == book_id,
@@ -1946,16 +1957,20 @@ def _library_item(row: RowMapping) -> LibraryItem:
         row["created_at"],
         row["page_count"],
         row["updated_at"],
-        row["readme"],
+        row.get("readme", ""),
     )
 
 
 def _section_item(row: RowMapping) -> SectionItem:
-    return SectionItem(row["id"], row["name"], row["description"], row["updated_at"], row["readme"])
+    return SectionItem(
+        row["id"], row["name"], row["description"], row["updated_at"], row.get("readme", "")
+    )
 
 
 def _book_item(row: RowMapping) -> BookItem:
-    return BookItem(row["id"], row["name"], row["summary"], row["updated_at"], row["readme"])
+    return BookItem(
+        row["id"], row["name"], row["summary"], row["updated_at"], row.get("readme", "")
+    )
 
 
 def _page_item(row: RowMapping) -> PageItem:
