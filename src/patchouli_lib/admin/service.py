@@ -24,6 +24,7 @@ from patchouli_lib.admin.contracts import (
     MasterTagFormInput,
     MasterUpdateAgentInput,
     MasterUpdatePageTitleInput,
+    MasterUpdateReadmeInput,
     PageTagFormInput,
     ProvisionAgentInput,
     RecoverOperatorInput,
@@ -82,6 +83,7 @@ from patchouli_lib.idempotency.schemas import (
     digest_idempotency_key,
 )
 from patchouli_lib.identifiers import canonical_utc_wire, parse_occurrence_time
+from patchouli_lib.library.guides import get_guide, update_readme
 from patchouli_lib.library.models import Library
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import (
@@ -277,6 +279,49 @@ class AdminActionService:
                     target_id=section_id,
                 )
         return result
+
+    def update_readme_as_master(
+        self,
+        library_id: str,
+        request: MasterUpdateReadmeInput,
+        *,
+        section_id: str | None = None,
+        book_id: str | None = None,
+        master_session: MasterAdminSession,
+    ) -> None:
+        fingerprint = master_session.audit_fingerprint()
+        with immediate_transaction(self._engine) as connection:
+            self._require_current_admin_session(connection, master_session, fingerprint)
+            previous = get_guide(
+                connection, library_id=library_id, section_id=section_id, book_id=book_id
+            )
+            result = update_readme(
+                connection,
+                library_id=library_id,
+                section_id=section_id,
+                book_id=book_id,
+                readme=request.readme,
+                expected_updated_at=request.expected_updated_at,
+                now=self._clock(),
+            )
+            if result.updated_at != previous.updated_at:
+                target_type = (
+                    "book"
+                    if book_id is not None
+                    else ("section" if section_id is not None else "library")
+                )
+                self._record_structure_event(
+                    connection,
+                    fingerprint,
+                    f"{target_type}.readme.update",
+                    library_id,
+                    result.updated_at,
+                    section_id=section_id,
+                    book_id=book_id,
+                    master_session=master_session,
+                    target_type=target_type,
+                    target_id=book_id or section_id or library_id,
+                )
 
     def update_library_as_master(
         self,

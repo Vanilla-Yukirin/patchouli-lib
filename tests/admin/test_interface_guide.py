@@ -119,6 +119,7 @@ def test_api_directory_and_synthetic_examples_match_reviewed_wire_shapes(
     assert parsed_capabilities.features == (
         "archive",
         "file-sets",
+        "library-structure",
         "page-lifecycle",
         "page-move",
         "tags",

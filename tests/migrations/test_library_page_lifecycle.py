@@ -9,11 +9,17 @@ import pytest
 from alembic import command
 from auth.test_optional_expiry_migration import _snapshot
 from backup.conftest import _config
-from content.test_agent_page_lifecycle import _orphan_audit, _run
-from content.test_agent_page_move import _agent
-from content.test_master_revision_restore_service import _etag, _page, _story
-from sqlalchemy import Engine
+from content.conftest import OPERATION_TIME
+from content.helpers import insert_page_graph, page_graph_values, seed_library_structure
+from content.test_agent_page_lifecycle import _run
+from content.test_agent_page_move import MovingAgent
+from content.test_master_revision_restore_service import _etag, _page
+from sqlalchemy import Engine, insert
 
+from patchouli_lib.auth.models import CredentialLibraryGrant, CredentialLibraryPolicy
+from patchouli_lib.auth.repository import AuthRepository
+from patchouli_lib.auth.schemas import AuditOutcome, CallerKind, NewAuditEvent, NewCaller
+from patchouli_lib.auth.service import CredentialIssuer
 from patchouli_lib.backup import validate_database
 from patchouli_lib.backup.errors import BackupDatabaseError
 from patchouli_lib.backup.manifest import (
@@ -22,7 +28,50 @@ from patchouli_lib.backup.manifest import (
     OPTIONAL_CREDENTIAL_EXPIRY_SCHEMA_REVISION,
 )
 from patchouli_lib.content.page_lifecycle_schemas import PageLifecycleCommand
-from patchouli_lib.database import build_engine
+from patchouli_lib.content.schemas import PageRecord
+from patchouli_lib.database import build_engine, immediate_transaction
+
+
+def _historical_page_and_agent(
+    engine: Engine, *, library_write: bool
+) -> tuple[PageRecord, MovingAgent]:
+    """Seed the pinned schema without current Library/Section/Book ORM reads."""
+    library, section, book = seed_library_structure(engine)
+    graph = page_graph_values(library_id=library, section_id=section, book_id=book)
+    home, _, _ = seed_library_structure(engine, prefix="7", label="Agent home")
+    with immediate_transaction(engine) as connection:
+        insert_page_graph(connection, graph)
+        auth = AuthRepository(connection)
+        caller = auth.add_caller(
+            NewCaller(
+                id="a" * 32,
+                library_id=home,
+                kind=CallerKind.AGENT,
+                name="Synthetic lifecycle Agent",
+                created_at=OPERATION_TIME - 1,
+                updated_at=OPERATION_TIME - 1,
+            )
+        )
+        issued = CredentialIssuer(
+            auth, clock=lambda: OPERATION_TIME - 1, id_factory=lambda: "7" * 32
+        ).issue(caller, expires_at=OPERATION_TIME + 10_000_000)
+        if library_write:
+            identity = {
+                "credential_id": issued.credential.id,
+                "caller_id": caller.id,
+                "home_library_id": home,
+                "created_at": OPERATION_TIME,
+            }
+            connection.execute(
+                insert(CredentialLibraryPolicy), {**identity, "mode": "library_grants"}
+            )
+            connection.execute(
+                insert(CredentialLibraryGrant),
+                {**identity, "target_library_id": library, "action": "write"},
+            )
+    return _page(engine, library, graph[0].page_id), MovingAgent(
+        issued.value, home, caller.id, issued.credential.id
+    )
 
 
 @pytest.fixture(
@@ -92,9 +141,7 @@ def test_downgrade_rejects_library_lifecycle_success(
     # This tests historical downgrade safety without running new code on an
     # unmigrated database or weakening its production schema requirement.
     command.upgrade(config, LIBRARY_SCOPES_SCHEMA_REVISION)
-    story = _story(content_engine)
-    page = _page(content_engine, story.command.library_id, story.command.page_id)
-    agent = _agent(content_engine, page.library_id)
+    page, agent = _historical_page_and_agent(content_engine, library_write=True)
     _run(
         content_engine,
         agent,
@@ -127,7 +174,23 @@ def test_downgrade_rejects_orphan_new_audit(
     lifecycle_engine: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     content_engine = lifecycle_engine
-    _orphan_audit(content_engine)
+    page, agent = _historical_page_and_agent(content_engine, library_write=False)
+    with immediate_transaction(content_engine) as connection:
+        AuthRepository(connection).add_audit_event(
+            NewAuditEvent(
+                id="f" * 32,
+                library_id=page.library_id,
+                actor_home_library_id=agent.home,
+                actor_caller_id=agent.caller_id,
+                actor_credential_id=agent.credential_id,
+                action="content.page.delete",
+                resource_type="page",
+                resource_id=page.page_id,
+                outcome=AuditOutcome.SUCCEEDED,
+                request_id="req_" + "f" * 32,
+                occurred_at=OPERATION_TIME + 40,
+            )
+        )
     assert content_engine.url.database is not None
     path = Path(content_engine.url.database)
     before = _snapshot(path)

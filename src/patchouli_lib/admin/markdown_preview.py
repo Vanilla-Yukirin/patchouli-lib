@@ -122,6 +122,7 @@ def render_markdown_preview(
     filenames: Collection[str],
     image_url: PreviewURLResolver,
     download_url: PreviewURLResolver,
+    root_relative_links: bool = False,
 ) -> str:
     """Render UTF-8 Markdown with only exact-snapshot sibling file references.
 
@@ -183,6 +184,11 @@ def render_markdown_preview(
         destination = _text_attr(token, "href") or ""
         name = _sibling_name(destination, names)
         url = _resolved_url(download_url, name) if name is not None else None
+        if url is None and root_relative_links and destination.startswith("/"):
+            try:
+                url = _resolved_url(lambda _: destination, "")
+            except MarkdownPreviewUnavailableError:
+                url = None
         external = url is None and name is None and _external_https(destination)
         if external:
             url = destination
@@ -208,3 +214,22 @@ def render_markdown_preview(
     parser.add_render_rule("link_close", link_close_rule)
     env: EnvType = {}
     return renderer.render(parser.parse(source, env), parser.options, env)
+
+
+def render_readme(source: str) -> str:
+    """Render a structure guide without attachments or remote image requests.
+
+    Larger guides remain readable as escaped source rather than becoming a
+    storage-length restriction. Root-relative links can point to local Skills.
+    """
+
+    try:
+        return render_markdown_preview(
+            source.encode("utf-8"),
+            filenames=("README.md",),
+            image_url=lambda _: None,
+            download_url=lambda _: None,
+            root_relative_links=True,
+        )
+    except (MarkdownPreviewUnavailableError, UnicodeError):
+        return f'<pre class="markdown-preview">{escape(source)}</pre>'

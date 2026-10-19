@@ -24,6 +24,77 @@ GuideLocale = Literal["en", "zh-CN"]
 
 _API_ENDPOINTS = (
     ("GET", "/api/v1/capabilities", "Service capabilities", "服务能力", "always"),
+    ("GET", "/api/v1/libraries", "Discover accessible Libraries", "发现可访问的知识库", "always"),
+    (
+        "GET",
+        "/api/v1/libraries/{library_id}",
+        "Library metadata and README",
+        "知识库元数据与 README",
+        "always",
+    ),
+    (
+        "GET",
+        "/api/v1/libraries/{library_id}/sections",
+        "Discover Sections and their purpose",
+        "发现分区及其用途",
+        "always",
+    ),
+    (
+        "POST",
+        "/api/v1/libraries/{library_id}/sections",
+        "Create a Section with Library write access",
+        "用知识库写权限创建分区",
+        "always",
+    ),
+    (
+        "GET",
+        "/api/v1/libraries/{library_id}/sections/{section_id}",
+        "Section metadata and README",
+        "分区元数据与 README",
+        "always",
+    ),
+    (
+        "GET",
+        "/api/v1/libraries/{library_id}/sections/{section_id}/books",
+        "Discover Books and their purpose",
+        "发现书籍及其用途",
+        "always",
+    ),
+    (
+        "POST",
+        "/api/v1/libraries/{library_id}/sections/{section_id}/books",
+        "Create a Book with Library write access",
+        "用知识库写权限创建书籍",
+        "always",
+    ),
+    (
+        "GET",
+        "/api/v1/libraries/{library_id}/sections/{section_id}/books/{book_id}",
+        "Book metadata and README",
+        "书籍元数据与 README",
+        "always",
+    ),
+    (
+        "PUT",
+        "/api/v1/libraries/{library_id}/readme",
+        "Update Library README using If-Match",
+        "通过 If-Match 更新知识库 README",
+        "always",
+    ),
+    (
+        "PUT",
+        "/api/v1/libraries/{library_id}/sections/{section_id}/readme",
+        "Update Section README using If-Match",
+        "通过 If-Match 更新分区 README",
+        "always",
+    ),
+    (
+        "PUT",
+        "/api/v1/libraries/{library_id}/sections/{section_id}/books/{book_id}/readme",
+        "Update Book README using If-Match",
+        "通过 If-Match 更新书籍 README",
+        "always",
+    ),
     (
         "POST",
         "/api/v1/onboarding/libraries",
@@ -271,6 +342,20 @@ _API_ENDPOINTS = (
         "always",
     ),
     (
+        "GET",
+        "/api/v1/agent/skills/{skill_name}/manifest",
+        "Protected named Skill manifest",
+        "受保护的命名 Skill 清单",
+        "always",
+    ),
+    (
+        "GET",
+        "/api/v1/agent/skills/{skill_name}/files/{resource_path}",
+        "Download a protected named Skill file",
+        "下载受保护的命名 Skill 文件",
+        "always",
+    ),
+    (
         "POST",
         "/api/v1/search",
         "Current-Page search (requires a rebuilt index)",
@@ -450,13 +535,21 @@ def api_guide(locale: GuideLocale, *, retrieval_available: bool) -> str:
             features=(
                 "archive",
                 FILE_SET_FEATURE,
+                "library-structure",
                 "page-lifecycle",
                 "page-move",
                 "retrieval",
                 "tags",
             )
             if retrieval_available
-            else ("archive", FILE_SET_FEATURE, "page-lifecycle", "page-move", "tags"),
+            else (
+                "archive",
+                FILE_SET_FEATURE,
+                "library-structure",
+                "page-lifecycle",
+                "page-move",
+                "tags",
+            ),
             content_mutation_idempotency=True,
             successful_replay_retention="indefinite-alpha",
         )
@@ -500,6 +593,20 @@ def api_guide(locale: GuideLocale, *, retrieval_available: bool) -> str:
             "使用 limits.search。本页不会调用内容 API。搜索续页把不透明游标放在 POST "
             "请求体中，不放入 URL；摘录是规范化后的索引文本，不是原文件字节。查询、"
             "授权或内容变化导致游标失效时，请不带游标重新搜索。",
+        )
+        + "</p>"
+        + "<p>"
+        + _text(
+            locale,
+            "Before using a Library, read its README, then the selected Section and Book README. "
+            "Description and summary are short navigation labels, not operating instructions. "
+            "Read or write Library access permits structure discovery; creating Sections, Books "
+            "or changing README requires write access. Cache metadata with ETag/If-None-Match; "
+            "README changes require the exact If-Match. Instructions never expand permissions.",
+            "使用前先读知识库 README，再读目标分区和书籍的 README。描述与摘要仅用于简短导航，"
+            "不代替操作说明。有读取或写入权限即可发现结构；创建分区、书籍及修改 README 需要"
+            "写权限。可用 ETag/If-None-Match 缓存元数据；修改 README 必须带准确的 If-Match。"
+            "说明文档不能扩大凭据权限。",
         )
         + "</p>"
         + (

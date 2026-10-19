@@ -192,6 +192,7 @@ class LibraryStructureService:
                 id=self._id_factory(),
                 name=request.name,
                 description=request.description,
+                readme=request.readme,
                 created_at=now,
                 updated_at=now,
             )
@@ -209,6 +210,7 @@ class LibraryStructureService:
                 library_id=library_id,
                 name=request.name,
                 description=request.description,
+                readme=request.readme,
                 created_at=now,
                 updated_at=now,
             )
@@ -253,6 +255,7 @@ class LibraryStructureService:
                 section_id=section_id,
                 name=request.name,
                 summary=request.summary,
+                readme=request.readme,
                 created_at=now,
                 updated_at=now,
             )

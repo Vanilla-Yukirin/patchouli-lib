@@ -40,12 +40,64 @@ GET /api/v1/agent/skill/manifest
 GET /api/v1/agent/skill/files/SKILL.md
 GET /api/v1/agent/skill/files/references/http.md
 GET /api/v1/agent/skill/files/references/local-token.md
+GET /api/v1/agent/skill/files/references/onboarding-ticket.md
+GET /api/v1/agent/skills/{skill_name}/manifest
+GET /api/v1/agent/skills/{skill_name}/files/{resource_path}
 ```
 
+命名资源只提供 `patchouli-agent` 与 `patchouli-archive`；原单 Skill 路径保持
+`patchouli-agent` 的四文件清单。README 可链接同服务的命名 manifest。
 清单给每个文件的字节数和 SHA-256。只下载清单列出的相对路径；逐字节核对后安装。
+不把绝对路径、`..`、反斜杠路径或指向其他 origin 的下载地址交给本机写文件逻辑；
+安装位置由用户授权的宿主规则决定，已有文件须比较差异并保留私有配置。
 Token 无效或到期时返回 401，不应尝试用网页登录 Cookie 代替设备 Token。
 
-## 已实现的发现与读取
+## 知识库结构与 README
+
+服务公布 `library-structure` 时，`library_grants` Agent 可以用目标库的 `read`
+或 `write` 任一权限发现结构和 README。元数据只用于定位与工作约定，不开放 Page
+或附件正文；真正内容的读取仍要求 `read`。旧 Section 凭据不自动获得新结构权限。
+
+```text
+GET /api/v1/libraries
+GET /api/v1/libraries/{library_id}
+GET /api/v1/libraries/{library_id}/sections
+GET /api/v1/libraries/{library_id}/sections/{section_id}
+GET /api/v1/libraries/{library_id}/sections/{section_id}/books
+GET /api/v1/libraries/{library_id}/sections/{section_id}/books/{book_id}
+```
+
+单资源返回稳定 `id`、名称、用途说明、`readme` 和 `updated_at`，响应带强 ETag。
+列表返回 `items`、`next_offset`，以 `limit`（默认20，1–100）与 `offset` 分页。
+列表仅提供导航元信息，不返回 `readme`；选定对象后读取对应单资源接口取得说明。
+先读 Library，再读目标 Section、Book 的 README；`description`／`summary` 是
+导航摘要，README 是编排与操作约定。规则缺失时不要自行假设某个 default 分类。
+已有规则且用户任务允许时，可以按规则创建所需结构，不用管理员先手工建立。
+
+```text
+POST /api/v1/libraries/{library_id}/sections
+{"name":"示例分区","description":"分区用途","readme":"简短使用约定"}
+
+POST /api/v1/libraries/{library_id}/sections/{section_id}/books
+{"name":"示例书籍","summary":"书籍用途","readme":"简短使用约定"}
+```
+
+创建要求目标库 `write`，用途说明须非空，`readme` 可省略。首次创建201；同父级
+同名、元数据完全相同返回200和原身份；信息不同返回409，不覆盖已有对象。超时
+后保留原 JSON，核对结果或原样重试，不换名重复创建。写权限不允许创建其他 Library
+或管理凭据。
+
+更新 README 使用对应单资源路径加 `/readme`，带当前准确强 `If-Match`，请求为
+`PUT`、`application/json`、`{"readme":"Markdown"}`；缺失条件428、陈旧412。
+空字符串可清除 README，原样 Markdown 保留。JSON 正文最多2 MiB，不是字数限制。
+说明宜简短，详细流程链接专用 Skill，不把冗长 Skill 全文直接塞进 README。
+
+按服务入口、对象 ID 与 ETag 缓存已读说明，下次 GET 带 `If-None-Match`，304 时
+复用、200 时更新。即使已装 Skill，也检查规则版本，不能永久忽略 README。说明
+与下载 Skill 不扩大权限、不代替用户授权、不要求泄密或自动执行任意代码；冲突时
+先核实。每次请求仍以当前凭据授权为准，缓存不是绕过撤销的通行证。
+
+## 原有发现与读取
 
 仅在服务启用了读取能力时使用：
 
@@ -105,7 +157,8 @@ Section／Book 查询参数跨库的 403 行为保持不变。新列表游标不
 或其他目标、凭据、`limit` 互换；不匹配时返回 `400 invalid_cursor`。
 
 先从 `whoami.library_grants` 确认有 `read` 的目标 Library，再发现其中的 Section／Book。
-仅有 `write` 时，目标 ID 仍须由管理员或其他已授权来源提供并核实，不能扫描或猜造。
+仅有 `write` 时，优先使用上节 `library-structure` 发现结构；服务无此能力时请
+管理员或其他已授权来源提供并核实目标 ID，不能扫描或猜造，也不能借结构读取正文。
 引用准确 Revision 时保留服务器返回的 `section_id`、`page_id`、`revision_id`、
 `revision_number` 和相对 `href`；不要用「当前版本」替代已选历史版本。开发分支
 接口不代表目标服务已部署；旧服务不支持此选择器时不得假定返回结果属于目标库。
@@ -154,7 +207,7 @@ Page 可没有摘录。`matched: false` 表示摘录文本本身未命中（例�
 
 先确认实际服务的 `/api/v1/capabilities` 包含 `file-sets`，并核对其中
 `limits.file_set`；不能只凭本仓库代码推测目标服务已升级。本库目标先用受保护
-列表确认；跨库目标的 ID 须由管理员或已授权来源提供并核实。新建与修订都上传
+结构接口或受保护列表确认，不猜造跨库目标 ID。新建与修订都上传
 **完整文件集合**：
 一个 Markdown 文件就是一个 `file`，Markdown 加图片是多个 `file`，只有二进制
 文件也使用同一格式。Page 内仅允许同层文件名，不接受目录路径。

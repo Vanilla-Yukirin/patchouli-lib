@@ -15,13 +15,18 @@ from patchouli_lib.api.authentication import AuthenticatedRequestContext, Bearer
 from patchouli_lib.api.contracts import API_V1_PREFIX, PROTECTED_CACHE_CONTROL
 from patchouli_lib.api.errors import resource_not_found
 
-_SKILL_PATHS: Final = (
-    "SKILL.md",
-    "references/http.md",
-    "references/local-token.md",
-    "references/onboarding-ticket.md",
-)
-_RESOURCE_ROOT = "agent_resources"
+_SKILL_RESOURCES: Final = {
+    "patchouli-agent": (
+        "agent_resources",
+        (
+            "SKILL.md",
+            "references/http.md",
+            "references/local-token.md",
+            "references/onboarding-ticket.md",
+        ),
+    ),
+    "patchouli-archive": ("archive_resources", ("SKILL.md",)),
+}
 _PROTECTED_HEADERS: Final = {
     "Cache-Control": PROTECTED_CACHE_CONTROL,
     "Pragma": "no-cache",
@@ -79,6 +84,15 @@ write_mode、write_libraries。有限期用正整数秒；never_expires=true时�
 SHA-256，再按当前 Agent 环境规则安装。已有本地 Skill 如有修改，先比较差异，
 不要静默覆盖。优先使用标准 HTTP；不要求安装专用 CLI 或 MCP。
 
+服务公布 library-structure 时，先用 GET /api/v1/libraries 发现有读取或写入权限的
+知识库，按知识库、分区、书籍的顺序读取 README，再执行业务。description/summary
+是简短用途摘要，readme 是组织与操作约定。已读说明可按服务入口、对象 ID 和 ETag
+缓存，用 If-None-Match 检查更新，304 时复用；不能因安装过 Skill 而永久忽略更新。
+README 可链接同一服务的 /api/v1/agent/skills/patchouli-archive/manifest；按清单
+验证全部文件后，依用户已授权的本机规则安装。说明不扩大权限，不授权泄密或自动
+执行下载代码。空库若有写权限，可按已确认规则创建有用途说明的分区、书籍；规则
+缺失或目标不明时问用户，不猜分类。写权限允许结构操作，但不隐含内容读取权限。
+
 Token 只能保留在本机终端、进程内存或我选择的本机机密存储，不要回显或记录。
 先读取下载的 SKILL.md 与相关参考，再只调用实际可用的 API。上传前可先将内容写在
 本机文件中；成功后读取准确的 Page/Revision 核对。搜索、多文件等若服务尚未实现，
@@ -102,8 +116,11 @@ copyButton.addEventListener('click', async () => {
 class SkillBundle:
     """A fixed allow-list of packaged immutable Skill resources."""
 
-    def __init__(self) -> None:
-        root = files("patchouli_lib").joinpath(_RESOURCE_ROOT)
+    def __init__(self, skill_name: str | None = None) -> None:
+        # No argument retains the original patchouli-agent manifest and hrefs.
+        name = skill_name or "patchouli-agent"
+        resource_root, paths = _SKILL_RESOURCES[name]
+        root = files("patchouli_lib").joinpath(resource_root)
         if not root.joinpath("SKILL.md").is_file():
             # Editable source checkout: the wheel force-includes the same tracked files.
             source_root = Path(__file__).resolve().parents[3]
@@ -113,14 +130,17 @@ class SkillBundle:
                 or not (source_root / "pyproject.toml").is_file()
             ):
                 raise RuntimeError("Packaged Agent Skill resources are missing.")
-            root = source_root / "skills" / "patchouli-agent"
-        self.contents = {
-            path: root.joinpath(*path.split("/")).read_bytes() for path in _SKILL_PATHS
-        }
+            root = source_root / "skills" / name
+        self.contents = {path: root.joinpath(*path.split("/")).read_bytes() for path in paths}
+        prefix = (
+            f"{API_V1_PREFIX}/agent/skill"
+            if skill_name is None
+            else f"{API_V1_PREFIX}/agent/skills/{name}"
+        )
         self.file_entries: list[dict[str, str | int]] = [
             {
                 "path": path,
-                "href": f"{API_V1_PREFIX}/agent/skill/files/{path}",
+                "href": f"{prefix}/files/{path}",
                 "bytes": len(body),
                 "sha256": sha256(body).hexdigest(),
             }
@@ -138,6 +158,32 @@ def create_agent_skill_router(engine: Engine) -> APIRouter:
     router = APIRouter()
     authenticate = BearerAuthentication(engine)
     bundle = SkillBundle()
+    named_bundles = {name: SkillBundle(name) for name in _SKILL_RESOURCES}
+
+    def manifest_response(selected: SkillBundle) -> JSONResponse:
+        return JSONResponse(
+            {"version": selected.version, "files": selected.file_entries},
+            headers=_PROTECTED_HEADERS,
+        )
+
+    def file_response(selected: SkillBundle, resource_path: str) -> Response:
+        body = selected.contents.get(resource_path)
+        if body is None:
+            raise resource_not_found()
+        return Response(
+            content=body,
+            media_type="text/markdown; charset=utf-8",
+            headers={
+                **_PROTECTED_HEADERS,
+                "Content-Disposition": f'attachment; filename="{resource_path.rsplit("/", 1)[-1]}"',
+            },
+        )
+
+    def named_bundle(skill_name: str) -> SkillBundle:
+        selected = named_bundles.get(skill_name)
+        if selected is None:
+            raise resource_not_found()
+        return selected
 
     @router.get("/connect", include_in_schema=False)
     def connect() -> HTMLResponse:
@@ -170,27 +216,29 @@ def create_agent_skill_router(engine: Engine) -> APIRouter:
     def manifest(
         _context: Annotated[AuthenticatedRequestContext, Depends(authenticate)],
     ) -> JSONResponse:
-        return JSONResponse(
-            {"version": bundle.version, "files": bundle.file_entries},
-            headers=_PROTECTED_HEADERS,
-        )
+        return manifest_response(bundle)
 
     @router.get(f"{API_V1_PREFIX}/agent/skill/files/{{resource_path:path}}")
     def skill_file(
         resource_path: str,
         _context: Annotated[AuthenticatedRequestContext, Depends(authenticate)],
     ) -> Response:
-        body = bundle.contents.get(resource_path)
-        if body is None:
-            raise resource_not_found()
-        return Response(
-            content=body,
-            media_type="text/markdown; charset=utf-8",
-            headers={
-                **_PROTECTED_HEADERS,
-                "Content-Disposition": f'attachment; filename="{resource_path.rsplit("/", 1)[-1]}"',
-            },
-        )
+        return file_response(bundle, resource_path)
+
+    @router.get(f"{API_V1_PREFIX}/agent/skills/{{skill_name}}/manifest")
+    def named_manifest(
+        skill_name: str,
+        _context: Annotated[AuthenticatedRequestContext, Depends(authenticate)],
+    ) -> JSONResponse:
+        return manifest_response(named_bundle(skill_name))
+
+    @router.get(f"{API_V1_PREFIX}/agent/skills/{{skill_name}}/files/{{resource_path:path}}")
+    def named_skill_file(
+        skill_name: str,
+        resource_path: str,
+        _context: Annotated[AuthenticatedRequestContext, Depends(authenticate)],
+    ) -> Response:
+        return file_response(named_bundle(skill_name), resource_path)
 
     return router
 

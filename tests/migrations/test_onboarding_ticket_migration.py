@@ -115,11 +115,13 @@ def test_upgrade_preserves_all_existing_data_and_exact_0032_roundtrip(
         command.upgrade(config, LIBRARY_SCOPES_SCHEMA_REVISION)
     before, schema = _snapshot(path), _schema(path)
     validate_database(path, schema_revision=LIBRARY_SCOPES_SCHEMA_REVISION)
-    command.upgrade(config, "head")
+    command.upgrade(config, ONBOARDING_TICKETS_SCHEMA_REVISION)
     assert {key: value for key, value in _snapshot(path).items() if key != TABLE} == before
     assert _snapshot(path)[TABLE] == []
-    assert validate_database(path).schema_revision == ONBOARDING_TICKETS_SCHEMA_REVISION
-    command.check(config)
+    assert (
+        validate_database(path, schema_revision=ONBOARDING_TICKETS_SCHEMA_REVISION).schema_revision
+        == ONBOARDING_TICKETS_SCHEMA_REVISION
+    )
     command.downgrade(config, LIBRARY_SCOPES_SCHEMA_REVISION)
     assert _snapshot(path) == before
     assert _schema(path) == schema
@@ -132,6 +134,7 @@ def test_existing_tickets_prevent_lossy_downgrade_and_roundtrip_through_backup(
 ) -> None:
     path = tmp_path / "tickets.sqlite"
     engine = seed_complete_database(path, monkeypatch)
+    command.downgrade(_config(path, monkeypatch), ONBOARDING_TICKETS_SCHEMA_REVISION)
     with closing(sqlite3.connect(path)) as connection:
         _insert(connection, _ticket(consumed=consumed))
         _audits(connection, consumed=consumed)
@@ -144,6 +147,8 @@ def test_existing_tickets_prevent_lossy_downgrade_and_roundtrip_through_backup(
         command.downgrade(_config(path, monkeypatch), LIBRARY_SCOPES_SCHEMA_REVISION)
     assert _snapshot(path) == before
     assert _schema(path) == schema
+    command.upgrade(_config(path, monkeypatch), "head")
+    before = _snapshot(path)
     try:
         bundle = _create(engine, tmp_path / "bundle")
     finally:
