@@ -1522,7 +1522,7 @@ def test_master_session_provisions_agent_with_explicit_cross_library_grants(
     token = _credential_from(created.text)
     result_home, caller_id, credential_id = _metadata_from(created.text)
     assert result_home == home_id
-    assert "此值可在 Agent 详情页经主会话再次显示" in created.text
+    assert "此值可在凭据详情页经主会话再次显示" in created.text
     assert token not in str(created.request.url)
     assert token not in (admin_web.client.cookies.get(_SESSION_COOKIE) or "")
     _assert_security_headers(created)
