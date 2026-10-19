@@ -132,6 +132,22 @@ class MasterUpdateAgentInput(AdminActionInput):
     expected_updated_at: TimestampMicros
 
 
+class MasterUpdateReadmeInput(AdminActionInput):
+    """Keep the Markdown source unchanged while protecting concurrent edits."""
+
+    model_config = ConfigDict(str_strip_whitespace=False)
+
+    readme: str
+    expected_updated_at: TimestampMicros
+
+    @field_validator("readme")
+    @classmethod
+    def reject_nul_readme(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("README must not contain NUL characters.")
+        return value
+
+
 class MasterRotateAgentCredentialInput(MasterCredentialLifetimeInput):
     pass
 
@@ -309,6 +325,7 @@ __all__ = [
     "MasterLibraryGrantInput",
     "MasterProvisionAgentInput",
     "MasterUpdateAgentInput",
+    "MasterUpdateReadmeInput",
     "MasterRotateAgentCredentialInput",
     "MasterSetAgentLibraryGrantsInput",
     "MasterLibraryScopeInput",

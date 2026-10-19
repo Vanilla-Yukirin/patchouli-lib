@@ -42,6 +42,7 @@ class Library(Base):
     id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), primary_key=True)
     name: Mapped[str] = mapped_column(String(NAME_MAX_LENGTH), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    readme: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
@@ -84,6 +85,7 @@ class Section(Base):
     library_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
     name: Mapped[str] = mapped_column(String(NAME_MAX_LENGTH), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
+    readme: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
@@ -138,6 +140,7 @@ class Book(Base):
     section_id: Mapped[str] = mapped_column(String(OPAQUE_ID_LENGTH), nullable=False)
     name: Mapped[str] = mapped_column(String(NAME_MAX_LENGTH), nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
+    readme: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 

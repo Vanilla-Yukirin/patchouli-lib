@@ -143,7 +143,12 @@ def test_skill_download_does_not_expand_library_scope(
 
         monkeypatch.setattr(AuthRepository, "list_credential_library_grants", unexpected_expansion)
         monkeypatch.setattr(AuthRepository, "get_credential_library_scope", unexpected_expansion)
-        for path in ("/api/v1/agent/skill/manifest", "/api/v1/agent/skill/files/SKILL.md"):
+        for path in (
+            "/api/v1/agent/skill/manifest",
+            "/api/v1/agent/skill/files/SKILL.md",
+            "/api/v1/agent/skills/patchouli-archive/manifest",
+            "/api/v1/agent/skills/patchouli-archive/files/SKILL.md",
+        ):
             response = client.get(path, headers={"Authorization": f"Bearer {token}"})
             assert response.status_code == 200
 
@@ -152,33 +157,38 @@ def test_skill_manifest_and_each_file_require_bearer_and_disable_caching(
     tmp_path: Path,
 ) -> None:
     client, token, _, _, _ = _client_and_token(tmp_path)
-    manifest_url = "/api/v1/agent/skill/manifest"
-    for path in (manifest_url, "/api/v1/agent/skill/files/SKILL.md"):
-        assert client.get(path).status_code == 401
-        assert client.get(path, headers={"Authorization": "Bearer invalid"}).status_code == 401
-
     headers = {"Authorization": f"Bearer {token}"}
-    response = client.get(manifest_url, headers=headers)
-    assert response.status_code == 200
-    assert response.headers["Cache-Control"] == "private, no-store"
-    assert response.headers["X-Content-Type-Options"] == "nosniff"
-    manifest = response.json()
-    assert manifest["version"].startswith(f"{__version__}+")
-    assert [entry["path"] for entry in manifest["files"]] == [
+    agent_paths = [
         "SKILL.md",
         "references/http.md",
         "references/local-token.md",
         "references/onboarding-ticket.md",
     ]
-    source = Path(__file__).resolve().parents[2] / "skills" / "patchouli-agent"
-    for entry in manifest["files"]:
-        downloaded = client.get(entry["href"], headers=headers)
-        assert downloaded.status_code == 200
-        assert downloaded.headers["Cache-Control"] == "private, no-store"
-        assert downloaded.headers["Content-Disposition"].startswith("attachment;")
-        assert downloaded.content == (source / entry["path"]).read_bytes()
-        assert entry["bytes"] == len(downloaded.content)
-        assert entry["sha256"] == sha256(downloaded.content).hexdigest()
+    for prefix, name, expected_paths in (
+        ("/api/v1/agent/skill", "patchouli-agent", agent_paths),
+        ("/api/v1/agent/skills/patchouli-agent", "patchouli-agent", agent_paths),
+        ("/api/v1/agent/skills/patchouli-archive", "patchouli-archive", ["SKILL.md"]),
+    ):
+        for path in (prefix + "/manifest", prefix + "/files/SKILL.md"):
+            assert client.get(path).status_code == 401
+            assert client.get(path, headers={"Authorization": "Bearer invalid"}).status_code == 401
+        response = client.get(prefix + "/manifest", headers=headers)
+        assert response.status_code == 200
+        assert response.headers["Cache-Control"] == "private, no-store"
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        manifest = response.json()
+        assert manifest["version"].startswith(f"{__version__}+")
+        assert [entry["path"] for entry in manifest["files"]] == expected_paths
+        source = Path(__file__).resolve().parents[2] / "skills" / name
+        for entry in manifest["files"]:
+            assert entry["href"] == prefix + "/files/" + entry["path"]
+            downloaded = client.get(entry["href"], headers=headers)
+            assert downloaded.status_code == 200
+            assert downloaded.headers["Cache-Control"] == "private, no-store"
+            assert downloaded.headers["Content-Disposition"].startswith("attachment;")
+            assert downloaded.content == (source / entry["path"]).read_bytes()
+            assert entry["bytes"] == len(downloaded.content)
+            assert entry["sha256"] == sha256(downloaded.content).hexdigest()
 
 
 def test_skill_file_allowlist_rejects_unlisted_paths(tmp_path: Path) -> None:
@@ -189,6 +199,10 @@ def test_skill_file_allowlist_rejects_unlisted_paths(tmp_path: Path) -> None:
         "/api/v1/agent/skill/files/references/other.md",
         "/api/v1/agent/skill/files/SKILL.md/extra",
         "/api/v1/agent/skill/files/%2e%2e/secret.md",
+        "/api/v1/agent/skills/unknown/manifest",
+        "/api/v1/agent/skills/unknown/files/SKILL.md",
+        "/api/v1/agent/skills/patchouli-archive/files/references/http.md",
+        "/api/v1/agent/skills/patchouli-archive/files/%2e%2e/SKILL.md",
     ):
         assert client.get(path, follow_redirects=False).status_code == 401
         response = client.get(path, headers=headers, follow_redirects=False)

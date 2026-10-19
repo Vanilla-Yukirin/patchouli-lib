@@ -8,6 +8,7 @@ from typing import Literal
 from urllib.parse import quote, urlencode
 
 from patchouli_lib.admin.interface_guide import api_guide, mcp_guide, skill_guide
+from patchouli_lib.admin.markdown_preview import render_readme
 from patchouli_lib.admin.read_model import (
     BookView,
     CallerItem,
@@ -62,6 +63,15 @@ _CREDENTIAL_META_HELP = (
 _REQUEST_LOG_HELP = (
     "API request metadata is kept online for 30 days. "
     "Tokens, content and search terms are not recorded."
+)
+_README_HELP = (
+    "README explains organization rules and how to use this space. "
+    "Keep it concise and link to a detailed Skill instead of pasting one here."
+)
+_SUMMARY_HELP = "A short navigation summary; use README for organization rules and instructions."
+_EMPTY_README = "No README yet. Add organization rules and first-use instructions here."
+README_STALE_MESSAGE = (
+    "The README changed since this form was opened. Review the current text and save again."
 )
 _DISABLE_AGENT_WARNING = (
     "Every Token for this identity will stop working, including Tokens granted access "
@@ -487,6 +497,17 @@ details summary { cursor: pointer; font-weight: 700; }
 
 
 _ZH_CN: dict[str, str] = {
+    "README — usage instructions": "README · 使用说明",
+    "Edit README": "编辑 README",
+    "Save README": "保存 README",
+    _EMPTY_README: "暂无 README。可在这里说明编排规则和首次使用方法。",
+    _README_HELP: (
+        "README 说明如何编排、如何使用。建议简短，详细流程请链接专用 Skill，不要整篇粘贴。"
+    ),
+    _SUMMARY_HELP: "用于导航的简短摘要；编排规则和操作指令请写在 README 中。",
+    "Section purpose": "分区用途",
+    "Book purpose": "书籍用途",
+    README_STALE_MESSAGE: "说明已被更新。请对照当前内容确认后，再保存你的草稿。",
     "Use the complete read/write scope editor for this Token.": (
         "请使用当前页面的完整读取／写入范围编辑器保存此 Token。"
     ),
@@ -2427,7 +2448,8 @@ def libraries_page(
         '<section class="card"><h2>' + localize(locale, "Create Library") + "</h2>"
         f'<form method="post" action="/admin/libraries">{_csrf(escape(csrf_token, quote=True))}'
         f"{_text('name', 'Library name', locale)}"
-        f"{_textarea('description', 'Library description', locale)}"
+        f"{_textarea('description', 'Library description', locale, help_text=_SUMMARY_HELP)}"
+        f"{_readme_input(locale)}"
         f'<button type="submit">{localize(locale, "Create Library")}</button></form></section>'
     )
     if message is not None:
@@ -2594,6 +2616,7 @@ def library_page(
     locale: AdminLocale = "en",
     master_mode: bool = False,
     message: str | None = None,
+    readme_draft: str | None = None,
 ) -> str:
     base = f"/admin/libraries/{escape(view.library.id, quote=True)}"
     cards = "".join(
@@ -2626,7 +2649,16 @@ def library_page(
         f"<p>{escape(view.library.description)}</p>"
         f'<p class="meta">{localize(locale, "Created")}: {_time(view.library.created_at)} · '
         f"{localize(locale, 'Page count')}: {view.library.page_count}</p>"
-        f"{tools}"
+        + _readme_card(
+            csrf_token,
+            base,
+            view.library.readme,
+            view.library.updated_at,
+            locale,
+            master_mode,
+            draft=readme_draft,
+        )
+        + f"{tools}"
         f"<h2>{localize(locale, 'Sections')}</h2>"
         + (
             f'<ul class="item-list">{cards}</ul>'
@@ -2639,7 +2671,10 @@ def library_page(
         f'<form method="post" action="{base}/sections">'
         f"{_csrf(escape(csrf_token, quote=True))}"
         f"{_text('name', 'Section name', locale)}"
-        f"{_textarea('description', 'Section description', locale)}"
+        + _textarea(
+            "description", "Section purpose", locale, help_text=_SUMMARY_HELP, required=True
+        )
+        + f"{_readme_input(locale)}"
         f'<button type="submit">{localize(locale, "Create Section")}</button>'
         "</form></section>"
     )
@@ -2782,6 +2817,7 @@ def section_page(
     locale: AdminLocale = "en",
     master_mode: bool = False,
     message: str | None = None,
+    readme_draft: str | None = None,
 ) -> str:
     library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
     base = f"{library_path}/sections/{escape(view.section.id, quote=True)}"
@@ -2792,7 +2828,16 @@ def section_page(
     )
     body = (
         f"<p>{escape(view.section.description)}</p>"
-        f'<p><a href="{base}/trash">{localize(locale, "Trash")}</a></p>'
+        + _readme_card(
+            csrf_token,
+            base,
+            view.section.readme,
+            view.section.updated_at,
+            locale,
+            master_mode,
+            draft=readme_draft,
+        )
+        + f'<p><a href="{base}/trash">{localize(locale, "Trash")}</a></p>'
         f"<h2>{localize(locale, 'Books')}</h2>"
     ) + (
         f'<ul class="item-list">{cards}</ul>'
@@ -2804,7 +2849,8 @@ def section_page(
         f'<form method="post" action="{base}/books">'
         f"{_csrf(escape(csrf_token, quote=True))}"
         f"{_text('name', 'Book name', locale)}"
-        f"{_textarea('summary', 'Book summary', locale)}"
+        f"{_textarea('summary', 'Book purpose', locale, help_text=_SUMMARY_HELP, required=True)}"
+        f"{_readme_input(locale)}"
         f'<button type="submit">{localize(locale, "Create Book")}</button>'
         "</form></section>"
     )
@@ -2995,6 +3041,7 @@ def book_page(
     master_mode: bool = False,
     message: str | None = None,
     before_cursor: str | None = None,
+    readme_draft: str | None = None,
 ) -> str:
     library_path = f"/admin/libraries/{escape(view.library.id, quote=True)}"
     section_path = f"{library_path}/sections/{escape(view.section.id, quote=True)}"
@@ -3006,7 +3053,19 @@ def book_page(
         f"{localize(locale, 'Current revision')}: {item.revision_number}</p></li>"
         for item in view.pages
     )
-    body = f"<p>{escape(view.book.summary)}</p><h2>{localize(locale, 'Pages')}</h2>" + (
+    body = (
+        f"<p>{escape(view.book.summary)}</p>"
+        + _readme_card(
+            csrf_token,
+            base,
+            view.book.readme,
+            view.book.updated_at,
+            locale,
+            master_mode,
+            draft=readme_draft,
+        )
+        + f"<h2>{localize(locale, 'Pages')}</h2>"
+    ) + (
         f'<ul class="item-list">{cards}</ul>'
         if view.pages
         else f'<p class="card">{localize(locale, "No pages yet.")}</p>'
@@ -3537,13 +3596,57 @@ def _textarea(
     locale: AdminLocale,
     *,
     help_text: str | None = None,
+    required: bool = False,
 ) -> str:
     escaped_name = escape(name, quote=True)
     described_by, help_markup = _field_help(escaped_name, help_text, locale)
     return (
         f'<label for="{escaped_name}">{escape(localize(locale, label))}</label>'
         f'<textarea id="{escaped_name}" name="{escaped_name}" '
-        f'maxlength="4000" rows="3"{described_by}></textarea>{help_markup}'
+        f'maxlength="4000" rows="3"{described_by}{" required" if required else ""}>'
+        f"</textarea>{help_markup}"
+    )
+
+
+def _readme_input(locale: AdminLocale, *, value: str = "", editing: bool = False) -> str:
+    identity = "readme-source" if editing else "new-readme"
+    return (
+        f'<label for="{identity}">{localize(locale, "README — usage instructions")}</label>'
+        f'<textarea id="{identity}" name="readme" rows="6" '
+        f'aria-describedby="{identity}-help" spellcheck="false">{escape(value)}</textarea>'
+        f'<p class="field-help" id="{identity}-help">{localize(locale, _README_HELP)}</p>'
+    )
+
+
+def _readme_card(
+    csrf: str,
+    base: str,
+    readme: str,
+    updated_at: int,
+    locale: AdminLocale,
+    master_mode: bool,
+    *,
+    draft: str | None = None,
+) -> str:
+    content = (
+        f'<div class="rendered-markdown">{render_readme(readme)}</div>'
+        if readme
+        else '<p class="section-help">' + localize(locale, _EMPTY_README) + "</p>"
+    )
+    editor = ""
+    if master_mode:
+        editor = (
+            f"<details{' open' if draft is not None else ''}><summary>"
+            f"{localize(locale, 'Edit README')}</summary>"
+            f'<form method="post" action="{base}/readme">{_csrf(escape(csrf, quote=True))}'
+            f'<input type="hidden" name="expected_updated_at" value="{updated_at}">'
+            + _readme_input(locale, value=readme if draft is None else draft, editing=True)
+            + f'<button type="submit">{localize(locale, "Save README")}</button></form></details>'
+        )
+    return (
+        '<section class="card readme-card" aria-labelledby="readme-heading">'
+        f'<h2 id="readme-heading">{localize(locale, "README — usage instructions")}</h2>'
+        f"{content}{editor}</section>"
     )
 
 

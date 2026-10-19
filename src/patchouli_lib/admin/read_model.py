@@ -133,6 +133,7 @@ class LibraryItem:
     created_at: int
     page_count: int
     updated_at: int
+    readme: str = ""
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,7 @@ class SectionItem:
     name: str
     description: str
     updated_at: int
+    readme: str = ""
 
 
 @dataclass(frozen=True)
@@ -149,6 +151,7 @@ class BookItem:
     name: str
     summary: str
     updated_at: int
+    readme: str = ""
 
 
 @dataclass(frozen=True)
@@ -1133,7 +1136,13 @@ class AdminReadModel:
             if library is None:
                 return None
             rows = connection.execute(
-                select(Section.id, Section.name, Section.description, Section.updated_at)
+                select(
+                    Section.id,
+                    Section.name,
+                    Section.description,
+                    Section.updated_at,
+                    Section.readme,
+                )
                 .where(Section.library_id == library_id)
                 .order_by(Section.name, Section.id)
             ).mappings()
@@ -1217,7 +1226,7 @@ class AdminReadModel:
             if library is None or section is None:
                 return None
             rows = connection.execute(
-                select(Book.id, Book.name, Book.summary, Book.updated_at)
+                select(Book.id, Book.name, Book.summary, Book.updated_at, Book.readme)
                 .where(Book.library_id == library_id, Book.section_id == section_id)
                 .order_by(Book.name, Book.id)
             ).mappings()
@@ -1771,6 +1780,7 @@ def _library_summary_query() -> Select[Any]:
             Library.description,
             Library.created_at,
             Library.updated_at,
+            Library.readme,
             func.count(Page.page_uid).label("page_count"),
         )
         .outerjoin(
@@ -1778,7 +1788,12 @@ def _library_summary_query() -> Select[Any]:
             and_(Page.library_id == Library.id, Page.deleted_at.is_(None)),
         )
         .group_by(
-            Library.id, Library.name, Library.description, Library.created_at, Library.updated_at
+            Library.id,
+            Library.name,
+            Library.description,
+            Library.created_at,
+            Library.updated_at,
+            Library.readme,
         )
         .order_by(Library.name, Library.id)
     )
@@ -1893,7 +1908,9 @@ def _get_library(connection: Connection, library_id: str) -> LibraryItem | None:
 def _get_section(connection: Connection, library_id: str, section_id: str) -> SectionItem | None:
     row = (
         connection.execute(
-            select(Section.id, Section.name, Section.description, Section.updated_at).where(
+            select(
+                Section.id, Section.name, Section.description, Section.updated_at, Section.readme
+            ).where(
                 Section.library_id == library_id,
                 Section.id == section_id,
             )
@@ -1909,7 +1926,7 @@ def _get_book(
 ) -> BookItem | None:
     row = (
         connection.execute(
-            select(Book.id, Book.name, Book.summary, Book.updated_at).where(
+            select(Book.id, Book.name, Book.summary, Book.updated_at, Book.readme).where(
                 Book.library_id == library_id,
                 Book.section_id == section_id,
                 Book.id == book_id,
@@ -1929,15 +1946,16 @@ def _library_item(row: RowMapping) -> LibraryItem:
         row["created_at"],
         row["page_count"],
         row["updated_at"],
+        row["readme"],
     )
 
 
 def _section_item(row: RowMapping) -> SectionItem:
-    return SectionItem(row["id"], row["name"], row["description"], row["updated_at"])
+    return SectionItem(row["id"], row["name"], row["description"], row["updated_at"], row["readme"])
 
 
 def _book_item(row: RowMapping) -> BookItem:
-    return BookItem(row["id"], row["name"], row["summary"], row["updated_at"])
+    return BookItem(row["id"], row["name"], row["summary"], row["updated_at"], row["readme"])
 
 
 def _page_item(row: RowMapping) -> PageItem:

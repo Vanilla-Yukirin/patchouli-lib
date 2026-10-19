@@ -28,6 +28,8 @@
 
 ## 工程文档
 
+- [三层 README 与 Agent 结构管理](proposals/library-guides-and-agent-structure.md)：
+  独立使用说明、空库发现与有库写权限的分区／书籍创建，契约已接受，随本轮 PR 验证。
 - [凭据管理与一次性接入小票](proposals/credential-onboarding-tickets.md)：凭据命名、
   短期单次兑换与多个自定义环境变量的本机接入；提案与实现随对应 PR 审查。
 - [Agent Token 的独立读取与写入范围](proposals/independent-library-scopes.md)：两项

@@ -35,6 +35,7 @@ from patchouli_lib.admin.contracts import (
     MasterTagFormInput,
     MasterUpdateAgentInput,
     MasterUpdatePageTitleInput,
+    MasterUpdateReadmeInput,
     PageTagFormInput,
     ProvisionAgentInput,
     RecoverOperatorInput,
@@ -62,6 +63,7 @@ from patchouli_lib.admin.master_token_store import (
 from patchouli_lib.admin.onboarding_pages import TICKET_SCRIPT, onboarding_ticket_page
 from patchouli_lib.admin.page_move_routes import create_master_page_move_router
 from patchouli_lib.admin.pages import (
+    README_STALE_MESSAGE,
     REVEAL_SCRIPT,
     STYLESHEET,
     TAG_MANAGEMENT_SCRIPT,
@@ -180,6 +182,9 @@ _MAX_BOOK_EDIT_FORM_BYTES: Final[int] = 65_536
 # Section description has the same 4,000-character Unicode bound as Book summary.
 _MAX_SECTION_EDIT_FORM_BYTES: Final[int] = 65_536
 _MAX_LIBRARY_EDIT_FORM_BYTES: Final[int] = 65_536
+# URL encoding can triple the UTF-8 source size. This is a transport budget,
+# not a README character limit; unrelated forms retain their existing budget.
+_MAX_README_FORM_BYTES: Final[int] = 6 * 1024 * 1024 + 65_536
 _MAX_PAGE_TITLE_EDIT_FORM_BYTES: Final[int] = 65_536
 _MAX_FORM_FIELDS: Final[int] = 32
 _RESTORE_STALE_MESSAGE: Final[str] = (
@@ -533,7 +538,11 @@ def create_admin_router(
                 status_code=401,
             )
         try:
-            values = await _read_form(request, allowed_fields=allowed_fields | {"csrf_token"})
+            values = await _read_form(
+                request,
+                allowed_fields=allowed_fields | {"csrf_token"},
+                max_bytes=_MAX_README_FORM_BYTES if "readme" in allowed_fields else _MAX_FORM_BYTES,
+            )
             _require_csrf(values, session)
             location = await run_in_threadpool(action, values, session)
         except _FormError as exc:
@@ -1335,6 +1344,127 @@ def create_admin_router(
             )
 
         return protected_page(request, render)
+
+    async def update_structure_readme(
+        request: Request,
+        library_id: str,
+        section_id: str | None = None,
+        book_id: str | None = None,
+    ) -> Response:
+        locale = locale_for(request)
+        if not _same_origin_submission(request):
+            return forbidden(request)
+        session = current_session(request)
+        if session is None:
+            return html(
+                login_page(locale=locale, message="Sign in again."), locale=locale, status_code=401
+            )
+        if not isinstance(session, MasterAdminSession):
+            return forbidden(request, "A master session is required.")
+        base = f"/admin/libraries/{library_id}"
+        if section_id is not None:
+            base += f"/sections/{section_id}"
+        if book_id is not None:
+            base += f"/books/{book_id}"
+        draft: str | None = None
+        try:
+            values = await _read_form(
+                request,
+                allowed_fields=frozenset(MasterUpdateReadmeInput.model_fields) | {"csrf_token"},
+                max_bytes=_MAX_README_FORM_BYTES,
+            )
+            _require_csrf(values, session)
+            submitted = MasterUpdateReadmeInput.model_validate(values)
+            draft = submitted.readme
+            await run_in_threadpool(
+                service.update_readme_as_master,
+                library_id,
+                submitted,
+                section_id=section_id,
+                book_id=book_id,
+                master_session=session,
+            )
+        except _FormError as exc:
+            status, message = exc.status_code, exc.safe_message
+        except (ValidationError, ValueError):
+            status, message = 422, "Check the submitted fields and try again."
+        except AuthenticationError:
+            status, message = 401, "Sign in again."
+        except LibraryStructureNotFoundError:
+            status, message = 404, "The requested local resource was not found."
+        except LibraryStructureVersionConflictError:
+            status, message = 409, README_STALE_MESSAGE
+        except Exception:
+            status, message = 500, "The action could not be completed."
+        else:
+            return redirect(base + "#readme-heading")
+        if status == 401:
+            response = html(
+                login_page(locale=locale, message=message), locale=locale, status_code=401
+            )
+            _clear_cookie(response, secure=secure_cookie(request))
+            return response
+        if book_id is not None and section_id is not None:
+            book_view = read_model.get_book_page(library_id, section_id, book_id)
+            page = (
+                None
+                if book_view is None
+                else book_page(
+                    session.csrf_token,
+                    book_view,
+                    locale=locale,
+                    master_mode=True,
+                    message=message,
+                    readme_draft=draft,
+                )
+            )
+        elif section_id is not None:
+            section_view = read_model.get_section(library_id, section_id)
+            page = (
+                None
+                if section_view is None
+                else section_page(
+                    session.csrf_token,
+                    section_view,
+                    locale=locale,
+                    master_mode=True,
+                    message=message,
+                    readme_draft=draft,
+                )
+            )
+        else:
+            library_view = read_model.get_library(library_id)
+            page = (
+                None
+                if library_view is None
+                else library_page(
+                    session.csrf_token,
+                    library_view,
+                    locale=locale,
+                    master_mode=True,
+                    message=message,
+                    readme_draft=draft,
+                )
+            )
+        return html(
+            browser_not_found_page(session.csrf_token, locale=locale) if page is None else page,
+            locale=locale,
+            status_code=404 if page is None else status,
+        )
+
+    @router.post("/libraries/{library_id}/readme")
+    async def update_library_readme(request: Request, library_id: str) -> Response:
+        return await update_structure_readme(request, library_id)
+
+    @router.post("/libraries/{library_id}/sections/{section_id}/readme")
+    async def update_section_readme(request: Request, library_id: str, section_id: str) -> Response:
+        return await update_structure_readme(request, library_id, section_id)
+
+    @router.post("/libraries/{library_id}/sections/{section_id}/books/{book_id}/readme")
+    async def update_book_readme(
+        request: Request, library_id: str, section_id: str, book_id: str
+    ) -> Response:
+        return await update_structure_readme(request, library_id, section_id, book_id)
 
     @router.post("/libraries/{library_id}")
     async def update_library(request: Request, library_id: str) -> Response:
@@ -3293,6 +3423,10 @@ async def _read_form(
             current.append(value)
         else:
             raise _FormError(422, "The submitted form contains a duplicate field.")
+    # Only a submitted README opts into the larger transport budget. Existing
+    # clients that omit the new field retain their smaller legacy form bound.
+    if "readme" in allowed_fields and "readme" not in values and len(body) > _MAX_FORM_BYTES:
+        raise _FormError(413, "The submitted form is too large.")
     return values
 
 

@@ -27,6 +27,11 @@ Library 表示一个逻辑知识服务。首个实现可以让每次部署只提
 
 Section 是稳定的策略和导航边界，例如项目、研究、日志或对话归档。
 
+当前新版 Agent Token 的读／写授权边界为 Library，Section 主要用于组织导航；
+旧 Section grant 仅保留其原兼容范围，不能自动扩大为整库权限。Library、Section、
+Book 的独立 README 描述用途和组织规则，导航描述／摘要仍单独保留，见
+[使用说明与结构管理](proposals/library-guides-and-agent-structure.md)。
+
 - 每个 Book 只属于一个 Section。
 - 查询通常应先选择 Section，再执行搜索。
 - Section 可以定义保留、授权、索引和整理策略。

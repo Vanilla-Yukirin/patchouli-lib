@@ -50,6 +50,7 @@ packages = ["src/patchouli_lib"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "skills/patchouli-agent" = "patchouli_lib/agent_resources"
+"skills/patchouli-archive" = "patchouli_lib/archive_resources"
 
 [tool.ruff]
 line-length = 100

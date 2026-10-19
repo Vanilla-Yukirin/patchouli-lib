@@ -17,6 +17,7 @@ from patchouli_lib.api.auth_routes import create_auth_router
 from patchouli_lib.api.errors import install_api_exception_handlers
 from patchouli_lib.api.file_set_read_routes import create_file_set_read_router
 from patchouli_lib.api.file_set_write_routes import create_file_set_write_router
+from patchouli_lib.api.library_structure_routes import create_library_structure_router
 from patchouli_lib.api.onboarding_routes import create_onboarding_router
 from patchouli_lib.api.page_lifecycle_routes import create_page_lifecycle_router
 from patchouli_lib.api.page_move_routes import create_page_move_router
@@ -55,9 +56,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else None
     )
     capabilities = CapabilityConfiguration(
-        features=("archive", FILE_SET_FEATURE, "page-lifecycle", "page-move", "retrieval", "tags")
+        features=(
+            "archive",
+            FILE_SET_FEATURE,
+            "library-structure",
+            "page-lifecycle",
+            "page-move",
+            "retrieval",
+            "tags",
+        )
         if cursor_secret is not None
-        else ("archive", FILE_SET_FEATURE, "page-lifecycle", "page-move", "tags"),
+        else (
+            "archive",
+            FILE_SET_FEATURE,
+            "library-structure",
+            "page-lifecycle",
+            "page-move",
+            "tags",
+        ),
         content_mutation_idempotency=True,
         successful_replay_retention="indefinite-alpha",
     )
@@ -109,6 +125,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(create_search_v2_router(engine, cursor_codec=cursor_codec))
     application.include_router(create_agent_skill_router(engine))
     application.include_router(create_onboarding_router(engine))
+    application.include_router(create_library_structure_router(engine))
     if cursor_codec is not None:
         application.include_router(
             create_retrieval_router(
