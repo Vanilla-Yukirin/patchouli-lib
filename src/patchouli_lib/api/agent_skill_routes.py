@@ -19,6 +19,7 @@ _SKILL_PATHS: Final = (
     "SKILL.md",
     "references/http.md",
     "references/local-token.md",
+    "references/onboarding-ticket.md",
 )
 _RESOURCE_ROOT = "agent_resources"
 _PROTECTED_HEADERS: Final = {
@@ -46,9 +47,31 @@ _INSTRUCTIONS: Final = """请帮我将 PatchouliLib 接入当前本地 Agent 环
 凭据 ID 不能证明这一点。独立实例、延迟副本或恢复后的数据库不能默认视为共享。
 无法确认时停止跨入口重放并交由用户核验；确认共享后，仍须按 Skill 原样核验／重试。
 
-先检查本机是否已经有该服务的设备 Token。若没有，请指导我在管理后台创建或复制
-设备 Token，但不要让我把 Token 发给你、放进聊天/提示词/URL/命令行参数，或上传
-给模型服务。请提供适合当前操作系统的终端交互式输入方法，让我在本机亲自输入。
+先确认当前 Agent 使用哪个自定义环境变量及保存位置，只检查该变量是否存在，不打印
+变量值或列举全部环境变量。同一电脑可以保存多份不同用途的凭据，不自动覆盖、共用或
+借用其他 Agent 的 Token；本方案不隔离同一系统用户下的程序。
+若没有长期 Token，可指导我在凭据管理页面创建后本机隐藏输入，也可使用我另行提供的
+“接入小票”：16字符、5分钟有效、成功兑换一次失效。小票是短期签发授权，持有者可
+选择普通凭据的权限和期限，包括全部现有及未来知识库。长期 Token 不发聊天、不写进
+提示词/URL/命令行参数，也不要将兑换成功的原始响应输出给模型。
+
+使用小票时，先问清凭据名称、说明、有效期或永不过期、独立读取与写入范围，以及
+本机变量名和保存位置。仅指定模式 include 的列表是允许项，空列表无权限；所有库
+模式 exclude 的列表是排除项，空列表包含全部现有和未来库。写入不自动包含读取。
+需要选库时，用标准 HTTP POST /api/v1/onboarding/libraries，JSON 为 {"code":"小票"}，
+返回 libraries 数组中的 id/name；查询不消费小票。按准确ID确认，不猜造。
+随后在本机写兑换脚本，POST /api/v1/onboarding/redeem，JSON 字段为 code、name、
+description、never_expires、credential_ttl_seconds、read_mode、read_libraries、
+write_mode、write_libraries。有限期用正整数秒；never_expires=true时省略秒数。
+201响应含 token、caller_id、credential_id、library_id；最后一项只是内部定位。
+脚本直接在进程内保存 token 到已确认的自定义环境变量或环境文件，不回显。
+先检查已有配置不冲突和保存位置可用；写后重新读取并校验身份和权限，不能只检查变量
+非空就算完成。Windows可保存User级变量，已有进程可直接从User级读取；Linux/macOS
+按我选择的环境文件或bashrc/zshrc加载，注意非交互工具可能不加载shell配置。
+仅把变量名、入口、用途、读取方法写入获授权的Skill/AGENTS.md/记忆，不记录真实值。
+不要自动跟随兑换请求重定向。401小票不可用、422参数错误、429限流；限流为每服务
+进程发现和兑换合计60次/分钟，请求最多128KiB。不要反复猜码。网络断开或保存失败时
+可能已经签发成功，停止重复兑换，让我在管理页找回或吊销；不要再生成更多凭据。
 
 用标准 HTTP 和本机输入的 Bearer Token 调用 /api/v1/auth/whoami 与
 /api/v1/capabilities，确认身份、说明、到期时间和实际权限。然后下载
@@ -123,9 +146,11 @@ def create_agent_skill_router(engine: Engine) -> APIRouter:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PatchouliLib · AI 原生接入</title></head><body>
 <main><h1>AI 原生接入</h1>
-<p>复制下面的无密钥指令，交给你的本地 Agent。设备 Token 只在本机输入，
-不要发送给模型。</p>
-<p>如果还没有设备 Token，请先在管理后台创建。新版本签发且仍有效的 Agent Token
+<p>复制下面的无密钥指令，交给你的本地 Agent。长期 Token 仅由本机脚本输入或保存，
+不要发送给模型；也可在凭据管理页面生成一次性接入小票，交给 Agent 兑换。</p>
+<p>同一设备可为不同用途保存多个自定义环境变量。接入小票有效五分钟、仅可成功兑换
+一次，持有者可选择普通凭据的读写范围和期限，请只交给你授权的 Agent。</p>
+<p>如果还没有设备 Token，请先在管理后台创建凭据或接入小票。新版本签发且仍有效的 Agent Token
 可由管理员登录后再次显示；早期只存校验值的旧 Token 无法还原。</p>
 <textarea id="instruction" readonly rows="20" cols="85">{escape(_INSTRUCTIONS)}</textarea>
 <p><button id="copy-instruction" type="button">复制接入指令</button>

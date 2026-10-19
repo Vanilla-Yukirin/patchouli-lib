@@ -168,6 +168,7 @@ def test_skill_manifest_and_each_file_require_bearer_and_disable_caching(
         "SKILL.md",
         "references/http.md",
         "references/local-token.md",
+        "references/onboarding-ticket.md",
     ]
     source = Path(__file__).resolve().parents[2] / "skills" / "patchouli-agent"
     for entry in manifest["files"]:

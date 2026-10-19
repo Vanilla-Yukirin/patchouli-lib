@@ -550,6 +550,60 @@ class MasterIdentity(Base):
     updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
+class OnboardingTicket(Base):
+    """Short-lived, one-use delegation to issue an ordinary credential."""
+
+    __tablename__ = "auth_onboarding_tickets"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["credential_id"],
+            ["auth_credentials.id"],
+            name="fk_auth_onboarding_tickets_credential",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("code_hash", name="uq_auth_onboarding_tickets_code_hash"),
+        UniqueConstraint("credential_id", name="uq_auth_onboarding_tickets_credential"),
+        CheckConstraint(
+            "length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'",
+            name="ck_auth_onboarding_tickets_id",
+        ),
+        CheckConstraint(
+            "typeof(code_hash) = 'blob' AND length(code_hash) = 32",
+            name="ck_auth_onboarding_tickets_hash",
+        ),
+        CheckConstraint(
+            "length(identity_id) = 32 AND identity_id NOT GLOB '*[^0-9a-f]*' "
+            "AND typeof(session_generation) = 'integer' AND session_generation >= 1",
+            name="ck_auth_onboarding_tickets_identity",
+        ),
+        CheckConstraint(
+            "typeof(session_fingerprint) = 'blob' AND length(session_fingerprint) = 32",
+            name="ck_auth_onboarding_tickets_fingerprint",
+        ),
+        CheckConstraint(
+            "typeof(created_at) = 'integer' AND created_at >= 0 "
+            "AND typeof(expires_at) = 'integer' AND expires_at = created_at + 300000000",
+            name="ck_auth_onboarding_tickets_clock",
+        ),
+        CheckConstraint(
+            "(consumed_at IS NULL AND credential_id IS NULL) OR "
+            "(typeof(consumed_at) = 'integer' AND consumed_at >= created_at "
+            "AND consumed_at < expires_at AND credential_id IS NOT NULL)",
+            name="ck_auth_onboarding_tickets_consumption",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    code_hash: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    identity_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    session_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    session_fingerprint: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expires_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    consumed_at: Mapped[int | None] = mapped_column(BigInteger)
+    credential_id: Mapped[str | None] = mapped_column(String(32))
+
+
 class BootstrapMarker(Base):
     __tablename__ = "operator_bootstrap_markers"
     __table_args__ = (

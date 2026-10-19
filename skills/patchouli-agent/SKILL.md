@@ -5,9 +5,12 @@ description: 通过标准 HTTP 接入 PatchouliLib，验证设备身份、下载
 
 # Patchouli Agent 使用指南
 
-首选标准 HTTP；不要求安装专用 CLI 或 MCP。先读[本机输入设备 Token](references/local-token.md)
-和[标准 HTTP 接口](references/http.md)。用户没有设备 Token 时，指导其在管理后台签发
-或复制。**不要让用户把 Token 发到模型聊天，也不要把 Token 放进接入提示词。**
+首选标准 HTTP；不要求安装专用 CLI 或 MCP。先读[本机多凭据配置](references/local-token.md)
+和[标准 HTTP 接口](references/http.md)。同一设备可以使用多份不同用途的凭据，先确认
+当前 Agent 专用的自定义环境变量名，不默认共享或覆盖其他 Agent 的凭据。
+缺少长期 Token 时，可以指导用户在管理后台创建后本机隐藏输入，也可以按
+[接入小票](references/onboarding-ticket.md)兑换一次性短期授权。
+**长期 Token 不发送到模型聊天或接入提示词。小票可由用户发来，但也是短期秘密。**
 
 ## 服务入口
 
@@ -26,7 +29,8 @@ description: 通过标准 HTTP 接入 PatchouliLib，验证设备身份、下载
 
 ## 身份与能力
 
-在本机交互式输入 Token，用 Bearer 请求头调用 `GET /api/v1/auth/whoami` 和
+从已确认的本机变量读取 Token，或由用户交互式隐藏输入，用 Bearer 请求头调用
+`GET /api/v1/auth/whoami` 和
 `GET /api/v1/capabilities`。核对身份、说明、有效期、目标 Library 的实际权限与服务
 实际公布的能力。随后按受保护的 Skill manifest 下载列出的全部文件，逐项核对字节数
 和 SHA-256，再依当前 Agent 环境的规则安装。已有本地 Skill 如被修改，先比较差异，
@@ -76,7 +80,11 @@ description: 通过标准 HTTP 接入 PatchouliLib，验证设备身份、下载
 
 ## 凭据与报告边界
 
-Token 只放在本机受控输入、进程内存或用户选择的本机机密存储。不得写入 URL、
+Token 只放在本机受控输入、进程内存或用户选择的本机存储（包括自定义环境变量）。
+持久环境变量不加密，也不隔离同一系统用户下的不同 Agent；如实说明一次，不自动
+替换用户已选择的方案。Skill、AGENTS.md 或用户指定的记忆位置仅记录入口、变量名、
+用途和读取方式，不记录值。不因知道变量名就自动获得操作用户内容的授权。
+长期 Token 不得写入 URL、
 命令行参数、模型工具参数、受跟踪文件或日志；不要在普通诊断里回显正文、搜索词、
 Source 定位值或 Token。报告操作结果、准确引用和必要的非机密请求 ID；用户未要求
 展示内容时不附上正文。CLI/MCP 若已存在，只是兼容选择，不是接入前置条件。

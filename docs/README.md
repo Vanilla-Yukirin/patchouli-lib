@@ -28,6 +28,8 @@
 
 ## 工程文档
 
+- [凭据管理与一次性接入小票](proposals/credential-onboarding-tickets.md)：凭据命名、
+  短期单次兑换与多个自定义环境变量的本机接入；提案与实现随对应 PR 审查。
 - [Agent Token 的独立读取与写入范围](proposals/independent-library-scopes.md)：两项
   独立的指定／排除模式，支持未来知识库，保留旧凭据与历史兼容边界。
 - [标签浏览与批量管理](proposals/tag-management.md)：全局标签浏览、批量改名和删除，
