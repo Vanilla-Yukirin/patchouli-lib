@@ -23,6 +23,32 @@ uv run ruff format --check .
 不因每次修复扩充参数矩阵；一次集成流程覆盖的内容无需再启动数据库重复验证。
 全量覆盖率由完整 CI 检查，局部运行不计算全仓覆盖率。
 
+### 精简后的浏览器冒烟范围
+
+以 `05288bfa` 为基线，实际启动 Chrome 的参数展开用例从 20 项减为 5 项，删除 15 项
+（75%）。此处只统计真实浏览器流程：文件名包含 `browser` 的 TestClient 测试和
+浏览器诊断单元测试不计入分母。删除重复用例及独占 helper，不使用 skip、xfail 或
+收集排除实现削减。
+
+| 保留流程 | 覆盖重点 |
+| --- | --- |
+| `test_master_onboarding_journey_browser.py` | 初始化与登录、小票同源提交、独立读写范围和凭据回读 |
+| `test_management_journey_browser.py` | 层级与文档创建、修订、搜索、回收恢复和下载 |
+| `test_page_media_browser.py` | 原生文件选择、实际图片解码、预览切换和下载 |
+| `test_revision_restore_browser.py` | 前端恢复确认与完整文件组恢复 |
+| `test_tag_management_browser.py` | 筛选、选择、批量改名和删除 |
+
+五条流程复用现有 fixture。文件集重试、历史资源绑定、旧凭据迁移及复杂过滤的
+协议与事务边界继续由已有 HTTP/service 测试覆盖；不再为这些内容重复启动 Chrome。
+共用 fixture 和 helper 即使仍位于 `test_*browser.py` 内，也不算新的冒烟用例。
+
+```sh
+uv run pytest --no-cov tests/admin/test_master_onboarding_journey_browser.py tests/admin/test_management_journey_browser.py tests/admin/test_page_media_browser.py tests/admin/test_revision_restore_browser.py tests/admin/test_tag_management_browser.py
+```
+
+用例数量减少不等于全仓运行时间同比下降。CI 仍执行其余单元、HTTP、迁移与覆盖率
+检查，耗时按实际运行结果记录，不通过放宽覆盖率或跳过失败项目来提速。
+
 ## 完整集成与发布验证
 
 需要完整集成演练时，运行全部源码、测试、迁移和文档检查：

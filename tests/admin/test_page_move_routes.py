@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import re
-from time import time
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 from httpx2 import Response
 from sqlalchemy import Engine, func, select
-from test_file_set_browser import _MASTER_TOKEN, _Browser, _navigate, _wait
 from test_file_set_browser import file_set_browser as file_set_browser
 from test_file_set_routes import (
     _ORIGIN,
@@ -31,11 +28,9 @@ from patchouli_lib.admin.master_audit import MasterAuditRepository
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.admin.move_receipts import MasterMoveReceiptRow
 from patchouli_lib.admin.service import AdminActionService
-from patchouli_lib.admin.session import MasterAdminSession
 from patchouli_lib.content.page_move_models import PageMoveEvent, PageMoveGuard
 from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import PageRecord
-from patchouli_lib.content.service import page_current_etag
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import NewBook, NewSection
@@ -245,128 +240,3 @@ def test_move_anonymous_and_legacy_sessions_are_rejected(
     )
     assert client.get(path).status_code == 403
     assert client.post(path, json={}, headers={"Origin": _ORIGIN}).status_code == 403
-
-
-@pytest.mark.parametrize("file_set_browser", ["insecure-http"], indirect=True)
-def test_native_move_recovers_original_request_after_committed_response_loss_and_delete(
-    file_set_browser: _Browser,
-) -> None:
-    from content.helpers import insert_page_graph, page_graph_values
-
-    browser = file_set_browser
-    parts = browser.book_path.split("/")
-    library_id, section_id, book_id = parts[3], parts[5], parts[7]
-    graph = page_graph_values(library_id=library_id, section_id=section_id, book_id=book_id)
-    with immediate_transaction(browser.engine) as connection:
-        insert_page_graph(connection, graph)
-    target = _target(browser.engine, library_id)
-    path = browser.book_path + "/pages/" + graph[0].page_id + "/move"
-    _navigate(
-        browser, path + "?lang=zh-CN", "document.querySelector('#move-submit')?.disabled === false"
-    )
-    assert browser.tools.evaluate("window.isSecureContext") is False
-    assert browser.tools.evaluate(
-        f"""(() => {{
-          document.querySelector('#target_section_id').value = {json.dumps(target[0])};
-          document.querySelector('#target_section_id').dispatchEvent(new Event('change'));
-          document.querySelector('#target_book_id').value = {json.dumps(target[1])};
-          document.querySelector('[name=confirm_move]').checked = true;
-          const originalFetch = window.fetch.bind(window);
-          window.fetch = async (...args) => {{
-            window.syntheticMovementRequest = {{path: args[0], headers: args[1].headers,
-              body: JSON.parse(args[1].body)}};
-            const response = await originalFetch(...args);
-            if (args[1]?.method === 'POST') {{
-              window.syntheticMovementSuccess = await response.clone().json();
-              throw new Error('synthetic committed response loss');
-            }}
-            return response;
-          }};
-          document.querySelector('#move-submit').click();
-          return true;
-        }})()"""
-    )
-    _wait(
-        browser.tools,
-        "document.querySelector('#move-status')?.textContent.startsWith('尚未确认')",
-        description="the lost movement response",
-    )
-    assert _move_counts(browser.engine) == (1, 0, 1)
-    storage_key = "patchouli-page-move-v1:" + path
-    pending = browser.tools.evaluate(f"sessionStorage.getItem({json.dumps(storage_key)})")
-    assert isinstance(pending, str)
-    stored = json.loads(pending)
-    assert stored["section"] == target[0] and stored["book"] == target[1]
-    original_request = browser.tools.evaluate("window.syntheticMovementRequest")
-    assert isinstance(original_request, dict)
-    assert original_request["path"] == path
-    assert original_request["headers"]["Idempotency-Key"] == stored["key"]
-    assert original_request["headers"]["If-Match"] == stored["etag"]
-    assert original_request["body"] == {
-        "target_section_id": target[0],
-        "target_book_id": target[1],
-        "confirm_move": "yes",
-    }
-    original_success = browser.tools.evaluate("window.syntheticMovementSuccess")
-    assert isinstance(original_success, dict)
-    assert original_success["changed"] is True and original_success["replayed"] is False
-    current = _page(browser.engine, library_id, graph[0].page_id)
-    with browser.engine.connect() as connection:
-        state = MasterTokenRepository(connection).authenticate(_MASTER_TOKEN)
-        assert state is not None
-    AdminActionService(browser.engine).delete_page_as_master(
-        library_id,
-        *target,
-        current.page_id,
-        MasterDeletePageFormInput(
-            expected_etag=page_current_etag(
-                current.page_uid,
-                current.current_revision_id,
-                current.current_revision_number,
-                current.occurred_at,
-                current.updated_at,
-            ),
-            confirm_delete="yes",
-        ),
-        master_session=MasterAdminSession(
-            expires_at=int(time()) + 600,
-            csrf_token="synthetic movement deletion",
-            identity_id=state.identity_id,
-            session_generation=state.session_generation,
-        ),
-    )
-    counts = _counts(browser.engine)
-    browser.tools.command("Page.reload")
-    _wait(
-        browser.tools,
-        "document.querySelector('#page-move')?.dataset.available === 'no' && "
-        "document.querySelector('#move-submit')?.disabled === false",
-        description="the protected original-operation recovery shell",
-    )
-    assert browser.tools.evaluate("document.querySelector('#target_section_id').disabled") is True
-    assert browser.tools.evaluate("document.querySelector('#target_book_id').disabled") is True
-    assert browser.tools.evaluate(f"sessionStorage.getItem({json.dumps(storage_key)})") == pending
-    assert browser.tools.evaluate("""(() => {
-      const originalFetch = window.fetch.bind(window);
-      window.fetch = async (...args) => {
-        window.syntheticMovementRequest = {path: args[0], headers: args[1].headers,
-          body: JSON.parse(args[1].body)};
-        return originalFetch(...args);
-      };
-      document.querySelector('[name=confirm_move]').checked = true;
-      document.querySelector('#move-submit').click(); return true;
-    })()""")
-    _wait(
-        browser.tools,
-        "document.querySelector('#move-status')?.textContent.startsWith('已返回原移动结果')",
-        description="the original movement success replay",
-    )
-    retry_request = browser.tools.evaluate("window.syntheticMovementRequest")
-    assert isinstance(retry_request, dict)
-    assert retry_request["path"] == original_request["path"]
-    assert retry_request["body"] == original_request["body"]
-    for header in ("Idempotency-Key", "If-Match"):
-        assert retry_request["headers"][header] == original_request["headers"][header]
-    assert browser.tools.evaluate(f"sessionStorage.getItem({json.dumps(storage_key)})") is None
-    assert _counts(browser.engine) == counts and _move_counts(browser.engine) == (1, 0, 1)
-    assert _page(browser.engine, library_id, graph[0].page_id).deleted_at is not None
