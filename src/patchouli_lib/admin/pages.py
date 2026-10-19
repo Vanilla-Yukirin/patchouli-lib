@@ -302,7 +302,38 @@ fieldset input { width: auto; }
 .scope-options .scope-library { padding: .5rem; margin: 0; border-radius: .35rem; }
 .scope-options .scope-library:hover { background: #eef4ef; }
 .scope-library span { min-width: 0; overflow-wrap: anywhere; }
-.scope-library input { flex-shrink: 0; }
+.scope-library input[type="checkbox"] {
+  appearance: none; display: inline-grid; place-content: center;
+  flex-shrink: 0; width: 1.2rem; height: 1.2rem; padding: 0;
+  margin: .15rem 0 0; border: 2px solid #87988b; border-radius: .2rem;
+  background: #fff; color: #fff; cursor: pointer;
+}
+.scope-library input[type="checkbox"]::before {
+  content: "✓"; font-size: 1rem; font-weight: 750; line-height: 1;
+  visibility: hidden;
+}
+.scope-library input[type="checkbox"]:checked { background: #2f6845; border-color: #2f6845; }
+.scope-library input[type="checkbox"]:checked::before { visibility: visible; }
+.scope-library input[type="checkbox"]:focus-visible {
+  outline: 3px solid #376bc3; outline-offset: 3px;
+}
+.scope-library:has(input:checked) { background: #eef4ef; }
+.scope-card:has(input[type="radio"][value="exclude"]:checked) .scope-library input::before {
+  content: "×";
+}
+.scope-card:has(input[type="radio"][value="exclude"]:checked) .scope-library input:checked {
+  background: #a52d35; border-color: #a52d35;
+}
+.scope-card:has(input[type="radio"][value="exclude"]:checked) .scope-library:has(input:checked) {
+  background: #fff0f0;
+}
+@media (forced-colors: active) {
+  .scope-library input[type="checkbox"] { forced-color-adjust: none; background: Canvas;
+    border-color: ButtonText; color: CanvasText; }
+  .scope-card .scope-library input[type="checkbox"]:checked { background: Highlight !important;
+    border-color: Highlight !important; color: HighlightText; }
+  .scope-library input[type="checkbox"]:focus-visible { outline-color: Highlight; }
+}
 .scope-options .scope-library[hidden] { display: none; }
 .scope-help, .scope-summary { font-size: .9rem; overflow-wrap: anywhere; }
 button {
@@ -1924,9 +1955,7 @@ def _library_scope_fields(
             else f"{action.title()} scope"
         )
         include_label = "仅选定知识库" if locale == "zh-CN" else "Only selected Libraries"
-        exclude_label = (
-            "所有知识库（可排除）" if locale == "zh-CN" else "All Libraries (with exclusions)"
-        )
+        exclude_label = "所有知识库" if locale == "zh-CN" else "All Libraries"
         include_summary = (
             "仅允许勾选的知识库；未选即无权限。切换模式后，勾选项作为允许项，请核对后保存。"
             if locale == "zh-CN"
@@ -1934,9 +1963,9 @@ def _library_scope_fields(
             "After switching modes, checked items become allowed; review before saving."
         )
         exclude_summary = (
-            "允许所有现在和未来的知识库；勾选项将被排除。切换模式后，请核对排除项再保存。"
+            "允许所有现在和未来的知识库；标 × 的知识库将被排除。切换模式后，请核对排除项再保存。"
             if locale == "zh-CN"
-            else "Allow current and future Libraries; checked items are excluded. "
+            else "Allow current and future Libraries; items marked × are excluded. "
             "After switching modes, review exclusions before saving."
         )
         options = "".join(
