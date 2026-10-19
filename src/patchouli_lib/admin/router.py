@@ -1252,34 +1252,27 @@ def create_admin_router(
         )
 
     @router.get("/onboarding-tickets")
-    def onboarding_ticket_form(request: Request) -> Response:
-        session = current_session(request)
-        if session is None:
-            return redirect("/admin/login")
-        if not isinstance(session, MasterAdminSession):
-            return forbidden(request, "A master session is required.")
-        response = html(
-            onboarding_ticket_page(session.csrf_token, locale=locale_for(request)),
-            locale=locale_for(request),
-        )
-        response.headers["Referrer-Policy"] = "no-referrer"
-        remember_requested_locale(response, request)
-        return response
+    def onboarding_ticket_form() -> Response:
+        return redirect("/admin/agents")
 
     @router.post("/onboarding-tickets")
     async def create_onboarding_ticket(request: Request) -> Response:
         locale = locale_for(request)
+
+        def ticket_error(status: int, message: str) -> Response:
+            return html(
+                onboarding_ticket_page("", locale=locale, message=localize(locale, message)),
+                locale=locale,
+                status_code=status,
+            )
+
         if not _same_origin_submission(request):
-            return forbidden(request)
+            return ticket_error(403, "Request origin was rejected.")
         session = current_session(request)
         if session is None:
-            return html(
-                login_page(locale=locale, message="Sign in again."),
-                locale=locale,
-                status_code=401,
-            )
+            return ticket_error(401, "Sign in again.")
         if not isinstance(session, MasterAdminSession):
-            return forbidden(request, "A master session is required.")
+            return ticket_error(403, "A master session is required.")
         try:
             values = await _read_form(request, allowed_fields=frozenset({"csrf_token"}))
             _require_csrf(values, session)
@@ -1293,7 +1286,7 @@ def create_admin_router(
         except Exception:
             status, message = 500, "The action could not be completed."
         else:
-            response = html(
+            return html(
                 onboarding_ticket_page(
                     session.csrf_token,
                     locale=locale,
@@ -1302,19 +1295,8 @@ def create_admin_router(
                     origin=str(request.base_url).rstrip("/"),
                 ),
                 locale=locale,
-                allow_self_script=True,
             )
-            response.headers["Referrer-Policy"] = "no-referrer"
-            return response
-        response = html(
-            onboarding_ticket_page(
-                session.csrf_token, locale=locale, message=localize(locale, message)
-            ),
-            locale=locale,
-            status_code=status,
-        )
-        response.headers["Referrer-Policy"] = "no-referrer"
-        return response
+        return ticket_error(status, message)
 
     @router.post("/libraries")
     async def create_library(request: Request) -> Response:
@@ -3167,7 +3149,7 @@ def create_admin_router(
     @router.get("/reveal.js")
     def reveal_script() -> Response:
         return PlainTextResponse(
-            REVEAL_SCRIPT,
+            REVEAL_SCRIPT + TICKET_SCRIPT,
             media_type="application/javascript",
             headers=_SECURITY_HEADERS,
         )

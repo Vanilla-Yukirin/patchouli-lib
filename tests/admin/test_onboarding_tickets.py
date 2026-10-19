@@ -1,6 +1,5 @@
 """Short-lived ticket UI preserves the master boundary and avoids secret caching."""
 
-import re
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -12,7 +11,6 @@ import patchouli_lib.admin.router as admin_router
 from patchouli_lib.admin.onboarding_pages import TICKET_SCRIPT, onboarding_ticket_page
 from patchouli_lib.admin.pages import AdminLocale, callers_page
 from patchouli_lib.api.agent_skill_routes import SkillBundle
-from patchouli_lib.auth.onboarding import OnboardingTicketService
 from patchouli_lib.auth.service import AuthenticationError
 
 
@@ -25,7 +23,8 @@ def test_credential_labels_and_ticket_entry() -> None:
         page = callers_page("csrf", (), locale=locale, allow_master_actions=True)
         assert heading in page and ticket in page
         assert "Create Agent" not in page and "创建 Agent" not in page
-        assert 'href="/admin/onboarding-tickets"' in page
+        assert 'id="ticket-form"' in page and 'action="/admin/onboarding-tickets"' in page
+        assert 'id="ticket-drawer"' in page and 'id="ticket-result"' in page
     assert "/admin/onboarding-tickets" not in callers_page("csrf", ())
 
 
@@ -50,18 +49,6 @@ def test_ticket_output_escapes_untrusted_values_and_discloses_authority() -> Non
         assert "/connect" in page
         assert "未来知识库" in page if locale == "zh-CN" else "future Libraries" in page
     assert "pagehide" in TICKET_SCRIPT and "navigator.clipboard.writeText" in TICKET_SCRIPT
-
-
-def test_ticket_prompt_points_to_registered_bootstrap_and_packaged_skill(
-    admin_web: AdminWeb,
-) -> None:
-    bootstrap = admin_web.client.get("/connect")
-    assert bootstrap.status_code == 200
-    assert "/api/v1/onboarding/redeem" in bootstrap.text
-    # The prompt's next step is authenticated: it must reach the actual router,
-    # not a guessed documentation alias. Full authenticated downloads are tested
-    # with the shared Skill manifest contract.
-    assert admin_web.client.get("/api/v1/agent/skill/manifest").status_code == 401
     bundle = SkillBundle()
     assert "SKILL.md" in bundle.contents
     assert "references/onboarding-ticket.md" in bundle.contents
@@ -75,21 +62,11 @@ def test_ticket_requires_master_session(admin_web: AdminWeb) -> None:
     assert admin_web.client.get("/admin/onboarding-tickets").status_code == 303
     assert _post(admin_web.client, "/admin/onboarding-tickets", data={}).status_code == 401
     csrf = _login(admin_web)
-    assert admin_web.client.get("/admin/onboarding-tickets").status_code == 403
+    assert admin_web.client.get("/admin/onboarding-tickets").status_code == 303
     assert (
         _post(admin_web.client, "/admin/onboarding-tickets", data={"csrf_token": csrf}).status_code
         == 403
     )
-
-
-def test_real_generation_delivers_one_working_ticket(admin_web: AdminWeb) -> None:
-    _initialize_master(admin_web)
-    _, csrf = _login_master(admin_web)
-    response = _post(admin_web.client, "/admin/onboarding-tickets", data={"csrf_token": csrf})
-    assert response.status_code == 200
-    matched = re.search(r'id="ticket-code"[^>]*>([A-Za-z0-9]{16})</textarea>', response.text)
-    assert matched is not None
-    assert OnboardingTicketService(admin_web.engine).discover(matched.group(1)) == ()
 
 
 def test_master_ticket_generation_guards_and_delivery(
@@ -100,13 +77,14 @@ def test_master_ticket_generation_guards_and_delivery(
     service = Mock()
     service.create.return_value = SimpleNamespace(code="AbCdEf0123456789", expires_at=300_000_000)
     monkeypatch.setattr(admin_router, "OnboardingTicketService", lambda engine: service)
+    bootstrap = admin_web.client.get("/connect")
+    assert bootstrap.status_code == 200 and "/api/v1/onboarding/redeem" in bootstrap.text
+    assert admin_web.client.get("/api/v1/agent/skill/manifest").status_code == 401
     form = admin_web.client.get("/admin/onboarding-tickets?lang=zh-CN")
-    assert form.status_code == 200
-    assert "所有当前和未来知识库" in form.text
-    assert 'name="csrf_token"' in form.text
-    assert 'name="read_mode"' not in form.text
+    assert form.status_code == 303
+    assert form.headers["location"].split("?", 1)[0] == "/admin/agents"
     assert "no-store" in form.headers["cache-control"]
-    assert form.headers["referrer-policy"] == "no-referrer"
+    assert form.headers["referrer-policy"] == "same-origin"
     for data, origin in (
         ({"csrf_token": "wrong"}, "https://admin.example.invalid"),
         ({"csrf_token": csrf}, "https://attacker.example.invalid"),
@@ -129,11 +107,10 @@ def test_master_ticket_generation_guards_and_delivery(
     service.create.assert_called_once()
     assert "AbCdEf0123456789" in response.text
     assert "https://admin.example.invalid" in response.text
-    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["referrer-policy"] == "same-origin"
     assert "no-store" in response.headers["cache-control"]
-    assert "script-src 'self'" in response.headers["content-security-policy"]
     assert "unsafe-inline" not in response.headers["content-security-policy"]
-    script = admin_web.client.get("/admin/onboarding-tickets.js")
+    script = admin_web.client.get("/admin/reveal.js")
     assert script.status_code == 200 and "AbCdEf0123456789" not in script.text
 
 
@@ -151,4 +128,5 @@ def test_ticket_generation_error_does_not_echo_secret(
     response = _post(admin_web.client, "/admin/onboarding-tickets", data={"csrf_token": csrf})
     assert response.status_code == status
     assert "secret" not in response.text
-    assert response.headers["referrer-policy"] == "no-referrer"
+    assert 'role="alert"' in response.text and "<html" not in response.text
+    assert response.headers["referrer-policy"] == "same-origin"

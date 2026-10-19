@@ -24,7 +24,8 @@
 
 ## 开发环境
 
-安装 Python 3.13、uv、Node.js 24 和 npm，然后运行完整的非容器验证：
+安装 Python 3.13、uv、Node.js 24 和 npm。日常改动只运行相关测试与静态检查，
+无需每次重复全量 CI；完整集成演练可运行：
 
 ```sh
 python scripts/validate.py

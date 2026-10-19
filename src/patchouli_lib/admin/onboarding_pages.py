@@ -3,29 +3,72 @@
 from datetime import UTC, datetime
 from html import escape
 
-from patchouli_lib.admin.pages import AdminLocale, _browser_document, _csrf
+from patchouli_lib.admin.pages import AdminLocale
 
 TICKET_SCRIPT = """
-document.querySelectorAll('[data-ticket-copy]').forEach(button => {
-  button.addEventListener('click', async () => {
+(() => {
+  const form = document.getElementById('ticket-form');
+  if (!form) return;
+  const drawer = document.getElementById('ticket-drawer');
+  const result = document.getElementById('ticket-result');
+  const submit = form.querySelector('button');
+  let expiryTimer;
+  function updateExpiry() {
+    const expiry = result.querySelector('[data-ticket-expires]');
+    if (!expiry) return;
+    const seconds = Math.max(0, Math.ceil((Date.parse(expiry.dateTime) - Date.now()) / 1000));
+    const remaining = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+    expiry.textContent = seconds ? remaining
+      : form.dataset.expired;
+    result.querySelectorAll('[data-ticket-copy]').forEach(button => button.disabled = !seconds);
+    if (!seconds) clearInterval(expiryTimer);
+  }
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (submit.disabled) return;
+    clearInterval(expiryTimer);
+    submit.disabled = true;
+    result.textContent = form.dataset.loading;
+    drawer.showModal();
+    try {
+      const response = await fetch(form.action, {
+        method: 'POST', body: new URLSearchParams(new FormData(form)),
+        credentials: 'same-origin', redirect: 'error'
+      });
+      result.innerHTML = await response.text();
+      if (response.ok) {
+        updateExpiry();
+        expiryTimer = setInterval(updateExpiry, 1000);
+      }
+    } catch {
+      result.textContent = form.dataset.failed;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  drawer.querySelector('[data-ticket-close]').addEventListener('click', () => drawer.close());
+  drawer.addEventListener('click', async event => {
+    const button = event.target.closest('[data-ticket-copy]');
+    if (!button || button.disabled) return;
     const output = document.getElementById(button.dataset.ticketCopy);
     const status = document.getElementById('ticket-copy-status');
     try {
       await navigator.clipboard.writeText(output.value);
       status.textContent = button.dataset.copied;
     } catch {
+      const details = output.closest('details');
+      if (details) details.open = true;
       output.focus();
       output.select();
       status.textContent = button.dataset.manual;
     }
   });
-});
-window.addEventListener('pagehide', () => {
-  document.querySelectorAll('[data-ticket-secret]').forEach(output => {
-    output.value = '';
-    output.textContent = '';
+  window.addEventListener('pagehide', () => {
+    clearInterval(expiryTimer);
+    result.replaceChildren();
+    drawer.close();
   });
-});
+})();
 """
 
 
@@ -39,30 +82,18 @@ def onboarding_ticket_page(
     message: str | None = None,
 ) -> str:
     chinese = locale == "zh-CN"
-    title = "接入小票" if chinese else "Onboarding ticket"
     warning = (
-        "小票是临时签发凭证：16 位随机字符，5 分钟有效，只能兑换一次。"
-        "持有小票的人可自行选择凭据名称、说明、有效期与读写权限，"
-        "包括永不过期及所有当前和未来知识库的全部读写权限。"
-        "请仅交给你信任的 Agent；小票可放入对话，长期 Token 不要放入对话。"
+        "5 分钟内使用，仅可兑换一次。仅交给信任的 Agent：它可兑换所有当前和未来知识库"
+        "的永久读写凭据。长期 Token 不要发到聊天。"
         if chinese
-        else "A ticket is temporary credential-issuing authority: 16 random characters, "
-        "valid for 5 minutes and redeemable once. Its holder chooses the credential name, "
-        "description, lifetime and read/write permissions, including never-expiring access "
-        "to all current and future Libraries. Give it only to an Agent you trust. The ticket "
-        "may be sent in chat; the long-lived Token must stay local."
+        else "Use within 5 minutes, once only. Give it only to a trusted Agent: it can redeem "
+        "permanent read/write access to all current and future Libraries. "
+        "Keep the Token out of chat."
     )
-    body = f'<section class="card"><p class="notice">{warning}</p>'
+    body = f'<section><p class="section-help">{warning}</p>'
     if message:
         body += f'<p role="alert">{escape(message)}</p>'
-    if code is None:
-        label = "立即生成小票" if chinese else "Generate ticket now"
-        body += (
-            '<form method="post" action="/admin/onboarding-tickets" autocomplete="off">'
-            + _csrf(escape(csrf_token, quote=True))
-            + f'<button type="submit">{label}</button></form>'
-        )
-    else:
+    if code is not None:
         assert expires_at is not None
         expiry = datetime.fromtimestamp(expires_at / 1_000_000, UTC).isoformat()
         prompt = (
@@ -101,7 +132,10 @@ def onboarding_ticket_page(
         )
         copied = "已复制" if chinese else "Copied"
         manual = "请手动复制选中的文本" if chinese else "Copy the selected text manually"
-        body += f"<p>{'到期时间' if chinese else 'Expires'}: {escape(expiry)}</p>"
+        body += (
+            f"<p>{'剩余时间' if chinese else 'Time left'}: "
+            f'<time data-ticket-expires datetime="{expiry}" title="{expiry}">5:00</time></p>'
+        )
         for key, value, label in (
             ("ticket-code", code, "复制小票" if chinese else "Copy ticket"),
             (
@@ -110,22 +144,19 @@ def onboarding_ticket_page(
                 "复制接入指令" if chinese else "Copy onboarding instructions",
             ),
         ):
+            if key == "ticket-prompt":
+                body += "<details><summary>" + ("指令预览" if chinese else "Preview instructions")
+                body += "</summary>"
             body += (
                 f'<label for="{key}">{label}</label>'
                 f'<textarea id="{key}" readonly data-ticket-secret spellcheck="false">'
-                f'{escape(value)}</textarea><button type="button" data-ticket-copy="{key}" '
+                f"{escape(value)}</textarea>"
+            )
+            if key == "ticket-prompt":
+                body += "</details>"
+            body += (
+                f'<button type="button" data-ticket-copy="{key}" '
                 f'data-copied="{copied}" data-manual="{manual}">{label}</button>'
             )
         body += '<p id="ticket-copy-status" role="status" aria-live="polite"></p>'
-    body += '</section><a class="action-link" href="/admin/agents">'
-    body += "返回凭据管理" if chinese else "Back to credential management"
-    body += "</a>"
-    return _browser_document(
-        csrf_token,
-        locale,
-        title,
-        "/admin/onboarding-tickets",
-        body,
-        script_src="/admin/onboarding-tickets.js" if code else None,
-        current_section="agents",
-    )
+    return body + "</section>"
