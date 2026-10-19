@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from sqlalchemy import Connection, Engine, select
 from starlette.responses import JSONResponse, Response
 
-from patchouli_lib.api.authentication import extract_bearer_token
+from patchouli_lib.api.authentication import BearerAuthentication, extract_bearer_token
 from patchouli_lib.api.contracts import API_V1_PREFIX, PROTECTED_CACHE_CONTROL
 from patchouli_lib.api.errors import (
     ApplicationProblem,
@@ -27,6 +27,7 @@ from patchouli_lib.auth.library_policy import LibraryGrantPolicy, resolve_librar
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import AuditOutcome, AuthenticatedCaller, CallerKind, NewAuditEvent
 from patchouli_lib.auth.service import (
+    LAST_USED_COALESCE_MICROSECONDS,
     AuthenticationError,
     AuthenticationService,
     AuthorizationError,
@@ -124,10 +125,14 @@ async def _body[T: BaseModel](request: Request, model: type[T]) -> T:
         raise _problem(422, "request_validation_failed") from None
 
 
-def _authenticate(connection: Connection, token: str, now: int) -> AuthenticatedCaller:
+def _authenticate(
+    connection: Connection, token: str, now: int, *, touch_last_used: bool = False
+) -> AuthenticatedCaller:
     repository = AuthRepository(connection)
     authenticated = AuthenticationService(
-        repository, clock=lambda: now, last_used_coalesce_microseconds=-1
+        repository,
+        clock=lambda: now,
+        last_used_coalesce_microseconds=LAST_USED_COALESCE_MICROSECONDS if touch_last_used else -1,
     ).authenticate(token)
     caller = authenticated.caller
     if caller.kind is not CallerKind.AGENT or not repository.has_library_grant_policy(
@@ -144,8 +149,9 @@ def _authorize(
     *,
     now: int,
     write: bool,
+    touch_last_used: bool = False,
 ) -> AuthenticatedCaller:
-    authenticated = _authenticate(connection, token, now)
+    authenticated = _authenticate(connection, token, now, touch_last_used=touch_last_used)
     caller = authenticated.caller
     policy = resolve_library_policy(
         connection,
@@ -240,7 +246,7 @@ def _pagination(request: Request) -> tuple[int, int]:
     try:
         limit = int(request.query_params.get("limit", "20"))
         offset = int(request.query_params.get("offset", "0"))
-        if not 1 <= limit <= 100 or offset < 0:
+        if not 1 <= limit <= 100 or not 0 <= offset <= (1 << 63) - 1:
             raise ValueError
     except ValueError:
         raise _problem(422, "request_validation_failed") from None
@@ -251,6 +257,7 @@ def create_library_structure_router(
     engine: Engine, *, clock: Clock = utc_microseconds
 ) -> APIRouter:
     router = APIRouter(prefix=API_V1_PREFIX)
+    authenticate_read = BearerAuthentication(engine, clock=clock)
 
     async def get_item(
         request: Request, library_id: str, section_id: str | None = None, book_id: str | None = None
@@ -259,6 +266,9 @@ def create_library_structure_router(
         library_id = _scope_id(library_id)
         section_id = None if section_id is None else _scope_id(section_id)
         book_id = None if book_id is None else _scope_id(book_id)
+        # Touch only when due using the existing short read/authentication fast path;
+        # the actual metadata snapshot below still rechecks identity and target scope.
+        await _call(partial(authenticate_read, request))
 
         def operation(connection: Connection) -> GuideRecord:
             _authorize(connection, token, library_id, now=clock(), write=False)
@@ -275,6 +285,7 @@ def create_library_structure_router(
         library_id = None if library_id is None else _scope_id(library_id)
         section_id = None if section_id is None else _scope_id(section_id)
         limit, offset = _pagination(request)
+        await _call(partial(authenticate_read, request))
 
         def operation(connection: Connection) -> dict[str, object]:
             if library_id is None:
@@ -285,7 +296,7 @@ def create_library_structure_router(
                     caller_id=caller.id,
                     credential_id=authenticated.credential.id,
                 )
-                statement = select(Library.__table__).where(
+                statement = select(*(c for c in Library.__table__.c if c.name != "readme")).where(
                     Library.id.in_(grant.library_id for grant in grants)
                 )
                 record_type: type[GuideRecord] = LibraryRecord
@@ -294,18 +305,21 @@ def create_library_structure_router(
                 _authorize(connection, token, library_id, now=clock(), write=False)
                 get_guide(connection, library_id=library_id, section_id=section_id)
                 if section_id is None:
-                    statement = select(Section.__table__).where(Section.library_id == library_id)
+                    statement = select(
+                        *(c for c in Section.__table__.c if c.name != "readme")
+                    ).where(Section.library_id == library_id)
                     record_type = SectionRecord
                     order = Section.id
                 else:
-                    statement = select(Book.__table__).where(
+                    statement = select(*(c for c in Book.__table__.c if c.name != "readme")).where(
                         Book.library_id == library_id, Book.section_id == section_id
                     )
                     record_type = BookRecord
                     order = Book.id
             rows = connection.execute(statement.order_by(order).offset(offset).limit(limit + 1))
             records = [
-                record_type.model_validate(row).model_dump(mode="json") for row in rows.mappings()
+                record_type.model_validate(row).model_dump(mode="json", exclude={"readme"})
+                for row in rows.mappings()
             ]
             return {
                 "items": records[:limit],
@@ -338,7 +352,9 @@ def create_library_structure_router(
         def operation() -> tuple[GuideRecord, int]:
             with immediate_transaction(engine) as connection:
                 now = clock()
-                authenticated = _authorize(connection, token, library_id, now=now, write=True)
+                authenticated = _authorize(
+                    connection, token, library_id, now=now, write=True, touch_last_used=True
+                )
                 repository = LibraryRepository(connection)
                 get_guide(connection, library_id=library_id, section_id=section_id)
                 if isinstance(body, _SectionInput):
@@ -405,7 +421,9 @@ def create_library_structure_router(
         def operation() -> GuideRecord:
             with immediate_transaction(engine) as connection:
                 now = clock()
-                authenticated = _authorize(connection, token, library_id, now=now, write=True)
+                authenticated = _authorize(
+                    connection, token, library_id, now=now, write=True, touch_last_used=True
+                )
                 current = get_guide(
                     connection, library_id=library_id, section_id=section_id, book_id=book_id
                 )

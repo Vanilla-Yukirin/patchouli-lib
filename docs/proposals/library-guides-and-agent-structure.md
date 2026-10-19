@@ -38,6 +38,8 @@ JSON 上限 2 MiB，非 README 字数限制。空 README 可以清除；原样 M
 - PUT 上述三个单资源路径加 `/readme`：更新对应 README。
 
 三个列表使用 limit（1–100，默认20）、offset，返回 items/next_offset；不返回正文。
+列表也不返回 README；选定对象后读取单资源，使用其 ETag 缓存说明。offset 必须在
+SQLite 有符号 64 位非负整数范围内。凭据最近使用时间沿用既有合并更新策略。
 POST 分区使用 name、description、可选 readme；POST 书籍使用 name、summary、
 可选 readme。用途说明须非空。首次创建 201，同一父级同名且元数据完全相同返回
 200 原身份；同名但不同元数据 409，不覆盖已有对象。超时后保留原请求，不能换名

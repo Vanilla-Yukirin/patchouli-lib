@@ -69,6 +69,7 @@ GET /api/v1/libraries/{library_id}/sections/{section_id}/books/{book_id}
 
 单资源返回稳定 `id`、名称、用途说明、`readme` 和 `updated_at`，响应带强 ETag。
 列表返回 `items`、`next_offset`，以 `limit`（默认20，1–100）与 `offset` 分页。
+列表仅提供导航元信息，不返回 `readme`；选定对象后读取对应单资源接口取得说明。
 先读 Library，再读目标 Section、Book 的 README；`description`／`summary` 是
 导航摘要，README 是编排与操作约定。规则缺失时不要自行假设某个 default 分类。
 已有规则且用户任务允许时，可以按规则创建所需结构，不用管理员先手工建立。

@@ -26,6 +26,7 @@ from patchouli_lib.auth.models import (
     CredentialLibraryGrant,
     CredentialLibraryPolicy,
 )
+from patchouli_lib.auth.service import LAST_USED_COALESCE_MICROSECONDS
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.library.models import Section
 from patchouli_lib.library.repository import LibraryRepository
@@ -40,6 +41,7 @@ class StructureStory:
     foreign_library: str
     headers: dict[str, str]
     credential_id: str
+    clock: list[int]
 
     @property
     def path(self) -> str:
@@ -63,12 +65,17 @@ def story(content_engine: Engine) -> StructureStory:
                 )
             )
     agent = _agent(content_engine, library_id)
+    with immediate_transaction(content_engine) as connection:
+        connection.execute(
+            update(Credential)
+            .where(Credential.id == agent.credential_id)
+            .values(expires_at=OPERATION_TIME + 1_000_000_000)
+        )
+    clock = [OPERATION_TIME + 50]
     app = FastAPI()
     install_api_exception_handlers(app)
     app.add_middleware(RequestIDMiddleware)
-    app.include_router(
-        create_library_structure_router(content_engine, clock=lambda: OPERATION_TIME + 50)
-    )
+    app.include_router(create_library_structure_router(content_engine, clock=lambda: clock[0]))
     return StructureStory(
         content_engine,
         app,
@@ -76,15 +83,25 @@ def story(content_engine: Engine) -> StructureStory:
         foreign_id,
         {"Authorization": f"Bearer {agent.token}"},
         agent.credential_id,
+        clock,
     )
 
 
 def test_empty_library_write_only_agent_initializes_hierarchy_and_readmes(
     story: StructureStory,
 ) -> None:
+    story.clock[0] += LAST_USED_COALESCE_MICROSECONDS
     with TestClient(story.app) as client:
         libraries = client.get("/api/v1/libraries", headers=story.headers)
         assert [item["id"] for item in libraries.json()["items"]] == [story.library]
+        assert "readme" not in libraries.json()["items"][0]
+        with story.engine.connect() as connection:
+            assert (
+                connection.scalar(
+                    select(Credential.last_used_at).where(Credential.id == story.credential_id)
+                )
+                == story.clock[0]
+            )
         assert client.get(story.path + "/sections", headers=story.headers).json()["items"] == []
         library = client.get(story.path, headers=story.headers)
         assert library.json()["readme"] == "  # Guide\n\nKeep additions.\n"
@@ -99,6 +116,10 @@ def test_empty_library_write_only_agent_initializes_hierarchy_and_readmes(
         )
         assert section.status_code == 201
         section_path = story.path + "/sections/" + section.json()["id"]
+        assert (
+            "readme"
+            not in client.get(story.path + "/sections", headers=story.headers).json()["items"][0]
+        )
         book = client.post(
             section_path + "/books",
             headers=story.headers,
@@ -108,6 +129,10 @@ def test_empty_library_write_only_agent_initializes_hierarchy_and_readmes(
         book_path = section_path + "/books/" + book.json()["id"]
         assert client.get(book_path, headers=story.headers).json()["readme"] == "  Book guide\n"
         assert len(client.get(section_path + "/books", headers=story.headers).json()["items"]) == 1
+        assert (
+            "readme"
+            not in client.get(section_path + "/books", headers=story.headers).json()["items"][0]
+        )
         for path in (story.path, section_path, book_path):
             current = client.get(path, headers=story.headers)
             assert (
@@ -212,11 +237,19 @@ def test_cross_library_and_mismatched_parent_paths_are_denied(story: StructureSt
 
 
 def test_same_parent_name_reuses_only_identical_metadata(story: StructureStory) -> None:
+    story.clock[0] += LAST_USED_COALESCE_MICROSECONDS
     with TestClient(story.app) as client:
         body = {"name": "Projects", "description": "Project context", "readme": "  Preserve\n"}
         created = client.post(story.path + "/sections", headers=story.headers, json=body)
         replay = client.post(story.path + "/sections", headers=story.headers, json=body)
         assert created.status_code == 201 and replay.status_code == 200
+        with story.engine.connect() as connection:
+            assert (
+                connection.scalar(
+                    select(Credential.last_used_at).where(Credential.id == story.credential_id)
+                )
+                == story.clock[0]
+            )
         assert replay.json() == created.json()
         assert (
             client.post(
@@ -373,7 +406,13 @@ def test_library_pagination_evaluates_exclusion_scope_once(story: StructureStory
         assert first.json()["items"][0]["id"] != story.library
         second = client.get("/api/v1/libraries?limit=1&offset=1", headers=story.headers)
         assert len(second.json()["items"]) == 1 and second.json()["next_offset"] is None
-        for query in ("limit=101", "offset=-1", "limit=1&limit=2", "unknown=1"):
+        for query in (
+            "limit=101",
+            "offset=-1",
+            "offset=9223372036854775808",
+            "limit=1&limit=2",
+            "unknown=1",
+        ):
             assert (
                 client.get("/api/v1/libraries?" + query, headers=story.headers).status_code == 422
             )
