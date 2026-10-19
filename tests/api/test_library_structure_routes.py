@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -336,14 +337,44 @@ def test_structure_json_is_bounded_without_markdown_length_limit(story: Structur
             ).status_code
             == 415
         )
+        for field in ("name", "description", "readme"):
+            malformed = {"name": "Invalid", "description": "Invalid text", field: "\ud800"}
+            assert (
+                client.post(
+                    story.path + "/sections",
+                    headers={**story.headers, "Content-Type": "application/json"},
+                    content=json.dumps(malformed).encode("ascii"),
+                ).status_code
+                == 422
+            )
+        section = client.post(
+            story.path + "/sections",
+            headers=story.headers,
+            json={"name": "Long", "description": "Large guide", "readme": "x" * 5000 + "📚"},
+        )
+        assert section.status_code == 201 and section.json()["readme"].endswith("📚")
         assert (
             client.post(
-                story.path + "/sections",
-                headers=story.headers,
-                json={"name": "Long", "description": "Large guide", "readme": "x" * 5000},
+                story.path + "/sections/" + section.json()["id"] + "/books",
+                headers={**story.headers, "Content-Type": "application/json"},
+                content=b'{"name":"Invalid","summary":"\\udfff"}',
             ).status_code
-            == 201
+            == 422
         )
+        current = client.get(story.path, headers=story.headers)
+        assert (
+            client.put(
+                story.path + "/readme",
+                headers={
+                    **story.headers,
+                    "Content-Type": "application/json",
+                    "If-Match": current.headers["etag"],
+                },
+                content=b'{"readme":"\\ud800"}',
+            ).status_code
+            == 422
+        )
+        assert client.get(story.path, headers=story.headers).json() == current.json()
         assert (
             client.post(
                 story.path + "/sections",
