@@ -446,6 +446,30 @@ details summary { cursor: pointer; font-weight: 700; }
 }
 .credential-summary .meta, .credential-item code { overflow-wrap: anywhere; }
 .credential-metadata { margin: .8rem 0 0; }
+.ticket-drawer {
+  box-sizing: border-box;
+  position: fixed;
+  inset: 0 0 0 auto;
+  margin: 0;
+  width: min(32rem, 100%);
+  height: 100dvh;
+  max-height: 100dvh;
+  max-width: 100%;
+  padding: 1.5rem;
+  border: 0;
+  border-left: 1px solid #d6ddd5;
+  background: #fff;
+  color: #1f2b22;
+  box-shadow: -8px 0 32px #0002;
+}
+.ticket-drawer::backdrop { background: #0003; }
+.ticket-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.ticket-heading h2 { margin: 0; }
+.ticket-drawer textarea { box-sizing: border-box; width: 100%; }
+.ticket-drawer #ticket-code { font: 1.5rem monospace; min-height: 3rem; height: 3rem; }
+.ticket-drawer #ticket-prompt { min-height: 16rem; }
+.ticket-drawer details { margin: 1rem 0; }
+.ticket-drawer button { margin: .3rem 0; }
 @media (max-width: 40rem) {
   .nav-actions { width: 100%; margin-left: 0; justify-content: space-between; }
   .admin-shell { display: block; }
@@ -2139,9 +2163,29 @@ def callers_page(
             else "Give an Agent a single-use ticket valid for 5 minutes to redeem and "
             "save a credential locally."
         )
-        + '</p><a class="action-link" href="/admin/onboarding-tickets">'
+        + '</p><form id="ticket-form" method="post" action="/admin/onboarding-tickets" '
+        + 'data-loading="'
+        + ("正在生成…" if locale == "zh-CN" else "Generating…")
+        + '" '
+        + 'data-expired="'
+        + ("已过期" if locale == "zh-CN" else "Expired")
+        + '" '
+        + 'data-failed="'
+        + (
+            "未能确认生成结果，请检查网络后再操作。"
+            if locale == "zh-CN"
+            else "Could not confirm the result. Check your connection before trying again."
+        )
+        + '">'
+        + _csrf(escape(csrf_token, quote=True))
+        + '<button type="submit">'
         + ("生成接入小票" if locale == "zh-CN" else "Generate onboarding ticket")
-        + "</a></section>"
+        + '</button></form></section><dialog id="ticket-drawer" class="ticket-drawer" '
+        + 'aria-labelledby="ticket-title"><header class="ticket-heading"><h2 id="ticket-title">'
+        + ("接入小票" if locale == "zh-CN" else "Onboarding ticket")
+        + '</h2><button type="button" class="secondary" data-ticket-close>'
+        + ("关闭" if locale == "zh-CN" else "Close")
+        + '</button></header><div id="ticket-result" aria-live="polite"></div></dialog>'
         if allow_master_actions
         else ""
     )

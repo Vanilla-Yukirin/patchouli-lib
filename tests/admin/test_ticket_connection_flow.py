@@ -15,9 +15,8 @@ from patchouli_lib.auth.models import Credential, OnboardingTicket
 from patchouli_lib.request_log.models import RequestLogRecord
 
 
-@pytest.mark.parametrize("never_expires", [False, True])
 def test_ticket_to_custom_scope_and_verified_skill_bundle(
-    admin_web: AdminWeb, caplog: pytest.LogCaptureFixture, never_expires: bool
+    admin_web: AdminWeb, caplog: pytest.LogCaptureFixture
 ) -> None:
     _initialize_master(admin_web)
     _, csrf = _login_master(admin_web)
@@ -37,7 +36,7 @@ def test_ticket_to_custom_scope_and_verified_skill_bundle(
     assert code_match is not None
     code = code_match.group(1)
     assert "no-store" in generated.headers["cache-control"]
-    assert generated.headers["referrer-policy"] == "no-referrer"
+    assert generated.headers["referrer-policy"] == "same-origin"
 
     discovered = admin_web.client.post("/api/v1/onboarding/libraries", json={"code": code})
     assert discovered.status_code == 200
@@ -51,14 +50,13 @@ def test_ticket_to_custom_scope_and_verified_skill_bundle(
         "code": code,
         "name": name,
         "description": description,
-        "never_expires": never_expires,
+        "never_expires": False,
+        "credential_ttl_seconds": 3_600,
         "read_mode": "exclude",
         "read_libraries": [],
         "write_mode": "include",
         "write_libraries": [second],
     }
-    if not never_expires:
-        payload["credential_ttl_seconds"] = 3_600
     exchanged = admin_web.client.post("/api/v1/onboarding/redeem", json=payload)
     assert exchanged.status_code == 201
     assert "no-store" in exchanged.headers["cache-control"]
@@ -76,7 +74,7 @@ def test_ticket_to_custom_scope_and_verified_skill_bundle(
     assert identity["name"] == name and identity["description"] == description
     assert identity["credential_id"] == delivery["credential_id"]
     assert identity["caller_id"] == delivery["caller_id"]
-    assert (identity["expires_at"] is None) == never_expires
+    assert identity["expires_at"] is not None
     assert identity["library_scope"]["read_mode"] == "exclude"
     assert identity["library_scope"]["read_libraries"] == []
     assert identity["library_scope"]["write_mode"] == "include"

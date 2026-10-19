@@ -9,9 +9,23 @@
 - Node.js 24 和 npm
 - 用于容器验证的 Docker 与 Compose
 
-## 一条命令完成验证
+## 日常修改：只验证相关范围
 
-运行全部源码、测试、迁移和文档检查：
+小范围修复先运行相关测试，不必在本地重复全部 CI。例如修改接入小票界面：
+
+```sh
+uv run pytest --no-cov tests/admin/test_onboarding_tickets.py tests/admin/test_ticket_connection_flow.py
+uv run ruff check .
+uv run ruff format --check .
+```
+
+涉及浏览器行为时运行已有的相关浏览器用例。优先调整已有案例或合并重复流程，
+不因每次修复扩充参数矩阵；一次集成流程覆盖的内容无需再启动数据库重复验证。
+全量覆盖率由完整 CI 检查，局部运行不计算全仓覆盖率。
+
+## 完整集成与发布验证
+
+需要完整集成演练时，运行全部源码、测试、迁移和文档检查：
 
 ```sh
 python scripts/validate.py

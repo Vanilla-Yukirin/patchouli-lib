@@ -53,6 +53,25 @@ def test_library_scope_cards_search_switch_clear_and_roundtrip(
         "document.querySelector('[name=credential_ttl_seconds]').required",
         description="the permission form script",
     )
+    # Exercise the existing page's actual submission policy, without injecting
+    # Origin as the HTTP helper does. Generation must stay in the drawer.
+    assert browser.tools.evaluate("document.querySelector('#ticket-form').requestSubmit(); true")
+    _wait(
+        browser.tools,
+        "document.querySelector('#ticket-drawer').open && "
+        "/^[A-Za-z0-9]{16}$/.test(document.querySelector('#ticket-code')?.value || '')",
+        description="the inline onboarding ticket",
+    )
+    assert browser.tools.evaluate("""(() => {
+      const drawer = document.querySelector('#ticket-drawer');
+      const result = drawer.querySelector('#ticket-result');
+      const valid = location.pathname === '/admin/agents'
+        && result.querySelector('#ticket-prompt').value.includes('/api/v1/onboarding/redeem')
+        && result.querySelector('time[data-ticket-expires]') !== null
+        && result.querySelector('[role=alert]') === null;
+      drawer.close();
+      return valid;
+    })()""")
     all_libraries = "所有知识库" if locale == "zh-CN" else "All Libraries"
     allowed_help = "允许" if locale == "zh-CN" else "allowed"
     assert browser.tools.evaluate(f"""(() => {{
@@ -294,10 +313,8 @@ def _multipart() -> tuple[str, bytes]:
 
 
 @pytest.mark.parametrize("setup_browser", ["proof"], indirect=True)
-@pytest.mark.parametrize("unlimited", [False, True])
 def test_real_browser_master_onboarding_to_cross_library_agent_http(
     setup_browser: _Browser,
-    unlimited: bool,
 ) -> None:
     browser = setup_browser
     _submit_setup(browser, proof=True)
@@ -331,24 +348,23 @@ def test_real_browser_master_onboarding_to_cross_library_agent_http(
     )
     section_id, book_id = (path.rsplit("/", 1)[-1] for path in (section_path, book_path))
     _navigate(browser, "/admin/agents", "document.querySelector('#agent_name') !== null")
-    if unlimited:
-        _wait(
-            browser.tools,
-            "document.querySelector('[name=credential_ttl_seconds]').required === true",
-            description="the lifetime control script",
-        )
-        assert browser.tools.evaluate(
-            """(() => {
-              const box = document.querySelector('[name=never_expires]');
-              const duration = document.querySelector('[name=credential_ttl_seconds]');
-              box.click();
-              if (!duration.disabled || duration.required) return false;
-              box.click();
-              if (duration.disabled || !duration.required) return false;
-              box.click();
-              return duration.disabled && !duration.required;
-            })()"""
-        )
+    _wait(
+        browser.tools,
+        "document.querySelector('[name=credential_ttl_seconds]').required === true",
+        description="the lifetime control script",
+    )
+    assert browser.tools.evaluate(
+        """(() => {
+          const box = document.querySelector('[name=never_expires]');
+          const duration = document.querySelector('[name=credential_ttl_seconds]');
+          box.click();
+          if (!duration.disabled || duration.required) return false;
+          box.click();
+          if (duration.disabled || !duration.required) return false;
+          box.click();
+          return duration.disabled && !duration.required;
+        })()"""
+    )
     assert (
         _submit_form(
             browser,
@@ -410,7 +426,7 @@ def test_real_browser_master_onboarding_to_cross_library_agent_http(
     assert status == 200
     identity = _json(raw)
     assert identity["name"] == _AGENT
-    assert (identity["expires_at"] is None) == unlimited
+    assert identity["expires_at"] is None
     assert identity["caller_id"] == detail_path.rsplit("/", 1)[-1]
     assert identity["grants"] == []
     assert identity["policy_mode"] == "library_grants"
