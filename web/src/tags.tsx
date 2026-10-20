@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { request, type Structure } from "./api";
 import type { PageProps } from "./app";
 import { items, useResource } from "./pages";
@@ -25,12 +25,29 @@ export function TagsManager(props: PageProps) {
 	const [deleting, setDeleting] = useState(false);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<unknown>();
-	const rows = items(data.data).filter(
-		(tag) =>
-			(!library || tag.library_id === library) &&
-			tag.name.toLocaleLowerCase().includes(search.toLocaleLowerCase()),
+	const rows = useMemo(
+		() =>
+			items(data.data).filter(
+				(tag) =>
+					(!library || tag.library_id === library) &&
+					tag.name.toLocaleLowerCase().includes(search.toLocaleLowerCase()),
+			),
+		[data.data, library, search],
 	);
+	const selectedRows = rows.filter((tag) => selected.includes(key(tag)));
+	useEffect(() => {
+		const visible = new Set(rows.map(key));
+		setSelected((current) => {
+			const kept = current.filter((id) => visible.has(id));
+			return kept.length === current.length ? current : kept;
+		});
+	}, [rows]);
 	const batch = async (operation: "rename" | "delete") => {
+		const targets = rows.filter((tag) => selected.includes(key(tag)));
+		if (!targets.length) {
+			setDeleting(false);
+			return;
+		}
 		setBusy(true);
 		setError(undefined);
 		try {
@@ -39,16 +56,14 @@ export function TagsManager(props: PageProps) {
 				body: JSON.stringify({
 					operation,
 					confirm_delete: operation === "delete",
-					changes: items(data.data)
-						.filter((tag) => selected.includes(key(tag)))
-						.map((tag) => ({
-							library_id: tag.library_id,
-							tag_id: tag.id,
-							expected_name: tag.name,
-							...(operation === "rename"
-								? { new_name: names[key(tag)] ?? tag.name }
-								: {}),
-						})),
+					changes: targets.map((tag) => ({
+						library_id: tag.library_id,
+						tag_id: tag.id,
+						expected_name: tag.name,
+						...(operation === "rename"
+							? { new_name: names[key(tag)] ?? tag.name }
+							: {}),
+					})),
 				}),
 			});
 			setSelected([]);
@@ -73,7 +88,7 @@ export function TagsManager(props: PageProps) {
 					<button
 						type="button"
 						className="secondary"
-						disabled={!selected.length || busy}
+						disabled={!selectedRows.length || busy}
 						onClick={() => batch("rename")}
 					>
 						{t("tags.saveSelectedNames")}
@@ -81,7 +96,7 @@ export function TagsManager(props: PageProps) {
 					<button
 						type="button"
 						className="danger"
-						disabled={!selected.length || busy}
+						disabled={!selectedRows.length || busy}
 						onClick={() => setDeleting(true)}
 					>
 						{t("tags.deleteSelected")}
@@ -121,11 +136,10 @@ export function TagsManager(props: PageProps) {
 					<button
 						type="button"
 						className="secondary"
+						disabled={!rows.length || busy}
 						onClick={() =>
 							setSelected(
-								rows.every((tag) => selected.includes(key(tag)))
-									? []
-									: rows.map(key),
+								selectedRows.length === rows.length ? [] : rows.map(key),
 							)
 						}
 					>
@@ -147,8 +161,8 @@ export function TagsManager(props: PageProps) {
 								onChange={(event) =>
 									setSelected(
 										event.target.checked
-											? [...selected, key(tag)]
-											: selected.filter((id) => id !== key(tag)),
+											? [...selectedRows.map(key), key(tag)]
+											: selectedRows.map(key).filter((id) => id !== key(tag)),
 									)
 								}
 							/>
@@ -226,13 +240,13 @@ export function TagsManager(props: PageProps) {
 			>
 				<p>
 					{t("tags.deleteTagsDocumentsFilesAndHistoryAre", {
-						p0: selected.length,
+						p0: selectedRows.length,
 					})}
 				</p>
 				<button
 					type="button"
 					className="danger"
-					disabled={busy}
+					disabled={!selectedRows.length || busy}
 					onClick={() => batch("delete")}
 				>
 					{t("tags.delete")}

@@ -9,6 +9,7 @@ import {
 import { setNonce } from "get-nonce";
 import React from "react";
 import { createRoot } from "react-dom/client";
+import { ApiError } from "./api";
 import { App } from "./app";
 import { PreferencesProvider } from "./preferences";
 import "./styles.css";
@@ -20,7 +21,13 @@ setNonce(
 
 const queryClient = new QueryClient({
 	defaultOptions: {
-		queries: { retry: 1, staleTime: 15_000, refetchOnWindowFocus: false },
+		queries: {
+			retry: (failureCount, error) =>
+				failureCount < 1 &&
+				!(error instanceof ApiError && error.status === 401),
+			staleTime: 15_000,
+			refetchOnWindowFocus: false,
+		},
 		mutations: { retry: false, gcTime: 0 },
 	},
 });

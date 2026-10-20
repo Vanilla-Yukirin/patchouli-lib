@@ -16,7 +16,14 @@ import {
 	Trash2,
 } from "lucide-react";
 import { type FormEvent, Fragment, useEffect, useState } from "react";
-import { api, request, type Session, setSessionCsrf } from "./api";
+import {
+	ApiError,
+	api,
+	request,
+	SESSION_EXPIRED_EVENT,
+	type Session,
+	setSessionCsrf,
+} from "./api";
 import { CredentialManager } from "./credentials";
 import {
 	Dashboard,
@@ -47,6 +54,7 @@ export function App() {
 	const [menu, setMenu] = useState(false);
 	const [command, setCommand] = useState(false);
 	const [notice, setNotice] = useState("");
+	const [sessionExpired, setSessionExpired] = useState(false);
 	const session = useQuery({
 		queryKey: ["session"],
 		queryFn: api.session,
@@ -60,6 +68,21 @@ export function App() {
 	useEffect(() => {
 		if (session.data) setSessionCsrf(session.data.csrf_token || "");
 	}, [session.data]);
+	useEffect(() => {
+		const expire = () => {
+			if (!queryClient.getQueryData<Session>(["session"])?.authenticated)
+				return;
+			setSessionCsrf("");
+			setSessionExpired(true);
+			setNotice("");
+			setMenu(false);
+			setCommand(false);
+			queryClient.clear();
+			queryClient.setQueryData(["session"], { authenticated: false });
+		};
+		window.addEventListener(SESSION_EXPIRED_EVENT, expire);
+		return () => window.removeEventListener(SESSION_EXPIRED_EVENT, expire);
+	}, [queryClient]);
 	useEffect(() => {
 		const handler = (event: KeyboardEvent) => {
 			if ((event.ctrlKey || event.metaKey) && event.key === "k") {
@@ -81,8 +104,10 @@ export function App() {
 		return (
 			<Auth
 				session={session.data}
+				expired={sessionExpired}
 				onSuccess={(value) => {
-					setSessionCsrf(value.csrf_token || "");
+					setSessionExpired(false);
+					setSessionCsrf(value.csrf_token || "", true);
 					queryClient.setQueryData(["session"], value);
 				}}
 			/>
@@ -254,9 +279,21 @@ export function App() {
 						className="icon-button"
 						aria-label={t("app.signOut")}
 						onClick={async () => {
-							await api.logout();
-							queryClient.clear();
-							session.refetch();
+							try {
+								await api.logout();
+								setSessionCsrf("");
+								queryClient.clear();
+								session.refetch();
+							} catch (error) {
+								if (
+									!(
+										error instanceof ApiError &&
+										error.status === 401 &&
+										error.code === "sign_in_required"
+									)
+								)
+									setNotice(error instanceof Error ? error.message : "Error");
+							}
 						}}
 					>
 						<LogOut size={18} />
@@ -325,9 +362,11 @@ export function App() {
 }
 function Auth({
 	session,
+	expired = false,
 	onSuccess,
 }: {
 	session?: Session;
+	expired?: boolean;
 	onSuccess: (session: Session) => void;
 }) {
 	const { t, locale, setLocale } = usePreferences();
@@ -380,6 +419,13 @@ function Auth({
 				</div>
 				<h1>{setup ? t("app.setUpMasterToken") : t("app.welcomeBack")}</h1>
 				<p className="muted">{t("app.aQuietPlaceForYourKnowledge")}</p>
+				{expired && (
+					<p className="alert" role="alert">
+						{locale === "zh-CN"
+							? "会话已失效，未保存的输入已清除。请重新登录，并核对尚未确认的操作。"
+							: "Your session has ended. Unsaved input has been cleared. Sign in again and check any operation whose outcome was not confirmed."}
+					</p>
+				)}
 				<label>
 					{t("app.masterToken")}
 					<input

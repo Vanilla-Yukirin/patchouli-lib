@@ -59,8 +59,19 @@ export class ApiError extends Error {
 	}
 }
 let csrf = "";
-export function setSessionCsrf(value: string) {
+let sessionEpoch = 0;
+export const SESSION_EXPIRED_EVENT = "patchouli:session-expired";
+export function setSessionCsrf(value: string, renewed = false) {
 	csrf = value;
+	// A background session read is not a new login. Only explicit renewal
+	// invalidates old requests independently of the CSRF synchronization effect.
+	if (renewed) sessionEpoch += 1;
+}
+function expireSession(epoch: number) {
+	if (epoch !== sessionEpoch) return;
+	csrf = "";
+	sessionEpoch += 1;
+	window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
 }
 export async function request<T>(
 	path: string,
@@ -103,6 +114,7 @@ export async function request<T>(
 		!headers.has("Content-Type")
 	)
 		headers.set("Content-Type", "application/json");
+	const epoch = sessionEpoch;
 	const response = await fetch(
 		path.startsWith("/admin/api/") ? path : `/admin/api/${path}`,
 		{
@@ -122,11 +134,10 @@ export async function request<T>(
 		try {
 			data = await response.json();
 		} catch {}
-		throw new ApiError(
-			response.status,
-			data.error?.code || data.code || "request_failed",
-			data.field_errors,
-		);
+		const code = data.error?.code || data.code || "request_failed";
+		if (response.status === 401 && code === "sign_in_required")
+			expireSession(epoch);
+		throw new ApiError(response.status, code, data.field_errors);
 	}
 	if (response.status === 204) return undefined as T;
 	const result = await response.json();
@@ -270,11 +281,19 @@ export function safeHref(value: string) {
 	return url.pathname + url.search;
 }
 export async function readText(file: FileEntry) {
+	const epoch = sessionEpoch;
 	const response = await fetch(
 		safeHref(file.content_href || file.download_href),
 		{ credentials: "same-origin", cache: "no-store", redirect: "error" },
 	);
-	if (!response.ok) throw new ApiError(response.status, "file_unavailable");
+	if (!response.ok) {
+		if (response.status === 401) {
+			const data = await response.json().catch(() => null);
+			if ((data?.error?.code || data?.code) === "sign_in_required")
+				expireSession(epoch);
+		}
+		throw new ApiError(response.status, "file_unavailable");
+	}
 	const bytes = new Uint8Array(await response.arrayBuffer());
 	if (bytes.includes(0)) throw new Error("Binary file");
 	return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(

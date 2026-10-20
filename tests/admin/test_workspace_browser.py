@@ -37,6 +37,7 @@ from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import LibraryStructureSeed
 from patchouli_lib.library.service import LibrarySeedService
 from patchouli_lib.library_skills.service import LibrarySkillService
+from patchouli_lib.tags.repository import TagRepository
 
 TOKEN = "synthetic browser workspace master token"
 SOURCE = (
@@ -188,6 +189,12 @@ def workspace_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterat
             )
         )
         MasterTokenRepository(connection).initialize_from_local_cli(TOKEN, now=1_000_000)
+        TagRepository(connection).add_tag(
+            library_id=structure.library.id,
+            tag_id="a" * 32,
+            name="Browser tag",
+            created_at=1_000_000,
+        )
         page = FileSetPageCreateCore(connection).create_page(
             book=structure.book,
             title="Workspace title",
@@ -309,6 +316,38 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
     browser = workspace_browser
     tools = browser.tools
     page_path = f"/admin/libraries/{browser.library}/pages/{browser.page}"
+    tools.command("Page.navigate", {"url": browser.origin + "/admin/tags"})
+    wait(tools, "document.querySelector('.tag-row input[type=checkbox]') !== null")
+    click(tools, "document.querySelector('.tag-row input[type=checkbox]')")
+    assert tools.evaluate(f"!({button('Save selected names')}).disabled")
+    click(tools, button("Delete selected"))
+    wait(tools, "document.querySelector('[role=dialog]') !== null")
+    assert tools.evaluate(
+        "document.querySelector('[role=dialog]').textContent.includes('Delete 1 tags?')"
+    )
+    click(tools, "document.querySelector('[role=dialog] button[aria-label=Close]')")
+    wait(tools, "document.querySelector('[role=dialog]') === null")
+    click(tools, "document.querySelector('.filter-bar input')")
+    tools.command("Input.insertText", {"text": "no matching tag"})
+    wait(tools, "document.querySelector('.tag-row') === null")
+    assert tools.evaluate(f"({button('Save selected names')}).disabled")
+    assert tools.evaluate(f"({button('Delete selected')}).disabled")
+    assert tools.evaluate(f"({button('Select current results')}).disabled")
+    assert tools.evaluate("document.querySelector('.panel h2').textContent") == "Tags · 0"
+    for kind in ("keyDown", "keyUp"):
+        tools.command(
+            "Input.dispatchKeyEvent",
+            {"type": kind, "key": "a", "code": "KeyA", "windowsVirtualKeyCode": 65, "modifiers": 2},
+        )
+    for kind in ("keyDown", "keyUp"):
+        tools.command(
+            "Input.dispatchKeyEvent",
+            {"type": kind, "key": "Backspace", "code": "Backspace", "windowsVirtualKeyCode": 8},
+        )
+    wait(tools, "document.querySelector('.tag-row input[type=checkbox]') !== null")
+    assert not tools.evaluate("document.querySelector('.tag-row input[type=checkbox]').checked")
+    assert tools.evaluate(f"({button('Save selected names')}).disabled")
+    assert tools.evaluate(f"({button('Delete selected')}).disabled")
     tools.command("Page.navigate", {"url": f"{browser.origin}/admin/libraries/{browser.library}"})
     wait(tools, f"Boolean({button('New section')})")
     click(tools, button("New section"))
@@ -773,6 +812,21 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
             "entry.md": replacement.read_bytes(),
             "renamed-note.txt": ATTACHMENT,
         }
+    tools.command("Network.clearBrowserCookies")
+    click(tools, button("Manage"))
+    wait(tools, "document.querySelector('[role=menuitem]') !== null")
+    click(
+        tools,
+        "Array.from(document.querySelectorAll('[role=menuitem]'))"
+        ".find(item=>item.textContent.trim()==='Requests')",
+    )
+    wait(tools, "document.querySelector('.auth-card input[name=token]') !== null")
+    assert tools.evaluate("document.querySelector('.auth-card input[name=token]').value") == ""
+    assert tools.evaluate("document.querySelector('.auth-card [role=alert]').textContent") == (
+        "Your session has ended. Unsaved input has been cleared. "
+        "Sign in again and check any operation whose outcome was not confirmed."
+    )
+    assert tools.evaluate("document.querySelector('main') === null")
 
 
 def test_browser_failure_diagnostics_redact_local_details(tmp_path: Path) -> None:

@@ -469,6 +469,7 @@ function ResourceWorkspace(
 			if (
 				error instanceof Error &&
 				"status" in error &&
+				Number(error.status) !== 401 &&
 				Number(error.status) < 500
 			) {
 				pendingOperation.current = null;
