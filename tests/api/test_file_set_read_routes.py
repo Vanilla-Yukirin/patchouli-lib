@@ -357,6 +357,8 @@ def test_current_page_returns_verified_manifest_and_strong_etag(file_set_api: Fi
     current = _get(file_set_api, path)
     assert current.status_code == 200
     assert current.json() == {
+        "primary_file": None,
+        "display_title": "无标题",
         "page_id": scope.first_page_id,
         "revision_id": scope.second_revision_id,
         "revision_number": 2,
@@ -564,6 +566,8 @@ def test_legacy_revision_is_one_file_in_the_unified_contract(file_set_api: FileS
     listing = _get(file_set_api, base)
     assert listing.status_code == 200
     assert listing.json() == {
+        "primary_file": None,
+        "display_title": "无标题",
         "page_id": file_set_api.scope.first_page_id,
         "revision_id": file_set_api.scope.first_revision_id,
         "revision_number": 1,

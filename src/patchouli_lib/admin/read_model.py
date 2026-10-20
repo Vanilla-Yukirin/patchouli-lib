@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable, Sequence
-from contextlib import suppress
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from hashlib import sha256
 from time import time_ns
@@ -42,9 +42,12 @@ from patchouli_lib.content.models import (
     RevisionFile,
 )
 from patchouli_lib.content.page_membership_history import load_page_state_timeline
+from patchouli_lib.content.presentation import read_presentation
 from patchouli_lib.content.service import page_current_etag
+from patchouli_lib.identifiers import validate_revision_id
 from patchouli_lib.identifiers.page_ids import InvalidPageIdError, validate_page_id
 from patchouli_lib.library.models import Book, Library, Section
+from patchouli_lib.library_skills.models import LibrarySkillRevision
 from patchouli_lib.request_log.models import RequestLogRecord
 from patchouli_lib.retrieval.file_set_read import (
     FileSetReadNotFoundError,
@@ -60,6 +63,8 @@ _PAGE_HISTORY_SIZE = 20
 _ACTIVITY_PAGE_SIZE = 20
 _BOOK_PAGE_SIZE = 20
 _REQUEST_LOG_PAGE_SIZE = 20
+_WORKSPACE_PAGE_ACTIONS = ("content.page.workspace_save", "content.page.revision_restore")
+_WORKSPACE_SKILL_ACTIONS = ("library.skill.workspace_save", "library.skill.revision_restore")
 
 
 def _lower_hex_id(value: str) -> bool:
@@ -321,6 +326,9 @@ class ContentActivityItem:
     page_deleted: bool
     tag_id: str | None
     tag_name: str | None
+    revision_id: str | None = None
+    skill_id: str | None = None
+    skill_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -410,6 +418,24 @@ class AdminReadModel:
 
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
+        self._bound_connection: Connection | None = None
+
+    @classmethod
+    def from_connection(cls, connection: Connection) -> AdminReadModel:
+        """Read within the caller's already-authorized snapshot without owning it."""
+        if not connection.in_transaction():
+            raise RuntimeError("A caller-owned read transaction is required.")
+        result = cls(connection.engine)
+        result._bound_connection = connection
+        return result
+
+    @contextmanager
+    def _connect(self) -> Iterator[Connection]:
+        if self._bound_connection is not None:
+            yield self._bound_connection
+        else:
+            with self._engine.connect() as connection:
+                yield connection
 
     def request_log_page(
         self,
@@ -467,7 +493,7 @@ class AdminReadModel:
         statement = statement.order_by(
             RequestLogRecord.occurred_at.desc(), RequestLogRecord.id.desc()
         ).limit(_REQUEST_LOG_PAGE_SIZE + 1)
-        with self._engine.connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(statement).mappings().all()
         visible = rows[:_REQUEST_LOG_PAGE_SIZE]
         return RequestLogPage(
@@ -494,11 +520,11 @@ class AdminReadModel:
                 RequestLogRecord.caller_id == actor[1],
             )
         statement = statement.order_by(RequestLogRecord.method, RequestLogRecord.route_template)
-        with self._engine.connect() as connection:
+        with self._connect() as connection:
             return tuple((method, route) for method, route in connection.execute(statement))
 
     def list_libraries(self) -> tuple[LibraryItem, ...]:
-        with self._engine.connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(_library_summary_query()).mappings().all()
             return tuple(_library_item(row) for row in rows)
 
@@ -506,7 +532,7 @@ class AdminReadModel:
         self, library_id: str, *, section_id: str | None = None, before: str | None = None
     ) -> TrashDirectoryView | None:
         cursor = _parse_trash_cursor(before)
-        with self._engine.connect() as connection:
+        with self._connect() as connection:
             library = _get_library(connection, library_id)
             if library is None:
                 return None
@@ -540,7 +566,7 @@ class AdminReadModel:
     def get_trash_page(
         self, library_id: str, section_id: str, page_id: str
     ) -> TrashPageView | None:
-        with self._engine.connect() as connection:
+        with self._connect() as connection:
             library = _get_library(connection, library_id)
             section = _get_section(connection, library_id, section_id)
             if library is None or section is None:
@@ -576,7 +602,7 @@ class AdminReadModel:
     def list_callers(self) -> tuple[CallerItem, ...]:
         """List identity metadata, never credential verifiers or raw tokens."""
 
-        with self._engine.connect() as connection:
+        with self._connect() as connection:
             rows = (
                 connection.execute(
                     select(
@@ -630,9 +656,10 @@ class AdminReadModel:
         actor: tuple[str, str] | None,
         before: tuple[int, str, str] | None,
     ) -> tuple[tuple[int, str, str, ContentActivityItem], ...]:
-        with self._engine.connect() as connection:
+        with self._connect() as connection:
             # Keep the two audit streams and their linked content in one snapshot.
-            connection.exec_driver_sql("BEGIN")
+            if self._bound_connection is None:
+                connection.exec_driver_sql("BEGIN")
             agent_events = (
                 select(
                     AuditEvent.id,
@@ -821,6 +848,8 @@ class AdminReadModel:
                             "tag.create",
                             "tag.page.attach",
                             "tag.page.detach",
+                            *_WORKSPACE_PAGE_ACTIONS,
+                            *_WORKSPACE_SKILL_ACTIONS,
                         )
                     )
                 )
@@ -840,6 +869,16 @@ class AdminReadModel:
                     .all()
                 )
             for event in master_events:
+                if event["action"] in (*_WORKSPACE_PAGE_ACTIONS, *_WORKSPACE_SKILL_ACTIONS):
+                    items.append(
+                        (
+                            event["occurred_at"],
+                            "m",
+                            event["id"],
+                            _workspace_activity_item(connection, event),
+                        )
+                    )
+                    continue
                 parts = event["target_id"].split(":")
                 revision_number = None
                 if event["action"] in (
@@ -971,9 +1010,10 @@ class AdminReadModel:
             return tuple(items[:limit])
 
     def get_caller(self, library_id: str, caller_id: str) -> CallerView | None:
-        with self._engine.connect() as connection:
+        with self._connect() as connection:
             # Keep grant state and its audit-backed version in one SQLite snapshot.
-            connection.exec_driver_sql("BEGIN")
+            if self._bound_connection is None:
+                connection.exec_driver_sql("BEGIN")
             now = time_ns() // 1_000
             row = (
                 connection.execute(
@@ -1131,7 +1171,7 @@ class AdminReadModel:
             )
 
     def get_library(self, library_id: str) -> LibraryView | None:
-        with self._engine.connect() as connection:
+        with self._connect() as connection:
             library = _get_library(connection, library_id, include_readme=True)
             if library is None:
                 return None
@@ -1158,14 +1198,14 @@ class AdminReadModel:
             return LibraryView(library, sections, tags, trash_count)
 
     def list_tags(self) -> tuple[GlobalTagItem, ...]:
-        with self._engine.connect() as connection:
+        with self._connect() as connection:
             return tuple(
                 GlobalTagItem(row["library_id"], row["library_name"], _tag_item(row))
                 for row in connection.execute(_tag_summary_query()).mappings()
             )
 
     def list_library_tags(self, library_id: str) -> TagDirectoryView | None:
-        with self._engine.connect() as connection:
+        with self._connect() as connection:
             library = _get_library(connection, library_id)
             if library is None:
                 return None
@@ -1173,7 +1213,7 @@ class AdminReadModel:
             return TagDirectoryView(library, tuple(_tag_item(row) for row in rows))
 
     def get_library_tag(self, library_id: str, tag_id: str) -> TagView | None:
-        with self._engine.connect() as connection:
+        with self._connect() as connection:
             library = _get_library(connection, library_id)
             if library is None:
                 return None
@@ -1219,7 +1259,7 @@ class AdminReadModel:
             return TagView(library, _tag_item(tag_row), pages)
 
     def get_section(self, library_id: str, section_id: str) -> SectionView | None:
-        with self._engine.connect() as connection:
+        with self._connect() as connection:
             library = _get_library(connection, library_id)
             section = _get_section(connection, library_id, section_id, include_readme=True)
             if library is None or section is None:
@@ -1233,7 +1273,7 @@ class AdminReadModel:
             return SectionView(library, section, books)
 
     def get_book(self, library_id: str, section_id: str, book_id: str) -> BookView | None:
-        with self._engine.connect() as connection:
+        with self._connect() as connection:
             library = _get_library(connection, library_id)
             section = _get_section(connection, library_id, section_id)
             book = _get_book(connection, library_id, section_id, book_id, include_readme=True)
@@ -1263,7 +1303,7 @@ class AdminReadModel:
         self, library_id: str, section_id: str, book_id: str, before: str | None = None
     ) -> BookView | None:
         cursor = _parse_book_cursor(before)
-        with self._engine.connect() as connection:
+        with self._connect() as connection:
             library = _get_library(connection, library_id)
             section = _get_section(connection, library_id, section_id)
             book = _get_book(connection, library_id, section_id, book_id, include_readme=True)
@@ -1326,7 +1366,7 @@ class AdminReadModel:
         revision_number: int | None = None,
         before_revision_number: int | None = None,
     ) -> PageView | None:
-        with self._engine.connect() as connection:
+        with self._connect() as connection:
             return self._get_page(
                 connection,
                 library_id,
@@ -1351,8 +1391,9 @@ class AdminReadModel:
         The router must admit only a current master session on this connection.
         The callback must not end the transaction or read through another connection.
         """
-        with self._engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN")
+        with self._connect() as connection:
+            if self._bound_connection is None:
+                connection.exec_driver_sql("BEGIN")
             try:
                 if not authorize(connection):
                     raise AuthenticationError
@@ -1383,7 +1424,8 @@ class AdminReadModel:
                     before_revision_number,
                 )
             finally:
-                connection.rollback()
+                if self._bound_connection is None:
+                    connection.rollback()
 
     def get_page_preview_by_id(
         self,
@@ -1400,8 +1442,9 @@ class AdminReadModel:
         Rendering and raster decoding belong after this method returns.
         The older metadata/plain-preview methods intentionally remain unchanged.
         """
-        with self._engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN")
+        with self._connect() as connection:
+            if self._bound_connection is None:
+                connection.exec_driver_sql("BEGIN")
             try:
                 if not authorize(connection):
                     raise AuthenticationError
@@ -1442,7 +1485,8 @@ class AdminReadModel:
                     raise AdminPagePreviewPersistenceError
                 return PagePreviewRead(view, snapshot)
             finally:
-                connection.rollback()
+                if self._bound_connection is None:
+                    connection.rollback()
 
     @staticmethod
     def _get_page(
@@ -1707,6 +1751,103 @@ def _master_move_activity_revision(
         raise RuntimeError("Page history requires SQLite.")
     validate_master_move_receipt(raw, receipt)
     return receipt.revision_number
+
+
+def _workspace_activity_item(connection: Connection, event: RowMapping) -> ContentActivityItem:
+    """Resolve one new workspace event from its exact saved resource version."""
+
+    parts = event["target_id"].split(":")
+    if len(parts) != 3 or not _lower_hex_id(parts[0]):
+        raise RuntimeError("Invalid workspace activity audit target.")
+    library_id, resource_id, revision_id = parts
+    try:
+        validate_revision_id(revision_id)
+        if event["action"] in _WORKSPACE_PAGE_ACTIONS:
+            validate_page_id(resource_id)
+        elif not _lower_hex_id(resource_id):
+            raise ValueError
+    except ValueError:
+        raise RuntimeError("Invalid workspace activity audit target.") from None
+    if event["action"] in _WORKSPACE_PAGE_ACTIONS:
+        if event["target_type"] != "page":
+            raise RuntimeError("Invalid workspace activity audit target.")
+        page = (
+            connection.execute(
+                select(
+                    Page.page_uid,
+                    Page.section_id,
+                    Page.book_id,
+                    Page.page_id,
+                    Page.deleted_at,
+                    Revision.revision_number,
+                    Revision.created_at,
+                )
+                .join(
+                    Revision,
+                    (Revision.library_id == Page.library_id) & (Revision.page_uid == Page.page_uid),
+                )
+                .where(
+                    Page.library_id == library_id,
+                    Page.page_id == resource_id,
+                    Revision.revision_id == revision_id,
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if page is None or page["created_at"] > event["occurred_at"]:
+            raise RuntimeError("Invalid workspace activity revision association.")
+        return ContentActivityItem(
+            library_id=library_id,
+            actor_home_library_id=None,
+            actor_id=None,
+            actor_name="Administrator",
+            action=event["action"],
+            occurred_at=event["occurred_at"],
+            page_title=read_presentation(
+                connection, library_id, page["page_uid"], revision_id
+            ).display_title,
+            section_id=page["section_id"],
+            book_id=page["book_id"],
+            page_id=page["page_id"],
+            revision_number=page["revision_number"],
+            page_deleted=page["deleted_at"] is not None,
+            tag_id=None,
+            tag_name=None,
+            revision_id=revision_id,
+        )
+    if event["target_type"] != "library_skill":
+        raise RuntimeError("Invalid workspace activity audit target.")
+    skill = connection.execute(
+        select(
+            LibrarySkillRevision.number, LibrarySkillRevision.name, LibrarySkillRevision.created_at
+        ).where(
+            LibrarySkillRevision.library_id == library_id,
+            LibrarySkillRevision.skill_id == resource_id,
+            LibrarySkillRevision.id == revision_id,
+        )
+    ).one_or_none()
+    if skill is None or skill.created_at > event["occurred_at"]:
+        raise RuntimeError("Invalid workspace activity revision association.")
+    return ContentActivityItem(
+        library_id=library_id,
+        actor_home_library_id=None,
+        actor_id=None,
+        actor_name="Administrator",
+        action=event["action"],
+        occurred_at=event["occurred_at"],
+        page_title=None,
+        section_id=None,
+        book_id=None,
+        page_id=None,
+        revision_number=skill.number,
+        page_deleted=False,
+        tag_id=None,
+        tag_name=None,
+        revision_id=revision_id,
+        skill_id=resource_id,
+        skill_name=skill.name,
+    )
 
 
 def _master_file_set_activity_revision(

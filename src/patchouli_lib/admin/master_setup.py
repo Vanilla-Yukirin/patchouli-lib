@@ -120,16 +120,7 @@ class MasterSetupService:
         setup_cookie: str | None,
     ) -> AdminSession | MasterSetupSession:
         if legacy_cookie is not None:
-            if (
-                setup_proof is not None
-                or setup_cookie is not None
-                or self._settings.admin_password_hash is None
-                or self._legacy_codec is None
-            ):
-                raise MasterSetupAuthorizationError("Master setup authorization was rejected.")
-            legacy = self._legacy_codec.verify(legacy_cookie)
-            if legacy is not None:
-                return legacy
+            raise MasterSetupAuthorizationError("Password sessions are no longer supported.")
         elif (
             setup_proof is not None
             and setup_cookie is not None

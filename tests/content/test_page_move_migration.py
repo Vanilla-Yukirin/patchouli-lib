@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from content.page_move_helpers import _command, _target
 from patchouli_lib.admin.master_audit import MasterAuditRepository
 from patchouli_lib.admin.page_move_service import MasterPageMoveService
+from patchouli_lib.backup.manifest import LIBRARY_GUIDES_SCHEMA_REVISION
 from patchouli_lib.content.page_move_models import PageMoveEvent, PageMoveGuard
 from patchouli_lib.database import immediate_transaction
 
@@ -179,6 +180,9 @@ def test_event_and_receipt_are_immutable_and_single_consumption(
 def test_downgrade_refuses_real_and_noop_success(
     content_engine: Engine, monkeypatch: pytest.MonkeyPatch, changed: bool
 ) -> None:
+    assert content_engine.url.database is not None
+    config = _config(Path(content_engine.url.database), monkeypatch)
+    command.downgrade(config, LIBRARY_GUIDES_SCHEMA_REVISION)
     story = _story(content_engine)
     page = _page(content_engine, story.command.library_id, story.command.page_id)
     target = _target(content_engine, page) if changed else (page.section_id, page.book_id)
@@ -187,9 +191,8 @@ def test_downgrade_refuses_real_and_noop_success(
         _key("move"),
         master_session=story.session,
     )
-    assert content_engine.url.database is not None
     with pytest.raises(RuntimeError, match="Cannot discard"):
-        command.downgrade(_config(Path(content_engine.url.database), monkeypatch), "20261001_0027")
+        command.downgrade(config, "20261001_0027")
     with content_engine.connect() as connection:
         assert (
             connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()

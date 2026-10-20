@@ -5,9 +5,8 @@
 
 ## 当前实现状态
 
-[PR #63](https://github.com/Vanilla-Yukirin/patchouli-lib/pull/63) 已合并至 `main`
-提交 `d730c12f`；[对应主分支工作流](https://github.com/Vanilla-Yukirin/patchouli-lib/actions/runs/37132313866)
-已成功并发布 OCI 镜像。当前代码能力以[路线图](../ROADMAP.md)和该 PR 为准。
+已合并能力以 `main`、[路线图](../ROADMAP.md)和对应 PR 为准；本轮独立工作区、
+入口文件和库内 Skills 的开发契约见 [ADR 0005](decisions/0005-library-workspace.md)。
 各设计文档保留的“开发分支”“尚未合并”等实施切片描述记录当时的状态，不能据此
 否定已合并实现。实现合并不自动接受全部 Proposed 契约，也不建立长期兼容承诺；
 镜像发布不表示任何实例已更新，部署与现场验收仍是独立管理员操作。
@@ -28,9 +27,12 @@
 
 ## 工程文档
 
+- [管理工作区](admin-workspace.md)：主 Token 登录、阅读与编辑、库内 Skills、设备接入
+  和独立前端构建；对应本轮开发实现，发布与部署另行验收。
+
 - [知识库工作区与库内 Skills 产品需求](proposals/library-workspace-and-skills.md)：
   顶部全局导航、概览与分区阅读分层、文本编辑和标题解析、引用批量调整、两级搜索，
-  以及库内多文件 Skill 的网页管理和本机安装更新；产品需求已确认，接口与迁移待审。
+  以及库内多文件 Skill 的网页管理和本机安装更新；本轮实现与迁移随 PR 审查。
 - [三层 README 与 Agent 结构管理](proposals/library-guides-and-agent-structure.md)：
   独立使用说明、空库发现与有库写权限的分区／书籍创建，契约已接受，随本轮 PR 验证。
 - [凭据管理与一次性接入小票](proposals/credential-onboarding-tickets.md)：凭据命名、
@@ -60,6 +62,8 @@
 - [ADR 0002：由管理员发起的私有更新](decisions/0002-manual-private-updates.md)
 - [ADR 0003：受限的网页管理面板](decisions/0003-admin-web-console.md)
 - [ADR 0004：Page 文件字节保存在 SQLite](decisions/0004-page-file-storage.md)
+- [ADR 0005：管理工作区与知识库 Skills](decisions/0005-library-workspace.md)
+- [工作区实现契约](proposals/workspace-implementation.md)
 - [管理面板入口简化提案](proposals/admin-request-origin.md)
 - [Agent Token 的可选无限有效期](proposals/non-expiring-agent-tokens.md)
 - [启用管理面板时的根地址导航](proposals/root-admin-navigation.md)
@@ -69,7 +73,7 @@
   [技术选型](proposals/admin-frontend-stack.md)、
   [交互规范](proposals/admin-frontend-interaction.md)和
   [迁移计划](proposals/admin-frontend-migration.md)；交互已同步上述产品需求，技术契约
-  仍为提案中，尚未实现。
+  已由 ADR 0005 与工作区实现契约落实，本轮代码仍待审查、发布和部署验收。
 
 ADR 0004 确定多文件的 SQLite 存储方向；主分支已实现统一文件集写入、逐库授权及
 受保护的 Token 再次显示。旧 Archive 与旧 Section 凭据保留兼容边界，旧搜索入口

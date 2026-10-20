@@ -39,6 +39,7 @@ from patchouli_lib.backup.manifest import (
     LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
     LIBRARY_POLICY_SCHEMA_REVISION,
     LIBRARY_SCOPES_SCHEMA_REVISION,
+    LIBRARY_SKILLS_SCHEMA_REVISION,
     LIFECYCLE_SCHEMA_REVISION,
     MASTER_AUDIT_SCHEMA_REVISION,
     MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
@@ -53,9 +54,11 @@ from patchouli_lib.backup.manifest import (
     PAGE_TITLE_SCHEMA_REVISION,
     PREVIOUS_SCHEMA_REVISION,
     REQUEST_LOG_SCHEMA_REVISION,
+    REVISION_PRESENTATIONS_SCHEMA_REVISION,
     SEARCH_INDEX_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
     TAG_SCHEMA_REVISION,
+    WORKSPACE_RECEIPTS_SCHEMA_REVISION,
 )
 from patchouli_lib.content.file_manifest import (
     MAX_FILE_BYTES,
@@ -849,6 +852,65 @@ _EXPECTED_SQL_HASHES_0034: Final = _EXPECTED_SQL_HASHES_0033 | {
     ("table", "sections"): "9c227a72f2a4f6c54f85b5703a1c7d175f1d7366c96b90cb329635c2a48abd89",
     ("table", "books"): "2977bb844a339a0240c3d635937ff35fd5364fb3c2c99e4ad2c2db006edccfcb",
 }
+_EXPECTED_SQL_HASHES_0035: Final = _EXPECTED_SQL_HASHES_0034 | {
+    (
+        "table",
+        "revision_presentations",
+    ): "f2badf4aff6e1bc5b4dcccb1658c005f4d58166c01da0135f9c9ba41adb4eef0",
+    (
+        "trigger",
+        "revision_presentations_no_update",
+    ): "0974d1298ac1990cfc14f4a5c275625499b54cd94fbd2bdd4a3370434d276736",
+    (
+        "trigger",
+        "revision_presentations_no_delete",
+    ): "6de8e80cdb63d707d69d8788a6751cdc30a424c9c830efc67563eca16105f94b",
+}
+_EXPECTED_SQL_HASHES_0036: Final = _EXPECTED_SQL_HASHES_0035 | {
+    ("table", "library_skills"): "d7ebfa7c49da85e5a0dffc169dad3c30939e51ef5c7c544d863d15664fd32486",
+    (
+        "table",
+        "library_skill_revisions",
+    ): "90086ca9311b083a3dc87084445d38fdc5d9b088495db76ad752212441333ec6",
+    (
+        "table",
+        "library_skill_files",
+    ): "4c4776e83744e87fb84b686f5570296d3ccea79030a6935b7f1c50622135b428",
+    (
+        "trigger",
+        "library_skill_revisions_no_update",
+    ): "4f2c5cf81256b8047588ff9206ab08e517886297cf041c34e61efa889d7d4206",
+    (
+        "trigger",
+        "library_skill_revisions_no_delete",
+    ): "d67ec735413481f34fb6dc7f202aa5659681e5f5bc4f6b90410b16c6642846db",
+    (
+        "trigger",
+        "library_skill_files_no_update",
+    ): "2fc0fc02e7b465f2297c56e26f0d7b0d1ee7b4eaa8f5680308d40d6f6e3d60e0",
+    (
+        "trigger",
+        "library_skill_files_no_delete",
+    ): "e3c1ee35bf5c2d9e7ed10b7fad5fa3aefac82dd89b729a2462fc41d1b37db972",
+    (
+        "trigger",
+        "library_skill_files_sealed",
+    ): "c4af2f0eb53fbf0be6b6f5f3a3b0787754124f933b082da9cc40a76217b6119e",
+}
+_EXPECTED_SQL_HASHES_0037: Final = _EXPECTED_SQL_HASHES_0036 | {
+    (
+        "table",
+        "admin_workspace_save_receipts",
+    ): "06da8ea4cd58b83e882c494dab7bca107791532ad9b61082b54061d32c2e79b0",
+    (
+        "trigger",
+        "admin_workspace_save_receipts_no_update",
+    ): "ff28763b8df103c489dc3fcf75f939d0d06fda8b912a337b0e68f08b5c4bbd42",
+    (
+        "trigger",
+        "admin_workspace_save_receipts_no_delete",
+    ): "202fa3be68a218507029644263ff17acf9cf795878deb696d49bc8808696ed98",
+}
 _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LEGACY_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0007,
     PREVIOUS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0008,
@@ -878,6 +940,9 @@ _EXPECTED_SQL_HASHES_BY_REVISION: Final = {
     LIBRARY_SCOPES_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0032,
     ONBOARDING_TICKETS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0033,
     LIBRARY_GUIDES_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0034,
+    REVISION_PRESENTATIONS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0035,
+    LIBRARY_SKILLS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0036,
+    WORKSPACE_RECEIPTS_SCHEMA_REVISION: _EXPECTED_SQL_HASHES_0037,
 }
 _FILE_SET_REVISIONS: Final = frozenset(
     {
@@ -3083,6 +3148,33 @@ def _require_idempotency_graph(connection: sqlite3.Connection, schema_revision: 
             # Full bidirectional proof was checked above, including exact bytes.
             continue
 
+        from patchouli_lib.library_skills.backup import SKILL_ROUTES, validate_skill_replay
+
+        if route in SKILL_ROUTES:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='library_skills'"
+                ).fetchone()
+                is None
+            ):
+                raise BackupDatabaseError
+            try:
+                validate_skill_replay(
+                    connection,
+                    library_id=library_id,
+                    caller_id=caller_id,
+                    method=method,
+                    route=route,
+                    status=status,
+                    parsed=parsed,
+                    location=location,
+                    etag=etag,
+                    original_request_id=original_request_id,
+                )
+            except (ValueError, TypeError):
+                raise BackupDatabaseError from None
+            continue
+
         if route == "/api/v1/libraries/{library_id}/pages/{page_id}/move":
             if schema_revision not in {
                 CALLER_PAGE_MOVE_SCHEMA_REVISION,
@@ -3604,6 +3696,20 @@ def _validate_connection(
     connection.execute("PRAGMA query_only = ON")
     _require_sqlite_integrity(connection)
     schema_revision = _require_schema(connection, schema_revision)
+    actual_revision = schema_revision
+    if schema_revision in {
+        REVISION_PRESENTATIONS_SCHEMA_REVISION,
+        LIBRARY_SKILLS_SCHEMA_REVISION,
+        WORKSPACE_RECEIPTS_SCHEMA_REVISION,
+    }:
+        from patchouli_lib.backup.workspace import validate_workspace_graph
+
+        validate_workspace_graph(
+            connection, skills=schema_revision != REVISION_PRESENTATIONS_SCHEMA_REVISION
+        )
+        # These additive revisions retain the exact 0034 authority graph.
+        # Schema identity was verified above; additional data is verified separately.
+        schema_revision = LIBRARY_GUIDES_SCHEMA_REVISION
     if schema_revision == LIBRARY_GUIDES_SCHEMA_REVISION:
         for table in ("libraries", "sections", "books"):
             if connection.execute(
@@ -3703,7 +3809,7 @@ def _validate_connection(
     }:
         _require_search_projection_reset(connection)
     return DatabaseValidationReport(
-        schema_revision=schema_revision,
+        schema_revision=actual_revision,
         sqlite_version=sqlite_version_row[0],
         artifact_journal_mode=journal_row[0].lower(),
     )

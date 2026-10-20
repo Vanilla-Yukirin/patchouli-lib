@@ -1,14 +1,7 @@
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from patchouli_lib.admin.passwords import hash_password
 from patchouli_lib.config import Settings
-
-_ADMIN_PASSWORD_HASH = hash_password(
-    "synthetic-password",
-    salt_factory=lambda size: b"s" * size,
-    iterations=300_000,
-)
 
 
 def test_rejects_non_sqlite_database() -> None:
@@ -71,7 +64,6 @@ def test_admin_console_is_disabled_when_all_admin_values_are_absent_or_blank() -
     blank = Settings.model_validate(
         {
             "environment": "test",
-            "admin_password_hash": "",
             "admin_session_signing_secret": "",
         }
     )
@@ -80,19 +72,17 @@ def test_admin_console_is_disabled_when_all_admin_values_are_absent_or_blank() -
     assert not blank.admin_enabled
 
 
-def test_admin_console_accepts_legacy_password_with_signing_secret() -> None:
+def test_legacy_password_configuration_has_no_authority() -> None:
     configured = Settings.model_validate(
         {
             "environment": "production",
             "retrieval_cursor_signing_secret": "r" * 32,
-            "admin_password_hash": _ADMIN_PASSWORD_HASH,
-            "admin_session_signing_secret": "s" * 32,
+            "admin_password_hash": "ignored legacy verifier",
         }
     )
 
-    assert configured.admin_enabled
-    assert _ADMIN_PASSWORD_HASH not in repr(configured)
-    assert "s" * 32 not in repr(configured)
+    assert not configured.admin_enabled
+    assert "admin_password_hash" not in Settings.model_fields
 
 
 def test_admin_console_accepts_signing_secret_without_legacy_password() -> None:
@@ -105,7 +95,6 @@ def test_admin_console_accepts_signing_secret_without_legacy_password() -> None:
     )
 
     assert configured.admin_enabled
-    assert configured.admin_password_hash is None
     assert "s" * 32 not in repr(configured)
 
 
@@ -177,15 +166,8 @@ def test_admin_setup_token_is_loaded_from_prefixed_environment(
 @pytest.mark.parametrize(
     "values",
     [
-        {"admin_password_hash": _ADMIN_PASSWORD_HASH},
-        {
-            "admin_password_hash": "short",
-            "admin_session_signing_secret": "s" * 32,
-        },
-        {
-            "admin_password_hash": _ADMIN_PASSWORD_HASH,
-            "admin_session_signing_secret": "short",
-        },
+        {"admin_session_signing_secret": "short"},
+        {"admin_setup_token": "p" * 32},
     ],
 )
 def test_admin_console_rejects_incomplete_or_unsafe_configuration(
@@ -199,7 +181,6 @@ def test_admin_http_cookie_option_defaults_off_and_remains_explicit() -> None:
     values = {
         "environment": "production",
         "retrieval_cursor_signing_secret": "r" * 32,
-        "admin_password_hash": _ADMIN_PASSWORD_HASH,
         "admin_session_signing_secret": "s" * 32,
     }
     assert not Settings.model_validate(values).admin_allow_private_http
@@ -215,7 +196,7 @@ def test_legacy_origin_environment_is_ignored(
     monkeypatch: pytest.MonkeyPatch, legacy_value: str
 ) -> None:
     monkeypatch.setenv("PATCHOULI_ADMIN_ORIGIN", legacy_value)
-    monkeypatch.setenv("PATCHOULI_ADMIN_PASSWORD_HASH", _ADMIN_PASSWORD_HASH)
+    monkeypatch.setenv("PATCHOULI_ADMIN_PASSWORD_HASH", "ignored legacy verifier")
     monkeypatch.setenv("PATCHOULI_ADMIN_SESSION_SIGNING_SECRET", "s" * 32)
     configured = Settings()
     assert configured.admin_enabled

@@ -3,6 +3,9 @@
 - 状态：**已接受（Accepted）**
 - 日期：2026-08-23
 
+密码登录与服务端页面实现已由 [ADR 0005](0005-library-workspace.md) 取代。下文保留
+原决定的历史背景；当前启用与过渡方式见[管理工作区](../admin-workspace.md)。
+
 入口规则的本次修订见[取消固定入口地址配置提案](../proposals/admin-request-origin.md)，
 其实现与迁移影响随代码一并审查。
 

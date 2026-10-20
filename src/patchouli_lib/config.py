@@ -5,8 +5,6 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
-from patchouli_lib.admin.passwords import parse_password_hash
-
 Environment = Literal["development", "test", "staging", "production"]
 
 
@@ -24,7 +22,6 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/patchouli.db"
     log_level: str = "info"
     retrieval_cursor_signing_secret: SecretStr | None = None
-    admin_password_hash: SecretStr | None = None
     admin_session_signing_secret: SecretStr | None = None
     admin_setup_token: SecretStr | None = None
     admin_allow_private_http: bool = False
@@ -50,7 +47,6 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
-        "admin_password_hash",
         "admin_session_signing_secret",
         "admin_setup_token",
         mode="before",
@@ -59,14 +55,6 @@ class Settings(BaseSettings):
     def normalize_optional_admin_values(cls, value: object) -> object:
         if value == "" or isinstance(value, SecretStr) and value.get_secret_value() == "":
             return None
-        return value
-
-    @field_validator("admin_password_hash")
-    @classmethod
-    def require_valid_admin_password_hash(cls, value: SecretStr | None) -> SecretStr | None:
-        if value is None:
-            return None
-        parse_password_hash(value.get_secret_value())
         return value
 
     @field_validator("admin_setup_token")
@@ -98,9 +86,6 @@ class Settings(BaseSettings):
     def validate_environment_secrets(self) -> "Settings":
         if self.environment == "production" and self.retrieval_cursor_signing_secret is None:
             message = "The retrieval cursor signing secret is required in production."
-            raise ValueError(message)
-        if self.admin_password_hash is not None and self.admin_session_signing_secret is None:
-            message = "The legacy admin password hash requires a session signing secret."
             raise ValueError(message)
         if self.admin_setup_token is not None:
             if self.admin_session_signing_secret is None:

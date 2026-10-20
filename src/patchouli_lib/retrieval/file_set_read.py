@@ -23,6 +23,7 @@ from patchouli_lib.content.models import (
     RevisionFileSealGuard,
     RevisionFileSet,
 )
+from patchouli_lib.content.presentation import Presentation, read_presentation
 from patchouli_lib.content.schemas import PageRecord, StrongPageETag
 from patchouli_lib.content.service import page_current_etag
 from patchouli_lib.identifiers import (
@@ -45,6 +46,8 @@ class FileSetRevisionManifestView(RevisionFileManifestView):
     """One fully verified Revision snapshot, shared by single and multi-file Pages."""
 
     snapshot_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    primary_file: str | None = None
+    display_title: str = "无标题"
 
 
 class FileSetReadAuthenticationError(RuntimeError):
@@ -69,6 +72,7 @@ class VerifiedRevisionSnapshot:
     revision_id: str
     revision_number: int
     manifest: FileManifest = field(repr=False)
+    presentation: Presentation = field(default=Presentation(None, "无标题"))
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -161,7 +165,10 @@ def read_verified_revision_snapshot(
             raise ValueError("Stored file snapshot format is not supported.")
     except (TypeError, ValueError, OverflowError, UnicodeError):
         raise FileSetReadPersistenceError from None
-    return VerifiedRevisionSnapshot(page.page_id, revision_id, revision_number, manifest)
+    presentation = read_presentation(connection, library_id, page.page_uid, revision_id)
+    return VerifiedRevisionSnapshot(
+        page.page_id, revision_id, revision_number, manifest, presentation
+    )
 
 
 class FileSetReadService:
@@ -327,6 +334,8 @@ class FileSetReadService:
             revision_id=snapshot.revision_id,
             revision_number=snapshot.revision_number,
             snapshot_sha256=snapshot.manifest.snapshot_sha256.hex(),
+            primary_file=snapshot.presentation.primary_file,
+            display_title=snapshot.presentation.display_title,
             files=[
                 RevisionFileView(
                     filename=entry.name,

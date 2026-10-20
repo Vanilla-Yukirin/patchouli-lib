@@ -568,6 +568,7 @@ def search_pages_for_master(
     query: SearchQueryV2,
     *,
     cursor_codec: CursorCodec | None = None,
+    project: Callable[[Connection, SearchResultV2], SearchResultV2] | None = None,
 ) -> SearchResultV2:
     """Search as the verified single administrator, without an Agent token.
 
@@ -582,7 +583,7 @@ def search_pages_for_master(
     def resolve(connection: Connection) -> _ResolvedScope:
         return _master_scope(connection, session.identity_id, session.session_generation, query)
 
-    return _search_pages(engine, query, resolve, cursor_codec=cursor_codec)
+    return _search_pages(engine, query, resolve, cursor_codec=cursor_codec, project=project)
 
 
 def _search_pages(
@@ -591,6 +592,7 @@ def _search_pages(
     resolve: Callable[[Connection], _ResolvedScope],
     *,
     cursor_codec: CursorCodec | None,
+    project: Callable[[Connection, SearchResultV2], SearchResultV2] | None = None,
 ) -> SearchResultV2:
     if not isinstance(query, SearchQueryV2):
         raise TypeError("Expected a parsed search-v2 query.")
@@ -701,7 +703,8 @@ def _search_pages(
                 if cursor_codec is not None and binding is not None and end < len(ranked)
                 else None
             )
-            return SearchResultV2(items, next_cursor)
+            result = SearchResultV2(items, next_cursor)
+            return result if project is None else project(connection, result)
         finally:
             connection.rollback()
 

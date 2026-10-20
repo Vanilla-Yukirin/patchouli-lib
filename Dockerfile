@@ -2,6 +2,14 @@
 
 FROM ghcr.io/astral-sh/uv:0.10.11@sha256:3472e43b4e738cf911c99d41bb34331280efad54c73b1def654a6227bb59b2b4 AS uv
 
+FROM node:24-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5 AS web
+WORKDIR /app/web
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci
+COPY web/ ./
+COPY tests/vectors/ /app/tests/vectors/
+RUN npm run build
+
 FROM python:3.13.9-slim-bookworm@sha256:b685a4fa58bb19d1814d78a1ec0f0208f351452724f78b20212c984d6e124a34 AS builder
 
 COPY --from=uv /uv /uvx /bin/
@@ -10,11 +18,12 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_PROJECT_ENVIRONMENT=/app/.venv
 WORKDIR /app
 
-COPY pyproject.toml uv.lock README.md LICENSE ./
+COPY pyproject.toml uv.lock README.md LICENSE hatch_build.py ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
 
 COPY src ./src
+COPY --from=web /app/src/patchouli_lib/web_resources ./src/patchouli_lib/web_resources
 COPY skills/patchouli-agent ./skills/patchouli-agent
 COPY skills/patchouli-archive ./skills/patchouli-archive
 COPY migrations ./migrations

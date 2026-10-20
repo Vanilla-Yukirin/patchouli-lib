@@ -725,12 +725,15 @@ class FileSetCreateMetadata:
     title: str = field(repr=False)
     source: FileSetSource
     occurred_at: datetime | None = None
+    primary_file: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.title) is not str or not self.title.strip():
             raise ValueError("file-set title must be non-empty")
         if not isinstance(self.source, FileSetSource):
             raise ValueError("file-set source must be FileSetSource")
+        if self.primary_file is not None:
+            require_file_set_name(self.primary_file)
         if self.occurred_at is not None:
             if not isinstance(self.occurred_at, datetime):
                 raise ValueError("file-set occurred_at must be a datetime")
@@ -740,19 +743,27 @@ class FileSetCreateMetadata:
         result: dict[str, object] = {"title": self.title, "source": self.source.to_wire()}
         if self.occurred_at is not None:
             result["occurred_at"] = format_rfc3339_utc(self.occurred_at)
+        if self.primary_file is not None:
+            result["primary_file"] = self.primary_file
         return result
 
 
 @dataclass(frozen=True, slots=True)
 class FileSetRevisionMetadata:
     source: FileSetSource
+    primary_file: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, FileSetSource):
             raise ValueError("file-set source must be FileSetSource")
+        if self.primary_file is not None:
+            require_file_set_name(self.primary_file)
 
     def to_wire(self) -> dict[str, object]:
-        return {"source": self.source.to_wire()}
+        result: dict[str, object] = {"source": self.source.to_wire()}
+        if self.primary_file is not None:
+            result["primary_file"] = self.primary_file
+        return result
 
 
 def _sha256(value: str) -> str:
@@ -790,10 +801,13 @@ class FileSetManifest:
     revision_number: int
     snapshot_sha256: str
     files: tuple[FileSetFileSummary, ...]
+    primary_file: str | None = None
+    display_title: str | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> FileSetManifest:
-        if set(data) != {"page_id", "revision_id", "revision_number", "snapshot_sha256", "files"}:
+        required = {"page_id", "revision_id", "revision_number", "snapshot_sha256", "files"}
+        if not required <= set(data) <= required | {"primary_file", "display_title"}:
             raise ProtocolError("file-set manifest did not contain the expected fields")
         page_id = _string(data, "page_id")
         revision_id = _string(data, "revision_id")
@@ -827,7 +841,13 @@ class FileSetManifest:
         snapshot = _sha256(_string(data, "snapshot_sha256"))
         if digest.hexdigest() != snapshot:
             raise ProtocolError("file-set manifest snapshot digest did not match its files")
-        return cls(page_id, revision_id, number, snapshot, files)
+        primary = data.get("primary_file")
+        title = data.get("display_title")
+        if primary is not None and (not isinstance(primary, str) or primary not in names):
+            raise ProtocolError("file-set primary file did not identify a member")
+        if title is not None and (not isinstance(title, str) or not title or "\x00" in title):
+            raise ProtocolError("file-set display title was invalid")
+        return cls(page_id, revision_id, number, snapshot, files, primary, title)
 
 
 def _manifest_fields(data: Mapping[str, object], extra: set[str]) -> FileSetManifest:

@@ -4,13 +4,16 @@ from alembic import context
 
 from patchouli_lib.admin import file_set_receipts as master_file_set_models
 from patchouli_lib.admin import move_receipts as master_move_models
+from patchouli_lib.admin.json_api.content import WorkspaceSaveReceipt
 from patchouli_lib.auth import models as auth_models
 from patchouli_lib.config import Settings
 from patchouli_lib.content import models as content_models
 from patchouli_lib.content import page_move_models
+from patchouli_lib.content import presentation as presentation_models
 from patchouli_lib.database import build_engine
 from patchouli_lib.idempotency import models as idempotency_models
 from patchouli_lib.library import models as library_models
+from patchouli_lib.library_skills import models as library_skill_models
 from patchouli_lib.models import Base
 from patchouli_lib.request_log import models as request_log_models
 from patchouli_lib.tags import models as tag_models
@@ -41,6 +44,12 @@ if master_move_models.MasterMoveReceiptRow.metadata is not Base.metadata:
     raise RuntimeError("Master move models must use the shared SQLAlchemy metadata.")
 if page_move_models.PageMoveEvent.metadata is not Base.metadata:
     raise RuntimeError("Page move models must use the shared SQLAlchemy metadata.")
+if presentation_models.RevisionPresentation.metadata is not Base.metadata:
+    raise RuntimeError("Revision presentation models must use the shared SQLAlchemy metadata.")
+if library_skill_models.LibrarySkill.metadata is not Base.metadata:
+    raise RuntimeError("Library Skill models must use the shared SQLAlchemy metadata.")
+if WorkspaceSaveReceipt.metadata is not Base.metadata:
+    raise RuntimeError("Workspace receipt models must use the shared SQLAlchemy metadata.")
 
 
 def _include_object(

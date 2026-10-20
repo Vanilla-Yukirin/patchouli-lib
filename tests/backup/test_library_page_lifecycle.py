@@ -19,6 +19,7 @@ from sqlalchemy import Engine
 
 from patchouli_lib.admin.page_move_service import MasterPageMoveService
 from patchouli_lib.backup import BackupDatabaseError, restore_backup, validate_database
+from patchouli_lib.backup.manifest import LIBRARY_GUIDES_SCHEMA_REVISION
 from patchouli_lib.content.page_lifecycle_schemas import PageLifecycleCommand
 from patchouli_lib.database import CURRENT_SCHEMA_REVISION
 
@@ -150,6 +151,11 @@ def test_audit_event_receipt_reverse_binding(
 def test_exact_old_move_backups_restore_and_upgrade_without_relabeling(
     content_engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, revision: str
 ) -> None:
+    assert content_engine.url.database is not None
+    source = Path(content_engine.url.database)
+    config = _config(source, monkeypatch)
+    # Historical producers must not create post-0034 presentation history.
+    command.downgrade(config, LIBRARY_GUIDES_SCHEMA_REVISION)
     story = _story(content_engine)
     page = _page(content_engine, story.command.library_id, story.command.page_id)
     target = _target(content_engine, page)
@@ -162,9 +168,6 @@ def test_exact_old_move_backups_restore_and_upgrade_without_relabeling(
     else:
         agent = _agent(content_engine, page.library_id)
         _run_move(content_engine, agent, _move_command(page, target))
-    assert content_engine.url.database is not None
-    source = Path(content_engine.url.database)
-    config = _config(source, monkeypatch)
     command.downgrade(config, revision)
     assert validate_database(source, schema_revision=revision).schema_revision == revision
     with closing(sqlite3.connect(source)) as connection:

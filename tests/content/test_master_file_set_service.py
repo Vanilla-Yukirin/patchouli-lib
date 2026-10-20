@@ -40,6 +40,7 @@ from patchouli_lib.backup import (
     validate_database,
 )
 from patchouli_lib.backup.manifest import (
+    LIBRARY_GUIDES_SCHEMA_REVISION,
     MASTER_PAGE_DELETE_SCHEMA_REVISION,
 )
 from patchouli_lib.content.file_set_create_service import FileSetCreateCommand
@@ -315,6 +316,8 @@ def test_legacy_markdown_equal_files_are_noop_and_can_be_replayed(content_engine
 
 
 def test_receipts_are_immutable_and_prevent_destructive_downgrade(content_engine: Engine) -> None:
+    # Reach the receipt downgrade guard without creating newer presentation history.
+    alembic.downgrade(alembic_config(), LIBRARY_GUIDES_SCHEMA_REVISION)
     create, session = _setup(content_engine)
     MasterFileSetService(content_engine, clock=lambda: OPERATION_TIME).create_page(
         create, _key(), master_session=session

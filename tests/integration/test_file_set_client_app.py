@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from time import time_ns
@@ -142,7 +143,9 @@ def _assert_exact_files(
     exact = client.get_file_set_manifest(
         library_id, section_id, manifest.page_id, manifest.revision_id, token=token
     ).value
-    assert exact == manifest
+    # Agent writes retain the original receipt shape; accurate reads also carry
+    # immutable presentation metadata. These legacy requests specify no entry.
+    assert exact == replace(manifest, primary_file=None, display_title="无标题")
     expected_by_name = {file.filename: file.body for file in expected}
     assert [(item.filename, item.size_bytes, item.content_sha256) for item in exact.files] == [
         (name, len(body), hashlib.sha256(body).hexdigest())
@@ -191,7 +194,7 @@ def test_typed_client_create_read_revise_and_preserve_history(
     assert created.metadata.etag is not None
     _assert_exact_files(client, library_id, section_id, token, first, first_files)
     current = client.get_current_file_set(library_id, section_id, first.page_id, token=token)
-    assert current.value == first
+    assert current.value == replace(first, display_title="无标题")
     assert current.metadata.etag == created.metadata.etag
 
     second_files = (FileSetFile("replacement.txt", b"new revision\x00bytes"),)
@@ -212,10 +215,9 @@ def test_typed_client_create_read_revise_and_preserve_history(
     assert second.revision_number == 2
     assert second.snapshot_sha256 != first.snapshot_sha256
     assert revised.metadata.etag != created.metadata.etag
-    assert (
-        client.get_current_file_set(library_id, section_id, first.page_id, token=token).value
-        == second
-    )
+    assert client.get_current_file_set(
+        library_id, section_id, first.page_id, token=token
+    ).value == replace(second, display_title="无标题")
     _assert_exact_files(client, library_id, section_id, token, second, second_files)
     _assert_exact_files(client, library_id, section_id, token, first, first_files)
 
@@ -280,6 +282,6 @@ def test_replay_keeps_original_result_and_stale_etag_cannot_mutate(
     assert conflict.value.problem.status == 412
     assert conflict.value.problem.code == "revision_conflict"
     current = client.get_current_file_set(library_id, section_id, page_id, token=token)
-    assert current.value == revised.value.manifest
+    assert current.value == replace(revised.value.manifest, display_title="无标题")
     assert current.metadata.etag == revised.metadata.etag
     _assert_exact_files(client, library_id, section_id, token, created.value.manifest, first_files)

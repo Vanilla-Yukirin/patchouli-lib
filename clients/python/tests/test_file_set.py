@@ -421,6 +421,17 @@ def test_file_set_input_validates_source_and_metadata() -> None:
         FileSetCreateMetadata("Example", FileSetSource("manual"), datetime(2026, 9, 29))
     with pytest.raises(ValueError):
         FileSetRevisionMetadata(source=None)  # type: ignore[arg-type]
+    source = FileSetSource("manual")
+    assert (
+        FileSetCreateMetadata("Example", source, primary_file="entry.md").to_wire()["primary_file"]
+        == "entry.md"
+    )
+    assert FileSetRevisionMetadata(source, primary_file="entry.md").to_wire() == {
+        "source": source.to_wire(),
+        "primary_file": "entry.md",
+    }
+    with pytest.raises(ValueError):
+        FileSetRevisionMetadata(source, primary_file="../outside.md")
 
 
 def test_multipart_rejects_invalid_boundary_empty_files_and_oversized_metadata() -> None:
@@ -469,6 +480,14 @@ def test_manifest_rejects_invalid_file_entries(entry_change: dict[str, object], 
 
 
 def test_manifest_rejects_unsorted_files_and_incorrect_snapshot_digest() -> None:
+    explicit = FileSetManifest.from_dict(
+        {**manifest(), "primary_file": "content.md", "display_title": "Example"}
+    )
+    assert explicit.primary_file == "content.md" and explicit.display_title == "Example"
+    with pytest.raises(ProtocolError, match="primary file"):
+        FileSetManifest.from_dict({**manifest(), "primary_file": "absent.md"})
+    with pytest.raises(ProtocolError, match="display title"):
+        FileSetManifest.from_dict({**manifest(), "display_title": ""})
     value = manifest((("a.txt", b"a"), ("b.txt", b"b")))
     files = value["files"]
     assert isinstance(files, list)

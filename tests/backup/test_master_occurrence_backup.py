@@ -28,6 +28,7 @@ from patchouli_lib.backup import (
     verify_backup_bundle,
 )
 from patchouli_lib.backup.manifest import (
+    LIBRARY_GUIDES_SCHEMA_REVISION,
     MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
     SUPPORTED_SCHEMA_REVISION,
 )
@@ -197,11 +198,13 @@ def _tamper(
 def test_0026_receipt_and_agent_history_remain_exactly_restorable(
     complete_engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    source = _source(complete_engine)
+    # Produce old content before presentation history becomes available.
+    command.downgrade(_config(source, monkeypatch), LIBRARY_GUIDES_SCHEMA_REVISION)
     session = _session(complete_engine)
     page_id = _create_file_set(complete_engine, session)
     token = _credential(complete_engine)
     _agent_correct(complete_engine, token, page_id, at=_TIME + 20)
-    source = _source(complete_engine)
     command.downgrade(_config(source, monkeypatch), MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION)
     assert validate_database(source, schema_revision=MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION)
     with pytest.raises(BackupDatabaseError):
@@ -250,8 +253,10 @@ def test_0026_receipt_and_agent_history_remain_exactly_restorable(
 def test_receipt_semantics_are_enforced_in_both_revisions(
     complete_engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, revision: str
 ) -> None:
-    _create_file_set(complete_engine, _session(complete_engine))
     source = _source(complete_engine)
+    if revision == MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION:
+        command.downgrade(_config(source, monkeypatch), LIBRARY_GUIDES_SCHEMA_REVISION)
+    _create_file_set(complete_engine, _session(complete_engine))
     if revision == MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION:
         command.downgrade(_config(source, monkeypatch), revision)
         bundle = tmp_path / "receipt-copy"

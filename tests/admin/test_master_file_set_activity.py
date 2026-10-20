@@ -16,7 +16,6 @@ from patchouli_lib.admin.file_set_receipts import MasterFileSetReceiptRow
 from patchouli_lib.admin.file_set_service import MasterFileSetService
 from patchouli_lib.admin.master_audit import MasterAuditRepository
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
-from patchouli_lib.admin.pages import dashboard_page
 from patchouli_lib.admin.read_model import AdminReadModel
 from patchouli_lib.admin.service import AdminActionService
 from patchouli_lib.admin.session import MasterAdminSession
@@ -165,12 +164,6 @@ def test_master_changes_link_exact_revisions_without_noop_or_replay(
     }
     assert all(item.actor_name == "Administrator" and item.actor_id is None for item in activity)
     assert third.receipt.revision_number == 3
-    html = dashboard_page("synthetic-csrf", activities=activity)
-    path = _page_path(create, first.receipt.page_id)
-    for revision_number in (1, 2, 3):
-        assert f'href="{path}/revisions/{revision_number}"' in html
-    assert html.count("Created a page") == 1
-    assert html.count("Revised a page") == 2
 
 
 def test_master_activity_uses_current_title_and_trash_state(activity_engine: Engine) -> None:
@@ -202,11 +195,6 @@ def test_master_activity_uses_current_title_and_trash_state(activity_engine: Eng
     ]
     assert len(activity) == 2
     assert all(item.page_title == renamed and not item.page_deleted for item in activity)
-    path = _page_path(create, first.receipt.page_id)
-    html = dashboard_page("synthetic-csrf", activities=tuple(activity))
-    assert "Renamed &lt;synthetic&gt;" in html
-    assert f'href="{path}/revisions/1"' in html
-    assert f'href="{path}/revisions/2"' in html
 
     actions.delete_page_as_master(
         create.library_id,
@@ -226,13 +214,6 @@ def test_master_activity_uses_current_title_and_trash_state(activity_engine: Eng
     ]
     assert len(deleted) == 2
     assert all(item.page_title == renamed and item.page_deleted for item in deleted)
-    html = dashboard_page("synthetic-csrf", activities=tuple(deleted))
-    trash = (
-        f"/admin/libraries/{create.library_id}/sections/{create.section_id}"
-        f"/trash/{first.receipt.page_id}"
-    )
-    assert html.count(f'href="{trash}"') == 2
-    assert f'href="{path}/revisions/' not in html
 
 
 def _seed_agent(engine: Engine, library_id: str) -> tuple[str, str]:

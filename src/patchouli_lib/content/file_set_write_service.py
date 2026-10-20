@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Final
 from uuid import uuid4
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from sqlalchemy import Connection
 
 from patchouli_lib.auth.repository import AuthRepository
@@ -33,6 +33,7 @@ from patchouli_lib.content.file_set_service import (
     FileSetPreconditionFailedError,
     FileSetRevisionService,
 )
+from patchouli_lib.content.presentation import presentation_for, read_presentation
 from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import (
     ArchiveIdempotencyKey,
@@ -100,6 +101,12 @@ class FileSetAppendCommand(ContentSchema):
     files: tuple[tuple[str, bytes], ...] = Field(repr=False)
     source: ArchiveSourceInput
     request_id: RequestId
+    primary_file: str | None = None
+
+    @model_validator(mode="after")
+    def validate_primary_file(self) -> FileSetAppendCommand:
+        presentation_for(build_file_manifest(self.files), self.primary_file)
+        return self
 
     @field_validator("page_id")
     @classmethod
@@ -187,6 +194,7 @@ class FileSetWriteService:
 
         self._require_transaction()
         manifest = build_file_manifest(command.files)
+        presentation = presentation_for(manifest, command.primary_file)
         with self._connection.begin_nested():
             operation_at = self._operation_time()
             authentication = AuthenticationService(
@@ -285,7 +293,10 @@ class FileSetWriteService:
             if not hmac.compare_digest(command.expected_etag, current_etag):
                 raise FileSetPreconditionFailedError("Page current ETag does not match.")
             current_manifest = self._content.get_current_file_manifest(page)
-            if manifest == current_manifest:
+            current_presentation = read_presentation(
+                self._connection, page.library_id, page.page_uid, page.current_revision_id
+            )
+            if manifest == current_manifest and presentation == current_presentation:
                 appended = FileSetAppendResult(False, page, current_etag, current_manifest)
             else:
                 revision_id = self._revision_id_factory()
@@ -313,6 +324,7 @@ class FileSetWriteService:
                     revision_id=revision_id,
                     revision_at=revision_at,
                     source=source,
+                    primary_file=command.primary_file,
                 )
             audit = self._audit_changed(command, authenticated, appended, operation_at)
             response = self._response(command, appended, operation_at)
@@ -394,6 +406,8 @@ class FileSetWriteService:
                 "captured_at": command.source.captured_at,
             },
         }
+        if command.primary_file is not None:
+            metadata["primary_file"] = command.primary_file
         parts = [
             json.dumps(metadata, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode(
                 "utf-8"

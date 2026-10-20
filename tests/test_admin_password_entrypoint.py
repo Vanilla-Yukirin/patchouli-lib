@@ -6,7 +6,7 @@ def _belongs_to_server_distribution(entry_point: EntryPoint) -> bool:
     return distribution is not None and distribution.name == "patchouli-lib"
 
 
-def test_distribution_exposes_admin_password_hash_entrypoint() -> None:
+def test_distribution_does_not_expose_removed_password_login_command() -> None:
     candidates = [
         entry_point
         for entry_point in entry_points(
@@ -16,5 +16,4 @@ def test_distribution_exposes_admin_password_hash_entrypoint() -> None:
         if _belongs_to_server_distribution(entry_point)
     ]
 
-    assert len(candidates) == 1
-    assert candidates[0].value == "patchouli_lib.admin_password_cli:main"
+    assert candidates == []

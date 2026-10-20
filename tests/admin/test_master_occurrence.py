@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from html import escape, unescape
 from pathlib import Path
-from re import search
 from time import time
 
 import pytest
@@ -21,8 +19,6 @@ from patchouli_lib.admin.contracts import MasterDeletePageFormInput
 from patchouli_lib.admin.file_set_service import MasterFileSetService
 from patchouli_lib.admin.master_audit import MasterAuditRepository
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
-from patchouli_lib.admin.pages import dashboard_page
-from patchouli_lib.admin.passwords import hash_password
 from patchouli_lib.admin.read_model import AdminReadModel
 from patchouli_lib.admin.service import AdminActionService
 from patchouli_lib.admin.session import AdminSessionCodec, MasterAdminSession
@@ -69,10 +65,7 @@ class Browser:
     session: MasterAdminSession
 
     def page_path(self, page_id: str) -> str:
-        return (
-            f"/admin/libraries/{self.library_id}/sections/{self.section_id}"
-            f"/books/{self.book_id}/pages/{page_id}"
-        )
+        return f"/admin/api/libraries/{self.library_id}/pages/{page_id}"
 
 
 @pytest.fixture
@@ -85,10 +78,8 @@ def browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Browser
         {
             "environment": "test",
             "database_url": database_url,
-            "admin_password_hash": hash_password(
-                _LEGACY, salt_factory=lambda size: b"l" * size, iterations=300_000
-            ),
             "admin_session_signing_secret": _SIGNING,
+            "retrieval_cursor_signing_secret": "r" * 32,
         }
     )
     app = create_app(settings)
@@ -105,16 +96,13 @@ def browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Browser
             )
         )
         MasterTokenRepository(connection).initialize_from_local_cli(_MASTER, now=1_000_000)
-    with TestClient(app, base_url=_ORIGIN, follow_redirects=False) as client:
-        assert (
-            client.post(
-                "/admin/login", data={"password": _MASTER}, headers={"Origin": _ORIGIN}
-            ).status_code
-            == 303
+    with TestClient(
+        app, base_url=_ORIGIN, follow_redirects=False, raise_server_exceptions=False
+    ) as client:
+        login = client.post(
+            "/admin/api/session", json={"token": _MASTER}, headers={"Origin": _ORIGIN}
         )
-        form = client.get("/admin")
-        match = search(r'name="csrf_token" value="([^"]+)"', form.text)
-        assert match is not None
+        assert login.status_code == 200
         cookie = client.cookies.get("patchouli_admin_session")
         assert cookie is not None
         session = AdminSessionCodec(_SIGNING.encode(), ttl_seconds=600).verify_master(cookie)
@@ -125,7 +113,7 @@ def browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Browser
             structure.library.id,
             structure.section.id,
             structure.book.id,
-            unescape(match.group(1)),
+            login.json()["csrf_token"],
             session,
         )
 
@@ -166,15 +154,16 @@ def _post(
     path: str | None = None,
     headers: dict[str, str] | None = None,
 ) -> Response:
-    data = {"csrf_token": browser.csrf if csrf is None else csrf, "expected_etag": etag}
+    data = {"expected_etag": etag}
     if occurred_at is not None:
         data["occurred_at"] = occurred_at
     request_headers = {} if headers is None else dict(headers)
     if origin is not None:
         request_headers["Origin"] = origin
+    request_headers["X-CSRF-Token"] = browser.csrf if csrf is None else csrf
     return browser.client.post(
         path or browser.page_path(page_id) + "/occurrence",
-        data=data,
+        json=data,
         headers=request_headers,
     )
 
@@ -209,13 +198,8 @@ def test_http_correction_preserves_every_file_and_records_immutable_master_audit
     _command, page_id, old_etag = _create(browser, files)
     old, _, original_files = _state(browser, page_id)
     assert original_files == tuple(sorted(files))
-    form = browser.client.get(browser.page_path(page_id))
-    assert form.status_code == 200
-    assert f'action="{browser.page_path(page_id)}/occurrence"' in form.text
-    assert f'name="expected_etag" value="{escape(old_etag, quote=True)}"' in form.text
     response = _post(browser, page_id, old_etag)
     assert response.status_code == 200, response.text
-    assert "Declared time saved." in response.text
     current, new_etag, current_files = _state(browser, page_id)
     assert new_etag != old_etag
     assert current_files == original_files
@@ -252,7 +236,9 @@ def test_http_correction_preserves_every_file_and_records_immutable_master_audit
             (browser.library_id, old.page_uid),
         )
     for name, content in files:
-        download = browser.client.get(browser.page_path(page_id) + f"/revisions/1/files/{name}")
+        download = browser.client.get(
+            browser.page_path(page_id) + f"/files/{name}", params={"revision_number": 1}
+        )
         assert download.status_code == 200 and download.content == content
 
 
@@ -261,7 +247,7 @@ def test_invalid_time_path_deleted_and_old_etag_do_not_write(browser: Browser) -
     before = _counts(browser)
     assert _post(browser, page_id, etag, occurred_at=None).status_code == 422
     assert _post(browser, page_id, etag, occurred_at="2026-08-14T10:00:00").status_code == 422
-    wrong = browser.page_path(page_id).replace(f"/books/{browser.book_id}", f"/books/{'f' * 32}")
+    wrong = browser.page_path(page_id).replace(browser.library_id, "f" * 32)
     assert _post(browser, page_id, etag, path=wrong + "/occurrence").status_code == 404
     assert _counts(browser) == before
     assert _post(browser, page_id, etag).status_code == 200
@@ -386,15 +372,14 @@ def test_search_moves_to_new_half_open_time_window_and_old_receipt_still_replays
 
     def query(*, start: str, end: str) -> Response:
         return browser.client.post(
-            "/admin/search",
-            data={
-                "csrf_token": browser.csrf,
-                "keywords": "needle",
-                "library_id": browser.library_id,
-                "occurred_from": start,
-                "occurred_before": end,
+            "/admin/api/search",
+            json={
+                "keywords": ["needle"],
+                "libraries": [browser.library_id],
+                "occurred_from_us": parse_occurrence_time(start + "Z").utc_microseconds,
+                "occurred_before_us": parse_occurrence_time(end + "Z").utc_microseconds,
             },
-            headers={"Origin": _ORIGIN},
+            headers={"Origin": _ORIGIN, "X-CSRF-Token": browser.csrf},
         )
 
     old_window = ("2026-08-13T00:00:00", "2026-08-14T00:00:00")
@@ -425,10 +410,6 @@ def test_content_activity_chinese_link_and_agent_personal_filter(browser: Browse
     assert len(correction) == 1
     assert correction[0].actor_id is None and correction[0].actor_name == "Administrator"
     assert correction[0].page_id == page_id and correction[0].revision_number is None
-    rendered = dashboard_page(browser.csrf, activities=activity, locale="zh-CN")
-    assert "更正了页面的发生时间" in rendered
-    assert f'href="{browser.page_path(page_id)}"' in rendered
-    assert "content.page.occurrence.correct" not in rendered
     caller_id, credential_id, tag_id = "a" * 32, "b" * 32, "c" * 32
     with immediate_transaction(browser.engine) as connection:
         connection.execute(

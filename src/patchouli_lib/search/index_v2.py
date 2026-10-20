@@ -18,6 +18,7 @@ from sqlalchemy import Connection, Engine, select
 
 from patchouli_lib.auth.service import utc_microseconds
 from patchouli_lib.content.models import Page
+from patchouli_lib.content.presentation import read_presentation
 from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import PageRecord
 from patchouli_lib.search.literal_v2 import (
@@ -215,6 +216,11 @@ def _project_page(
     if row is None:
         return
     page = PageRecord.model_validate(dict(row))
+    presentation = read_presentation(
+        connection, page.library_id, page.page_uid, page.current_revision_id
+    )
+    if presentation.primary_file is not None:
+        page = page.model_copy(update={"title": presentation.display_title})
     repository = ContentRepository(connection)
     manifest = repository.get_current_file_manifest(page)
     documents = _documents(page, manifest, repository)

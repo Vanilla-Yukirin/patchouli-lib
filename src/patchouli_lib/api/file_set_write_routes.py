@@ -12,6 +12,7 @@ import re
 from collections.abc import Callable, Sequence
 from functools import partial
 from typing import Any, Literal, cast
+from urllib.parse import quote
 
 import anyio
 from fastapi import APIRouter, Request, Security
@@ -62,6 +63,8 @@ from patchouli_lib.content.file_set_write_service import (
     FileSetWriteResult,
     FileSetWriteService,
 )
+from patchouli_lib.content.presentation import read_presentation
+from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import (
     ArchiveIdempotencyKey,
     ArchiveSourceInput,
@@ -233,10 +236,19 @@ _CREATE_MULTIPART_OPENAPI = _multipart_request_body(
         "title": {"type": "string", "minLength": 1},
         "source": _SOURCE_METADATA_SCHEMA,
         "occurred_at": {"type": "string", "format": "date-time"},
+        "primary_file": {
+            "type": ["string", "null"],
+            "description": (
+                "Explicit entry file. Omission is accepted with "
+                "X-Patchouli-Warnings: primary_file_missing."
+            ),
+        },
     },
     ["title", "source"],
 )
-_REVISE_MULTIPART_OPENAPI = _multipart_request_body({"source": _SOURCE_METADATA_SCHEMA}, ["source"])
+_REVISE_MULTIPART_OPENAPI = _multipart_request_body(
+    {"source": _SOURCE_METADATA_SCHEMA, "primary_file": {"type": ["string", "null"]}}, ["source"]
+)
 _CREATE_MULTIPART_OPENAPI["parameters"] = [_IDEMPOTENCY_PARAMETER]
 _REVISE_MULTIPART_OPENAPI["parameters"] = [_IDEMPOTENCY_PARAMETER, _IF_MATCH_PARAMETER]
 
@@ -472,6 +484,7 @@ def _response(
     result: FileSetCreateResult | FileSetWriteResult,
     *,
     library_id: str,
+    engine: Engine,
 ) -> Response:
     replay = isinstance(result, (FileSetCreateReplay, FileSetWriteReplay))
     stored: OriginalResponse | ReplayResponse = result.response
@@ -490,6 +503,16 @@ def _response(
         )
     if replay:
         headers["Idempotency-Replayed"] = "true"
+    with engine.connect() as connection:
+        page = ContentRepository(connection).get_page(library_id, body["page_id"])
+        if page is not None:
+            presentation = read_presentation(
+                connection, library_id, page.page_uid, body["revision_id"]
+            )
+            if presentation.primary_file is None:
+                headers["X-Patchouli-Warnings"] = "primary_file_missing"
+            else:
+                headers["X-Patchouli-Primary-File"] = quote(presentation.primary_file, safe="")
     return Response(
         content=stored.response_body,
         status_code=stored.response_status,
@@ -565,7 +588,11 @@ def create_file_set_write_router(
         )
         upload = await parse_file_set_multipart(request)
         metadata = _metadata(upload.metadata)
-        if set(metadata) not in ({"title", "source"}, {"title", "occurred_at", "source"}):
+        if (
+            not {"title", "source"}
+            <= set(metadata)
+            <= {"title", "source", "occurred_at", "primary_file"}
+        ):
             raise _invalid_request()
         try:
             occurred_at = (
@@ -582,6 +609,7 @@ def create_file_set_write_router(
                 files=tuple((file.name, file.content) for file in upload.manifest.files),
                 source=_source(metadata["source"]),
                 request_id=get_request_id(request),
+                primary_file=metadata.get("primary_file"),
             )
         except (ValidationError, ValueError, TypeError):
             raise _invalid_request() from None
@@ -596,7 +624,7 @@ def create_file_set_write_router(
             ),
             abandon_on_cancel=False,
         )
-        return _response(request, result, library_id=scoped_library)
+        return _response(request, result, library_id=scoped_library, engine=engine)
 
     @router.post(
         "/libraries/{library_id}/sections/{section_id}/pages/{page_id}/file-revisions",
@@ -635,7 +663,7 @@ def create_file_set_write_router(
         )
         upload = await parse_file_set_multipart(request)
         metadata = _metadata(upload.metadata)
-        if set(metadata) != {"source"}:
+        if not {"source"} <= set(metadata) <= {"source", "primary_file"}:
             raise _invalid_request()
         try:
             command = FileSetAppendCommand(
@@ -646,6 +674,7 @@ def create_file_set_write_router(
                 files=tuple((file.name, file.content) for file in upload.manifest.files),
                 source=_source(metadata["source"]),
                 request_id=get_request_id(request),
+                primary_file=metadata.get("primary_file"),
             )
         except (ValidationError, ValueError, TypeError, InvalidPageIdError):
             raise _invalid_request() from None
@@ -660,7 +689,7 @@ def create_file_set_write_router(
             ),
             abandon_on_cancel=False,
         )
-        return _response(request, result, library_id=scoped_library)
+        return _response(request, result, library_id=scoped_library, engine=engine)
 
     return router
 

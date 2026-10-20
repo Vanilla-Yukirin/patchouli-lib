@@ -77,10 +77,9 @@ python scripts/validate.py
 Docker 启动后，可用 `python scripts/validate.py --container` 追加镜像构建和回环
 健康烟雾测试。完整说明见[开发、验证与交付](docs/development-and-delivery.md)。
 
-项目还提供一个默认关闭、受登录保护的
-[网页管理面板兼容文档](docs/admin-web-console.zh-CN.md)。它使用密码登录，可完成首次初始化、
-管理员凭据恢复、Agent 授权与吊销，并内置 Agent/MCP 使用说明；第一版不能控制
-部署、Docker、主机命令或备份恢复。
+项目还提供默认关闭、受主 Token 登录保护的[管理工作区](docs/admin-workspace.md)，
+支持内容与版本管理、库内多文件 Skills、设备凭据与接入小票。旧密码登录已退役，
+已有安装须完成主身份初始化；工作区不能控制部署、Docker、主机命令或备份恢复。
 公网入口使用 HTTPS；管理员控制的加密私网可按文档明确开启 HTTP，不要求另设
 TLS 反向代理。开发分支的单人主 Token 登录、内容浏览及管理范围见该文档和路线图。
 

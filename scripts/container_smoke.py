@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import time
 import urllib.request
@@ -41,6 +42,25 @@ def wait_until_ready(port: int, timeout_seconds: int = 45) -> None:
     raise RuntimeError(message)
 
 
+def verify_workspace(port: int) -> None:
+    origin = f"http://127.0.0.1:{port}"
+    with urllib.request.urlopen(origin + "/admin", timeout=5) as response:  # noqa: S310
+        document = response.read().decode("utf-8")
+        assert "__CSP_NONCE__" not in document
+        assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+    assets = re.findall(r'(?:src|href)="(/admin/assets/[^"?#]+\.(?:js|css))"', document)
+    if not assets:
+        raise RuntimeError("The packaged management entry has no bundled assets.")
+    for path in assets:
+        with urllib.request.urlopen(origin + path, timeout=5) as response:  # noqa: S310
+            if not response.read(1):
+                raise RuntimeError("A packaged management asset is empty.")
+    with urllib.request.urlopen(origin + "/admin/api/session", timeout=5) as response:  # noqa: S310
+        state = json.load(response)
+        if state["authenticated"] or not state["setup_required"]:
+            raise RuntimeError("The empty synthetic management instance has unexpected state.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", default="patchouli-lib:validation")
@@ -66,6 +86,10 @@ def main() -> None:
             "127.0.0.1::8000",
             "--env",
             "PATCHOULI_RETRIEVAL_CURSOR_SIGNING_SECRET=synthetic-container-cursor-secret-32-bytes",
+            "--env",
+            "PATCHOULI_ADMIN_SESSION_SIGNING_SECRET=synthetic-container-session-secret-32-bytes",
+            "--env",
+            "PATCHOULI_ADMIN_ALLOW_PRIVATE_HTTP=true",
             "--mount",
             f"type=volume,source={volume_name},target=/data",
             args.image,
@@ -73,6 +97,7 @@ def main() -> None:
         port_output = run("docker", "port", container_name, "8000/tcp", capture=True)
         port = int(port_output.rsplit(":", maxsplit=1)[1])
         wait_until_ready(port)
+        verify_workspace(port)
         print(f"Container smoke test passed on an ephemeral loopback port ({port}).")
     except Exception:
         subprocess.run(

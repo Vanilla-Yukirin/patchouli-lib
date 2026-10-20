@@ -31,6 +31,7 @@ from patchouli_lib.content.file_set_write_service import (
     FileSetWritePreconditionRequiredError,
 )
 from patchouli_lib.content.models import PageSource
+from patchouli_lib.content.presentation import read_presentation
 from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import ArchiveIdempotencyKey, NewPageSource, PageRecord
 from patchouli_lib.content.service import page_current_etag
@@ -38,6 +39,7 @@ from patchouli_lib.database import immediate_transaction
 from patchouli_lib.idempotency.schemas import digest_request_fingerprint
 from patchouli_lib.identifiers import canonical_utc_wire, generate_revision_id
 from patchouli_lib.library.repository import LibraryRepository
+from patchouli_lib.retrieval.file_set_read import read_verified_revision_snapshot
 
 
 class MasterFileSetConflictError(RuntimeError):
@@ -132,6 +134,7 @@ class MasterFileSetService:
                         operation_at=now,
                         manifest=manifest,
                         source=command.source,
+                        primary_file=command.primary_file,
                     )
                 else:
                     target = content.get_page(command.library_id, command.page_id)
@@ -148,6 +151,16 @@ class MasterFileSetService:
                             "A current strong ETag is required."
                         )
                     revision_id = generate_revision_id()
+                    restored = None
+                    if command.source.kind == "revision_restore" and command.source.locator:
+                        snapshot = read_verified_revision_snapshot(
+                            connection, page, command.source.locator
+                        )
+                        if snapshot.manifest != manifest:
+                            raise ValueError("Restored files differ from their source Revision.")
+                        restored = read_presentation(
+                            connection, page.library_id, page.page_uid, snapshot.revision_id
+                        )
                     appended = FileSetRevisionService(connection).append_existing_page(
                         library_id=page.library_id,
                         page_id=page.page_id,
@@ -155,6 +168,8 @@ class MasterFileSetService:
                         files=command.files,
                         revision_id=revision_id,
                         revision_at=max(now, page.updated_at + 1),
+                        primary_file=command.primary_file,
+                        presentation_override=restored,
                         source=NewPageSource(
                             library_id=page.library_id,
                             source_id=uuid4().hex,
@@ -274,6 +289,8 @@ class MasterFileSetService:
             metadata.update(title=command.title, occurred_at=command.occurred_at)
         else:
             metadata.update(page_id=command.page_id, expected_etag=command.expected_etag)
+        if command.primary_file is not None:
+            metadata["primary_file"] = command.primary_file
         parts = [
             json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
                 "utf-8"
