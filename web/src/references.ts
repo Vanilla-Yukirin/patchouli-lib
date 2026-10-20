@@ -57,7 +57,7 @@ export function referencesForRename(
 	parser.core.ruler.disable("strip_references");
 	for (const [file, source] of Object.entries(sources)) {
 		if (!/\.(?:md|markdown|mdown|mkd)$/i.test(file)) continue;
-		// Mask fenced and inline code, preserving positions and newlines.
+		// Mask block code and HTML, preserving source positions and newlines.
 		const lineOffsets = [0];
 		for (let index = 0; index < source.length; index++)
 			if (source[index] === "\n") lineOffsets.push(index + 1);
@@ -65,7 +65,13 @@ export function referencesForRename(
 		const environment = {};
 		const tokens = parser.parse(source, environment);
 		const definitions = new Map<number, number>();
+		const inlineRanges: { start: number; end: number }[] = [];
 		for (const token of tokens) {
+			if (token.map && token.type === "inline")
+				inlineRanges.push({
+					start: lineOffsets[token.map[0]] ?? source.length,
+					end: lineOffsets[token.map[1]] ?? source.length,
+				});
 			if (token.map && token.type === "reference_definition") {
 				const start = lineOffsets[token.map[0]] ?? source.length;
 				const end = lineOffsets[token.map[1]] ?? source.length;
@@ -82,18 +88,18 @@ export function referencesForRename(
 					if (masked[index] !== "\n") masked[index] = " ";
 			}
 		}
-		const mask = masked
-			.join("")
-			.replace(/(`+)[^\n]*?\1/g, (value) => " ".repeat(value.length));
+		const mask = masked.join("");
 		const state = new parser.inline.State(mask, parser, environment, []);
+		const codeState = new parser.inline.State(mask, parser, environment, []);
 		const escaped = (position: number) => {
 			let previous = position - 1;
 			while (previous >= 0 && mask[previous] === "\\") previous--;
 			return (position - previous - 1) % 2 === 1;
 		};
 		let skippedThrough = 0;
+		let inlineRangeIndex = 0;
 		const nonLinks: { start: number; end: number }[] = [];
-		for (const candidate of mask.matchAll(/\[|</g)) {
+		for (const candidate of mask.matchAll(/\[|<|`/g)) {
 			const opening = candidate.index;
 			let excluded = nonLinks.at(-1);
 			while (excluded && opening >= excluded.end) {
@@ -102,7 +108,27 @@ export function referencesForRename(
 			}
 			if (excluded && opening >= excluded.start) continue;
 			if (opening < skippedThrough || escaped(opening)) continue;
+			while (
+				inlineRanges[inlineRangeIndex] &&
+				opening >= inlineRanges[inlineRangeIndex].end
+			)
+				inlineRangeIndex++;
+			const range = inlineRanges[inlineRangeIndex];
+			if (mask[opening] === "`") {
+				if (range && opening >= range.start) {
+					codeState.pos = opening;
+					codeState.posMax = range.end;
+					parser.inline.skipToken(codeState);
+					skippedThrough = codeState.pos;
+				}
+				continue;
+			}
+			const parseEnd =
+				definitions.get(opening) ??
+				(range && opening >= range.start ? range.end : undefined);
+			if (parseEnd === undefined) continue;
 			state.pos = opening;
+			state.posMax = parseEnd;
 			if (mask[opening] === "<") {
 				parser.inline.skipToken(state);
 				skippedThrough = state.pos;
@@ -118,25 +144,25 @@ export function referencesForRename(
 				continue;
 			let destinationStart = labelEnd + 2;
 			while (
-				destinationStart < mask.length &&
+				destinationStart < parseEnd &&
 				/[ \t\r\n]/.test(mask[destinationStart])
 			)
 				destinationStart++;
 			const destination = parser.helpers.parseLinkDestination(
 				mask,
 				destinationStart,
-				mask.length,
+				parseEnd,
 			);
 			if (!destination.ok) continue;
 			let nonLinkEnd = definitions.get(opening) ?? destination.pos;
 			if (inline) {
 				let pos = destination.pos;
-				while (pos < mask.length && /[ \t\r\n]/.test(mask[pos])) pos++;
+				while (pos < parseEnd && /[ \t\r\n]/.test(mask[pos])) pos++;
 				if (pos > destination.pos) {
-					const title = parser.helpers.parseLinkTitle(mask, pos, mask.length);
+					const title = parser.helpers.parseLinkTitle(mask, pos, parseEnd);
 					if (title.ok) {
 						pos = title.pos;
-						while (pos < mask.length && /[ \t\r\n]/.test(mask[pos])) pos++;
+						while (pos < parseEnd && /[ \t\r\n]/.test(mask[pos])) pos++;
 					}
 				}
 				if (mask[pos] !== ")") continue;

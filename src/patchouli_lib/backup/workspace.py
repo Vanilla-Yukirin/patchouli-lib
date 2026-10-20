@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from typing import Any
 
@@ -158,10 +159,32 @@ def validate_workspace_graph(connection: sqlite3.Connection, *, skills: bool) ->
             raise BackupDatabaseError
     if not skills:
         return
-    for library_id, skill_id, revision_id, count, size, digest in connection.execute(
-        "SELECT library_id,skill_id,id,file_count,total_size_bytes,snapshot_sha256 "
+    for (
+        library_id,
+        skill_id,
+        revision_id,
+        name,
+        description,
+        count,
+        size,
+        digest,
+    ) in connection.execute(
+        "SELECT library_id,skill_id,id,name,description,file_count,total_size_bytes,"
+        "snapshot_sha256 "
         "FROM library_skill_revisions"
     ):
+        # Freeze the v1 stored metadata contract for every immutable version.
+        # Future writer rules require versioned validation, not changed history.
+        if (
+            not isinstance(name, str)
+            or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name) is None
+            or len(name) > 64
+            or not isinstance(description, str)
+            or len(description) > 4000
+            or "\x00" in description
+            or description != description.strip()
+        ):
+            raise BackupDatabaseError
         rows = connection.execute(
             "SELECT path,content_bytes,size_bytes,content_sha256 FROM library_skill_files "
             "WHERE library_id=? AND skill_id=? AND revision_id=? ORDER BY path",

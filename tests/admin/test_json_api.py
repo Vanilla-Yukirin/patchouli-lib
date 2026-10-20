@@ -248,6 +248,11 @@ def test_session_boundary_and_structure(browser: tuple[TestClient, dict[str, str
         == 401
     )
     library_id, section_id, book_id = structure(client, headers)
+    duplicate_library = client.post(
+        "/admin/api/libraries", json={"name": "Library"}, headers=headers
+    )
+    assert duplicate_library.status_code == 409, duplicate_library.text
+    assert duplicate_library.json()["error"]["code"] == "conflict"
     assert (
         client.get(f"/admin/api/libraries/{library_id}").json()["library"]["readme"] == "# Rules\n"
     )
@@ -267,6 +272,19 @@ def test_session_boundary_and_structure(browser: tuple[TestClient, dict[str, str
         client.put(f"/admin/api/libraries/{library_id}", json=form, headers=headers).status_code
         == 409
     )
+    reserved_library = client.post(
+        "/admin/api/libraries", json={"name": "Reserved"}, headers=headers
+    )
+    assert reserved_library.status_code == 201, reserved_library.text
+    renamed_library = client.get(f"/admin/api/libraries/{library_id}").json()["library"]
+    duplicate_library_name = client.put(
+        f"/admin/api/libraries/{library_id}",
+        json={**form, "name": "Reserved", "expected_updated_at": renamed_library["updated_at"]},
+        headers=headers,
+    )
+    assert duplicate_library_name.status_code == 409, duplicate_library_name.text
+    assert duplicate_library_name.json()["error"]["code"] == "conflict"
+    assert client.get(f"/admin/api/libraries/{library_id}").json()["library"] == renamed_library
     section = client.get(f"/admin/api/sections/{section_id}").json()["section"]
     book = client.get(f"/admin/api/books/{book_id}").json()["book"]
     for kind, item, summary in (("sections", section, "description"), ("books", book, "summary")):
@@ -282,7 +300,34 @@ def test_session_boundary_and_structure(browser: tuple[TestClient, dict[str, str
         )
         assert edited.status_code == 200, edited.text
         assert edited.json()["readme"] == "# Instructions\n"
-    assert len(client.get("/admin/api/dashboard").json()["libraries"]) == 1
+        create_path = (
+            f"/admin/api/libraries/{library_id}/sections"
+            if kind == "sections"
+            else f"/admin/api/sections/{section_id}/books"
+        )
+        duplicate = client.post(create_path, json={"name": item["name"]}, headers=headers)
+        assert duplicate.status_code == 409, duplicate.text
+        assert duplicate.json()["error"]["code"] == "conflict"
+        reserved = client.post(create_path, json={"name": "Reserved"}, headers=headers)
+        assert reserved.status_code == 201, reserved.text
+        duplicate_name = client.put(
+            f"/admin/api/{kind}/{item['id']}",
+            json={
+                "name": "Reserved",
+                summary: "Updated purpose",
+                "readme": "# Must not overwrite\n",
+                "expected_updated_at": edited.json()["updated_at"],
+            },
+            headers=headers,
+        )
+        assert duplicate_name.status_code == 409, duplicate_name.text
+        assert duplicate_name.json()["error"]["code"] == "conflict"
+        readback = client.get(f"/admin/api/{kind}/{item['id']}").json()[kind[:-1]]
+        assert all(
+            readback[field] == edited.json()[field]
+            for field in ("name", summary, "readme", "updated_at")
+        )
+    assert len(client.get("/admin/api/dashboard").json()["libraries"]) == 2
     assert client.get("/admin/api/requests").json()["items"] == []
     schema = client.get("/admin/api/openapi.json")
     assert schema.status_code == 200
@@ -532,6 +577,21 @@ def test_manual_file_save_history_and_retry(
     )
     assert target.status_code == 201, target.text
     current = client.get(path).json()
+    missing_book_id = "0" * 32
+    assert client.get(f"/admin/api/books/{missing_book_id}").status_code == 404
+    unavailable_move = client.post(
+        path + "/move",
+        json={
+            "source_section_id": section_id,
+            "source_book_id": book_id,
+            "target_section_id": section_id,
+            "target_book_id": missing_book_id,
+            "expected_etag": current["current_etag"],
+        },
+        headers={**headers, "Idempotency-Key": "workspace-move-unavailable"},
+    )
+    assert unavailable_move.status_code == 404, unavailable_move.text
+    assert unavailable_move.json() == {"error": {"code": "not_found", "message": "Item not found"}}
     moved = client.post(
         path + "/move",
         json={

@@ -35,7 +35,10 @@ from patchouli_lib.admin.master_token_store import (
     MasterTokenAlreadyInitialized,
     MasterTokenRepository,
 )
-from patchouli_lib.admin.page_move_service import MasterPageMoveConflictError
+from patchouli_lib.admin.page_move_service import (
+    MasterPageMoveConflictError,
+    MasterPageMoveNotFoundError,
+)
 from patchouli_lib.admin.service import (
     AgentMetadataVersionConflictError,
     AgentNameConflictError,
@@ -53,6 +56,7 @@ from patchouli_lib.content.service import (
 )
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.library.service import (
+    LibrarySeedConflictError,
     LibraryStructureNotFoundError,
     LibraryStructureVersionConflictError,
 )
@@ -91,6 +95,7 @@ class JsonRoute(APIRoute):
                 )
             except (
                 LibraryStructureNotFoundError,
+                MasterPageMoveNotFoundError,
                 ArchiveNotFoundError,
                 ResourceNotFoundError,
                 TagNotFoundError,
@@ -98,6 +103,7 @@ class JsonRoute(APIRoute):
             ):
                 return reply({"error": {"code": "not_found", "message": "Item not found"}}, 404)
             except (
+                LibrarySeedConflictError,
                 LibraryStructureVersionConflictError,
                 ArchiveLifecycleUnchangedError,
                 IntegrityError,

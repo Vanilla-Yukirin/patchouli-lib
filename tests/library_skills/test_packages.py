@@ -22,6 +22,8 @@ from patchouli_lib.auth.models import CredentialLibraryGrant, CredentialLibraryP
 from patchouli_lib.auth.repository import AuthRepository
 from patchouli_lib.auth.schemas import CallerKind, NewCaller
 from patchouli_lib.auth.service import CredentialIssuer, utc_microseconds
+from patchouli_lib.backup.errors import BackupDatabaseError
+from patchouli_lib.backup.workspace import validate_workspace_graph
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import NewBook, NewLibrary, NewSection
@@ -375,6 +377,50 @@ def test_package_journey_permissions_history_and_replay(content_engine: Engine) 
         assert raw_connection.execute(
             "SELECT count(*) FROM library_skill_revisions"
         ).fetchone() == (2,)
+        validate_workspace_graph(raw_connection, skills=True)
+        original_metadata = raw_connection.execute(
+            "SELECT name,description FROM library_skill_revisions WHERE id=?",
+            (body["revision_id"],),
+        ).fetchone()
+        assert original_metadata == ("sample-skill", "Sample purpose")
+        assert raw_connection.execute(
+            "SELECT current_revision_id FROM library_skills WHERE id=?", (body["id"],)
+        ).fetchone() == (revised.json()["revision_id"],)
+        trigger_sql = raw_connection.execute(
+            "SELECT sql FROM sqlite_schema WHERE type='trigger' "
+            "AND name='library_skill_revisions_no_update'"
+        ).fetchone()
+        assert trigger_sql is not None
+        raw_connection.execute("SAVEPOINT historical_skill_metadata")
+        try:
+            raw_connection.execute("DROP TRIGGER library_skill_revisions_no_update")
+            for name, description in (
+                ("invalid/skill", original_metadata[1]),
+                (original_metadata[0], "Invalid\x00description"),
+                (original_metadata[0], " Untrimmed description "),
+            ):
+                raw_connection.execute(
+                    "UPDATE library_skill_revisions SET name=?,description=? WHERE id=?",
+                    (name, description, body["revision_id"]),
+                )
+                with pytest.raises(BackupDatabaseError):
+                    validate_workspace_graph(raw_connection, skills=True)
+                raw_connection.execute(
+                    "UPDATE library_skill_revisions SET name=?,description=? WHERE id=?",
+                    (*original_metadata, body["revision_id"]),
+                )
+                validate_workspace_graph(raw_connection, skills=True)
+        finally:
+            raw_connection.execute("ROLLBACK TO SAVEPOINT historical_skill_metadata")
+            raw_connection.execute("RELEASE SAVEPOINT historical_skill_metadata")
+        assert (
+            raw_connection.execute(
+                "SELECT sql FROM sqlite_schema WHERE type='trigger' "
+                "AND name='library_skill_revisions_no_update'"
+            ).fetchone()
+            == trigger_sql
+        )
+        validate_workspace_graph(raw_connection, skills=True)
         with pytest.raises(sqlite3.IntegrityError):
             raw_connection.execute("UPDATE library_skill_files SET content_bytes=x'00'")
 
