@@ -49,11 +49,13 @@ class WorkspaceSaveReceipt(Base):
         ),
         CheckConstraint("typeof(created_at) = 'integer' AND created_at >= 0"),
         CheckConstraint("json_valid(response_json)"),
+        CheckConstraint("typeof(response_sha256) = 'blob' AND length(response_sha256) = 32"),
     )
     identity_id: Mapped[str] = mapped_column(Text, primary_key=True)
     key_digest: Mapped[bytes] = mapped_column(LargeBinary(32), primary_key=True)
     request_fingerprint: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
     response_json: Mapped[str] = mapped_column(Text, nullable=False)
+    response_sha256: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
@@ -112,12 +114,14 @@ def remember(
     *,
     operation_at: int,
 ) -> None:
+    response_json = json.dumps(response, ensure_ascii=False, separators=(",", ":"))
     connection.execute(
         insert(WorkspaceSaveReceipt).values(
             identity_id=session.identity_id,
             key_digest=key,
             request_fingerprint=digest,
-            response_json=json.dumps(response, ensure_ascii=False, separators=(",", ":")),
+            response_json=response_json,
+            response_sha256=hashlib.sha256(response_json.encode("utf-8")).digest(),
             created_at=max(utc_microseconds(), operation_at),
         )
     )

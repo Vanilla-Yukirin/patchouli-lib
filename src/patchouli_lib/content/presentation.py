@@ -23,7 +23,6 @@ from patchouli_lib.content.file_manifest import FileManifest
 from patchouli_lib.models import Base
 
 UNTITLED = "无标题"
-MAX_PREVIEW_BYTES = 1024 * 1024
 
 
 class RevisionPresentation(Base):
@@ -58,7 +57,12 @@ class Presentation:
 
 
 def preview_text(content: bytes) -> str | None:
-    if len(content) > MAX_PREVIEW_BYTES or b"\x00" in content:
+    """Recognize source text; the browser separately bounds Markdown rendering.
+
+    File-set validation already enforces the file and total package byte limits.
+    A rendering budget must not make otherwise valid source uneditable.
+    """
+    if b"\x00" in content:
         return None
     try:
         return content.decode("utf-8")

@@ -36,6 +36,7 @@ from patchouli_lib.database import immediate_transaction
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import LibraryStructureSeed
 from patchouli_lib.library.service import LibrarySeedService
+from patchouli_lib.library_skills.service import LibrarySkillService
 
 TOKEN = "synthetic browser workspace master token"
 SOURCE = (
@@ -54,6 +55,8 @@ class Browser:
     library: str
     page: str
     other_page: str
+    skill: str
+    skill_revision: str
 
 
 def wait(tools: _DevTools, expression: str) -> None:
@@ -70,6 +73,7 @@ def click(tools: _DevTools, expression: str) -> None:
     point = tools.evaluate(f"""(() => {{
       const element = ({expression});
       if (!element) return null;
+      element.scrollIntoView({{block:'center', inline:'nearest', behavior:'instant'}});
       const r = element.getBoundingClientRect();
       return r.width && r.height ? {{x:r.x+r.width/2,y:r.y+r.height/2}} : null;
     }})()""")
@@ -158,6 +162,21 @@ def workspace_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterat
             source=ArchiveSourceInput(kind="synthetic_browser"),
             primary_file="entry.md",
         )
+        skills = LibrarySkillService(connection, authorize=lambda *_: None, clock=lambda: 3_000_000)
+        skill = skills.create(
+            structure.library.id,
+            name="browser-skill",
+            description="Synthetic browser package",
+            files=(("SKILL.md", b"# Historical Skill\n"),),
+        ).skill
+        skills.revise(
+            structure.library.id,
+            str(skill["id"]),
+            name="browser-skill",
+            description="Synthetic browser package",
+            files=(("SKILL.md", b"# Current Skill\n"),),
+            expected_etag=str(skill["etag"]),
+        )
     port = _available_port()
     origin = f"http://127.0.0.1:{port}"
     server = uvicorn.Server(
@@ -218,7 +237,16 @@ def workspace_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterat
             "document.querySelector('main') !== null && "
             "document.querySelector('.auth-card') === null",
         )
-        yield Browser(tools, engine, origin, structure.library.id, page.page_id, other.page_id)
+        yield Browser(
+            tools,
+            engine,
+            origin,
+            structure.library.id,
+            page.page_id,
+            other.page_id,
+            str(skill["id"]),
+            str(skill["revision_id"]),
+        )
     finally:
         if tools is not None:
             tools.close()
@@ -251,6 +279,49 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
         "document.querySelector('.reading-pane .prose a')?.getAttribute('href')"
     ).startswith("/admin/api/")
     screenshot(tools, tmp_path / "desktop-reading.png")
+    for exact_path, title in (
+        (page_path + "/revisions/1", "Workspace title"),
+        (
+            f"/admin/libraries/{browser.library}/skills/{browser.skill}"
+            f"/revisions/{browser.skill_revision}",
+            "Historical Skill",
+        ),
+    ):
+        tools.command("Page.navigate", {"url": browser.origin + exact_path})
+        wait(
+            tools,
+            "document.querySelector('.reading-pane .prose h1')?.textContent"
+            f" === {json.dumps(title)}",
+        )
+        assert tools.evaluate(f"({button('Edit')}) === undefined")
+        assert tools.evaluate("document.querySelector('.source-pane') === null")
+        for tab in ("Files", "Properties"):
+            click(
+                tools,
+                "Array.from(document.querySelectorAll('[role=tab]'))"
+                f".find(b=>b.textContent.trim()==={json.dumps(tab)})",
+            )
+            assert tools.evaluate(f"({button('Rename')}) === undefined")
+            assert tools.evaluate(f"({button('Save')}) === undefined")
+            assert tools.evaluate(
+                "document.querySelector('[role=tabpanel][data-state=active] "
+                "input:not([type=file]), "
+                "[role=tabpanel][data-state=active] textarea') === null"
+            )
+        click(
+            tools,
+            "Array.from(document.querySelectorAll('[role=tab]'))"
+            ".find(b=>b.textContent.trim()==='History')",
+        )
+        wait(tools, f"Boolean({button('Restore')})")
+        click(tools, button("Back to latest"))
+        wait(tools, f"Boolean({button('Edit')})")
+        assert "/revisions/" not in tools.evaluate("location.pathname")
+    tools.command("Page.navigate", {"url": browser.origin + page_path})
+    wait(
+        tools,
+        "document.querySelector('.reading-pane .prose')?.textContent.includes('Original text.')",
+    )
     tools.evaluate("window.confirm=()=>true; true")
     click(tools, button("Edit"))
     wait(
@@ -332,7 +403,10 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
       window.fetch = (input, options) => {
         if (options?.method === 'PUT' && options.body instanceof FormData) {
           const metadata = JSON.parse(options.body.get('metadata'));
-          window.workspaceEdits.push(metadata.edits.map(item => item.name));
+          window.workspaceEdits.push({
+            edits: metadata.edits,
+            files: options.body.getAll('files').map(file => file.name)
+          });
         }
         return originalFetch(input, options);
       };
@@ -406,7 +480,7 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
     assert b"[Attachment](renamed-note.txt)" in files["entry.md"]
     assert b"Edited in the browser." in files["entry.md"]
     assert "note.txt" not in files
-    assert tools.evaluate("window.workspaceEdits") == [["entry.md"]]
+    assert tools.evaluate("window.workspaceEdits") == [{"edits": [], "files": ["entry.md"]}]
     tools.command("Page.navigate", {"url": browser.origin + page_path})
     wait(
         tools,
@@ -475,6 +549,101 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
     assert dimensions["noncePresent"] and dimensions["lockStylePresent"], dimensions
     assert dimensions["lockStyleNonceMatches"] and dimensions["lockStylesheetActive"], dimensions
     assert dimensions["styleViolations"] == 0, dimensions
+
+    # A valid large source remains editable; quotes/backslashes must not inflate
+    # JSON metadata beyond its separate limit. Its BOM survives the file upload.
+    tools.command("Page.navigate", {"url": browser.origin + page_path})
+    wait(
+        tools,
+        "document.querySelector('.reading-pane .prose h1')?.textContent === 'Updated workspace'",
+    )
+    tools.command(
+        "Emulation.setDeviceMetricsOverride",
+        {"width": 1440, "height": 1000, "deviceScaleFactor": 1, "mobile": False},
+    )
+    click(tools, button("Edit"))
+    wait(tools, "document.querySelector('.source-pane .cm-content') !== null")
+    large_source = "\ufeff# Large browser title\n\n" + '"\\' * 550_000 + "\n"
+    assert len(json.dumps({"text": large_source}).encode()) > 2 * 1024 * 1024
+    edit_source(tools, large_source)
+    wait(tools, "document.querySelector('.preview-pane .prose pre') !== null")
+    click(tools, button("Save"))
+    wait(tools, "document.querySelector('[role=status]')?.textContent.includes('Saved')")
+    with browser.engine.connect() as connection:
+        repository = ContentRepository(connection)
+        large_page = repository.get_page(browser.library, browser.page)
+        assert large_page is not None and large_page.current_revision_number == 3
+        large_files = {
+            entry.name: entry.content
+            for entry in repository.get_current_file_manifest(large_page).files
+        }
+        assert large_files["entry.md"] == large_source.encode()
+        assert large_files["renamed-note.txt"] == ATTACHMENT
+    tools.command("Page.navigate", {"url": browser.origin + page_path})
+    wait(
+        tools,
+        "document.querySelector('.reading-pane .prose pre')"
+        "?.textContent.includes('Large browser title')",
+    )
+    click(tools, button("Edit"))
+    wait(
+        tools,
+        "document.querySelector('.source-pane .cm-content')"
+        "?.textContent.includes('Large browser title')",
+    )
+    click(tools, button("Save"))
+    wait(tools, "document.querySelector('[role=status]')?.textContent.includes('no new revision')")
+    with browser.engine.connect() as connection:
+        unchanged_page = ContentRepository(connection).get_page(browser.library, browser.page)
+        assert unchanged_page is not None and unchanged_page.current_revision_number == 3
+
+    click(tools, button("Edit"))
+    wait(tools, "document.querySelector('.source-pane .cm-content') !== null")
+    click(
+        tools,
+        "Array.from(document.querySelectorAll('[role=tab]'))"
+        ".find(b=>b.textContent.trim()==='Files')",
+    )
+    tools.command("Page.setInterceptFileChooserDialog", {"enabled": True})
+    click(
+        tools,
+        "Array.from(Array.from(document.querySelectorAll('.file-row'))"
+        ".find(r=>r.querySelector('strong')?.textContent==='entry.md')"
+        "?.querySelectorAll('button')||[]).find(b=>b.textContent.trim()==='Replace')",
+    )
+    replacement = tmp_path / "replacement.bin"
+    replacement.write_bytes(b"\xff\x00\x01")
+    document = tools.command("DOM.getDocument")
+    node = tools.command(
+        "DOM.querySelector",
+        {
+            "nodeId": document["root"]["nodeId"],
+            "selector": "input[type=file]:not([multiple])",
+        },
+    )
+    tools.command("DOM.setFileInputFiles", {"nodeId": node["nodeId"], "files": [str(replacement)]})
+    click(
+        tools,
+        "Array.from(document.querySelectorAll('[role=tab]'))"
+        ".find(b=>b.textContent.trim()==='Content')",
+    )
+    wait(
+        tools,
+        "document.querySelector('.reading-pane')?.textContent.includes('cannot be previewed')",
+    )
+    assert tools.evaluate("document.querySelector('.source-pane') === null")
+    assert tools.evaluate(f"({button('Set as entry')}) === undefined")
+    click(tools, button("Save"))
+    wait(tools, "document.querySelector('[role=status]')?.textContent.includes('Saved')")
+    with browser.engine.connect() as connection:
+        repository = ContentRepository(connection)
+        binary_page = repository.get_page(browser.library, browser.page)
+        assert binary_page is not None and binary_page.current_revision_number == 4
+        replaced_files = repository.get_current_file_manifest(binary_page)
+        assert {entry.name: entry.content for entry in replaced_files.files} == {
+            "entry.md": replacement.read_bytes(),
+            "renamed-note.txt": ATTACHMENT,
+        }
 
 
 def test_browser_failure_diagnostics_redact_local_details(tmp_path: Path) -> None:

@@ -32,6 +32,7 @@ def upgrade() -> None:
         sa.Column("key_digest", sa.LargeBinary(32), primary_key=True),
         sa.Column("request_fingerprint", sa.LargeBinary(32), nullable=False),
         sa.Column("response_json", sa.Text(), nullable=False),
+        sa.Column("response_sha256", sa.LargeBinary(32), nullable=False),
         sa.Column("created_at", sa.BigInteger(), nullable=False),
         sa.CheckConstraint("length(identity_id) = 32 AND identity_id NOT GLOB '*[^0-9a-f]*'"),
         sa.CheckConstraint("typeof(key_digest) = 'blob' AND length(key_digest) = 32"),
@@ -40,6 +41,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("typeof(created_at) = 'integer' AND created_at >= 0"),
         sa.CheckConstraint("json_valid(response_json)"),
+        sa.CheckConstraint("typeof(response_sha256) = 'blob' AND length(response_sha256) = 32"),
     )
     for operation in ("UPDATE", "DELETE"):
         op.get_bind().exec_driver_sql(

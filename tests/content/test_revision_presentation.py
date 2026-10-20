@@ -7,8 +7,14 @@ import pytest
 from sqlalchemy import Engine
 from sqlalchemy.exc import IntegrityError
 
+from patchouli_lib.content.file_manifest import build_file_manifest
 from patchouli_lib.content.file_set_service import FileSetRevisionService
-from patchouli_lib.content.presentation import extract_title, read_presentation
+from patchouli_lib.content.presentation import (
+    extract_title,
+    presentation_for,
+    preview_text,
+    read_presentation,
+)
 from patchouli_lib.database import immediate_transaction
 
 from .test_file_set_service import REVISION_TWO, _seed, _source
@@ -22,6 +28,15 @@ def test_shared_title_vectors() -> None:
         assert extract_title(vector["filename"], vector["content"].encode()) == vector["title"], (
             vector["name"]
         )
+    # The Markdown rendering budget is not a text editing or entry selection limit.
+    large = ("body " * 210_000 + "\n\n# Large source title\n").encode()
+    assert len(large) > 1024 * 1024
+    assert preview_text(large) == large.decode()
+    selected = presentation_for(build_file_manifest((("large.md", large),)), "large.md")
+    assert selected.primary_file == "large.md" and selected.display_title == "Large source title"
+    for binary in (b"\xff", b"# Title\x00"):
+        assert preview_text(binary) is None
+        assert extract_title("binary.md", binary) == "无标题"
 
 
 def test_primary_file_only_change_is_a_revision_and_is_immutable(content_engine: Engine) -> None:

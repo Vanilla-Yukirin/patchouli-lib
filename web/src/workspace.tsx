@@ -37,6 +37,12 @@ type DraftFile = {
 	upload?: File;
 	removed?: boolean;
 };
+function editableText(file: DraftFile | undefined): boolean {
+	if (!file) return false;
+	return file.upload
+		? file.source !== undefined
+		: file.source !== undefined || Boolean(file.entry?.editable);
+}
 type Props = PageProps & {
 	libraryId: string;
 	pageId?: string;
@@ -144,6 +150,7 @@ function ResourceWorkspace(
 	const { t } = usePreferences();
 	const client = useQueryClient();
 	const creating = props.resourceId === "new";
+	const historical = props.revision !== undefined;
 	const base = `libraries/${props.libraryId}/${props.kind}`;
 	const resource = `${base}/${props.resourceId}`;
 	const writeTarget =
@@ -160,7 +167,10 @@ function ResourceWorkspace(
 				resource + (props.revision ? `/revisions/${props.revision}` : ""),
 			),
 	});
-	const [edit, setEdit] = useState(Boolean(props.editing) || creating);
+	const [editing, setEdit] = useState(
+		!historical && (Boolean(props.editing) || creating),
+	);
+	const edit = !historical && editing;
 	const [files, setFiles] = useState<DraftFile[]>([]);
 	const [selected, setSelected] = useState<string>("");
 	const [primary, setPrimary] = useState<string | null>(null);
@@ -176,6 +186,7 @@ function ResourceWorkspace(
 		primary_file: string | null;
 		occurred_at?: string | null;
 	} | null>(() => {
+		if (historical) return null;
 		try {
 			return JSON.parse(sessionStorage.getItem(receiptKey) || "null");
 		} catch {
@@ -235,6 +246,7 @@ function ResourceWorkspace(
 		queryKey: ["file-text", version?.revision_id, selected],
 		enabled: Boolean(
 			active?.entry &&
+				!active.upload &&
 				(active.entry.preview_kind === "markdown" ||
 					active.entry.preview_kind === "text" ||
 					active.entry.editable),
@@ -244,8 +256,9 @@ function ResourceWorkspace(
 			return readText(active.entry);
 		},
 	});
-	const source = active?.source ?? text.data;
+	const source = active?.upload ? active.source : (active?.source ?? text.data);
 	const update = (value: string) => {
+		if (!edit || !editableText(active)) return;
 		setFiles((previous) =>
 			previous.map((file) =>
 				file.path === selected
@@ -258,12 +271,19 @@ function ResourceWorkspace(
 	const choose = async (path: string) => {
 		setSelected(path);
 		const file = files.find((item) => item.path === path);
-		if (file?.entry && file.source === undefined && file.entry.editable) {
+		if (
+			file?.entry &&
+			!file.upload &&
+			file.source === undefined &&
+			file.entry.editable
+		) {
 			try {
 				const source = await readText(file.entry);
 				setFiles((previous) =>
 					previous.map((item) =>
-						item.path === path ? { ...item, source } : item,
+						item.path === path && !item.upload && item.entry === file.entry
+							? { ...item, source }
+							: item,
 					),
 				);
 			} catch (error) {
@@ -272,9 +292,13 @@ function ResourceWorkspace(
 		}
 	};
 	const addUploads = async (uploads: FileList | null) => {
-		if (!uploads) return;
+		if (!edit || saving || unconfirmed || !uploads) return;
 		const added: DraftFile[] = [];
 		for (const file of Array.from(uploads)) {
+			if (file.size > 16 * 1024 * 1024) {
+				setError(new Error("body_too_large"));
+				continue;
+			}
 			const path = file.webkitRelativePath
 				? file.webkitRelativePath.split("/").slice(1).join("/")
 				: file.name;
@@ -284,14 +308,12 @@ function ResourceWorkspace(
 			}
 			let source: string | undefined;
 			try {
-				if (file.size <= 1024 * 1024) {
-					const bytes = new Uint8Array(await file.arrayBuffer());
-					if (!bytes.includes(0))
-						source = new TextDecoder("utf-8", {
-							fatal: true,
-							ignoreBOM: true,
-						}).decode(bytes);
-				}
+				const bytes = new Uint8Array(await file.arrayBuffer());
+				if (!bytes.includes(0))
+					source = new TextDecoder("utf-8", {
+						fatal: true,
+						ignoreBOM: true,
+					}).decode(bytes);
 			} catch {}
 			added.push({ path, upload: file, source, changed: false });
 		}
@@ -299,6 +321,7 @@ function ResourceWorkspace(
 		setDirty(true);
 	};
 	const save = async () => {
+		if (!edit || historical || saving) return;
 		setSaving(true);
 		setError(undefined);
 		try {
@@ -309,9 +332,7 @@ function ResourceWorkspace(
 			const metadata: { [key: string]: unknown } = {
 				primary_file: primary,
 				base_etag: previousOperation?.base_etag ?? data.data?.current_etag,
-				edits: kept
-					.filter((file) => file.source !== undefined && file.changed)
-					.map((file) => ({ name: file.path, content: file.source })),
+				edits: [],
 				remove: files
 					.filter((file) => file.removed && file.entry)
 					.map((file) => file.entry?.path),
@@ -342,9 +363,27 @@ function ResourceWorkspace(
 				if (props.kind === "skills") delete metadata.primary_file;
 			}
 			body.append("metadata", JSON.stringify(metadata));
-			for (const file of kept)
-				if (file.upload && !file.changed)
-					body.append("files", file.upload, file.path);
+			const uploads: { path: string; body: Blob }[] = [];
+			for (const file of kept) {
+				if (file.source !== undefined && file.changed) {
+					const bytes = new TextEncoder().encode(file.source);
+					if (bytes.length > 16 * 1024 * 1024)
+						throw new Error("body_too_large");
+					if (
+						new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+							bytes,
+						) !== file.source
+					)
+						throw new Error("invalid_text_edit");
+					uploads.push({
+						path: file.path,
+						body: new Blob([bytes], { type: "application/octet-stream" }),
+					});
+				} else if (file.upload) {
+					uploads.push({ path: file.path, body: file.upload });
+				}
+			}
+			for (const file of uploads) body.append("files", file.body, file.path);
 			const hash = async (bytes: BufferSource) =>
 				Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
 					.map((byte) => byte.toString(16).padStart(2, "0"))
@@ -353,15 +392,10 @@ function ResourceWorkspace(
 				target: writeTarget,
 				metadata,
 				uploads: await Promise.all(
-					kept
-						.filter(
-							(file): file is DraftFile & { upload: File } =>
-								Boolean(file.upload) && !file.changed,
-						)
-						.map(async (file) => [
-							file.path,
-							await hash(await file.upload.arrayBuffer()),
-						]),
+					uploads.map(async (file) => [
+						file.path,
+						await hash(await file.body.arrayBuffer()),
+					]),
 				),
 			});
 			const signature = await hash(new TextEncoder().encode(identity));
@@ -441,6 +475,7 @@ function ResourceWorkspace(
 		}
 	};
 	const startRename = async (file: DraftFile) => {
+		if (!edit || saving || unconfirmed) return;
 		const next = prompt(t("workspace.newFileName"), file.path);
 		if (!next || next === file.path) return;
 		if (files.some((item) => item.path === next && !item.removed)) {
@@ -448,19 +483,20 @@ function ResourceWorkspace(
 			return;
 		}
 		const sources: Record<string, string> = {};
+		const scanned = new Map(files.map((item) => [item.path, item]));
 		for (const item of files.filter(
 			(file) =>
 				!file.removed && /\.(?:md|markdown|mdown|mkd)$/i.test(file.path),
 		)) {
 			if (item.source !== undefined) sources[item.path] = item.source;
-			else if (item.entry)
+			else if (item.entry && !item.upload)
 				try {
 					sources[item.path] = await readText(item.entry);
 				} catch {}
 		}
 		setFiles((previous) =>
 			previous.map((item) =>
-				sources[item.path] !== undefined
+				sources[item.path] !== undefined && item === scanned.get(item.path)
 					? { ...item, source: sources[item.path] }
 					: item,
 			),
@@ -469,7 +505,7 @@ function ResourceWorkspace(
 		setRename({ from: file.path, to: next });
 	};
 	const applyRename = () => {
-		if (!rename || !suggestions) return;
+		if (!edit || saving || unconfirmed || !rename || !suggestions) return;
 		try {
 			const sources = Object.fromEntries(
 				files
@@ -534,6 +570,7 @@ function ResourceWorkspace(
 					</h1>
 					<p className="muted">
 						{primary || t("workspace.noEntryFile")}
+						{historical && ` · v${version?.revision_number ?? ""}`}
 						{dirty && ` · ${t("workspace.unsaved")}`}
 					</p>
 				</div>
@@ -566,11 +603,13 @@ function ResourceWorkspace(
 							</button>
 						</>
 					)}
-					{!edit && source !== undefined && (
+					{!edit && (
 						<button
 							type="button"
 							className="secondary"
+							disabled={source === undefined}
 							onClick={async () => {
+								if (source === undefined) return;
 								try {
 									await navigator.clipboard.writeText(source);
 									setSavedNotice(t("workspace.sourceCopied"));
@@ -629,7 +668,7 @@ function ResourceWorkspace(
 								{saving ? t("workspace.saving") : t("credentials.save")}
 							</button>
 						</>
-					) : (
+					) : !historical ? (
 						<button
 							type="button"
 							onClick={() => {
@@ -639,6 +678,14 @@ function ResourceWorkspace(
 						>
 							<Pencil size={17} />
 							{t("editor.edit")}
+						</button>
+					) : (
+						<button
+							type="button"
+							className="secondary"
+							onClick={() => props.go(`/${resource}`)}
+						>
+							{t("activity.latest")}
 						</button>
 					)}
 				</div>
@@ -776,8 +823,7 @@ function ResourceWorkspace(
 									</Empty>
 								)}
 								{active ? (
-									edit &&
-									(active.source !== undefined || active.entry?.editable) ? (
+									edit && editableText(active) ? (
 										<SourceEditor
 											key={active.path}
 											value={source || ""}
@@ -804,7 +850,8 @@ function ResourceWorkspace(
 										)
 									) : text.isFetching ? (
 										<Loading />
-									) : active.entry?.preview_kind === "image" &&
+									) : !active.upload &&
+										active.entry?.preview_kind === "image" &&
 										active.entry.preview_href ? (
 										<img
 											className="document-image"
@@ -814,7 +861,7 @@ function ResourceWorkspace(
 									) : (
 										<Empty>
 											<p>{t("workspace.thisFileCannotBePreviewed")}</p>
-											{active.entry && (
+											{active.entry && !active.upload && (
 												<a
 													className="button"
 													href={active.entry.download_href}
@@ -851,18 +898,21 @@ function ResourceWorkspace(
 							ref={replaceInput}
 							className="visually-hidden"
 							onChange={async (event) => {
+								if (!edit || saving || unconfirmed) return;
 								const upload = event.target.files?.[0];
 								if (!upload) return;
+								if (upload.size > 16 * 1024 * 1024) {
+									setError(new Error("body_too_large"));
+									return;
+								}
 								let source: string | undefined;
 								try {
-									if (upload.size <= 1024 * 1024) {
-										const bytes = new Uint8Array(await upload.arrayBuffer());
-										if (!bytes.includes(0))
-											source = new TextDecoder("utf-8", {
-												fatal: true,
-												ignoreBOM: true,
-											}).decode(bytes);
-									}
+									const bytes = new Uint8Array(await upload.arrayBuffer());
+									if (!bytes.includes(0))
+										source = new TextDecoder("utf-8", {
+											fatal: true,
+											ignoreBOM: true,
+										}).decode(bytes);
 								} catch {}
 								setFiles((previous) =>
 									previous.map((file) =>
@@ -871,6 +921,12 @@ function ResourceWorkspace(
 											: file,
 									),
 								);
+								if (
+									source === undefined &&
+									primary === replacePath &&
+									props.kind === "pages"
+								)
+									setPrimary(null);
 								setDirty(true);
 								event.target.value = "";
 							}}
@@ -915,12 +971,11 @@ function ResourceWorkspace(
 													<button
 														type="button"
 														disabled={
-															props.kind === "skills" ||
-															(file.source === undefined &&
-																!file.entry?.editable)
+															props.kind === "skills" || !editableText(file)
 														}
 														className="secondary"
 														onClick={() => {
+															if (!editableText(file)) return;
 															setPrimary(file.path);
 															setDirty(true);
 														}}
@@ -984,8 +1039,25 @@ function ResourceWorkspace(
 					</Tabs.Content>
 					<Tabs.Content value="properties">
 						<Panel title={t("workspace.properties")}>
-							{data.data && props.kind === "pages" && (
+							{data.data && props.kind === "pages" && !historical && (
 								<PageProperties {...props} document={data.data} />
+							)}
+							{data.data && props.kind === "pages" && historical && (
+								<>
+									<p>
+										{t("page-properties.declaredTime")} ·{" "}
+										<LocalTime value={data.data.occurred_at} />
+									</p>
+									<div className="tag-options">
+										{data.data.tag_choices
+											?.filter((tag) => tag.attached)
+											.map((tag) => (
+												<span className="chip" key={tag.id}>
+													{tag.name}
+												</span>
+											))}
+									</div>
+								</>
 							)}
 							{data.data && props.kind === "skills" && (
 								<p>

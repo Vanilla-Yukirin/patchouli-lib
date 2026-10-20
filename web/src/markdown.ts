@@ -33,11 +33,7 @@ export function librarySkillWorkspaceHref(
 	}
 }
 export function titleFromMarkdown(source: string) {
-	if (
-		new TextEncoder().encode(source).length > 1024 * 1024 ||
-		source.includes("\0")
-	)
-		return null;
+	if (source.includes("\0")) return null;
 	const lines = source.match(/[^\r\n]*(?:\r\n|\n|\r|$)/g) || [];
 	let clean = source;
 	if (lines[0]?.trim() === "---") {

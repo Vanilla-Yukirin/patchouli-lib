@@ -5,10 +5,134 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from typing import Any
 
 from patchouli_lib.backup.errors import BackupDatabaseError
+from patchouli_lib.content.page_membership_history import (
+    PageMembershipHistoryError,
+    PageStateTimeline,
+    load_page_state_timeline,
+)
 from patchouli_lib.content.presentation import preview_text
+from patchouli_lib.content.service import page_current_etag
 from patchouli_lib.library_skills.service import build_skill_snapshot
+
+
+def _page_response(
+    connection: sqlite3.Connection,
+    body: dict[str, Any],
+    created_at: int,
+    schema_revision: str,
+    timelines: dict[tuple[str, bytes], PageStateTimeline],
+) -> None:
+    common = {
+        "library_id",
+        "page_id",
+        "revision_id",
+        "revision_number",
+        "etag",
+        "changed",
+        "replayed",
+    }
+    save_fields = {"section_id", "book_id", "overwritten_newer_revision"}
+    if (
+        set(body) not in (common, common | save_fields)
+        or type(body["changed"]) is not bool
+        or body["replayed"] is not False
+        or type(body["revision_number"]) is not int
+        or any(
+            type(body[key]) is not str for key in ("library_id", "page_id", "revision_id", "etag")
+        )
+    ):
+        raise BackupDatabaseError
+    if save_fields <= body.keys() and (
+        type(body["overwritten_newer_revision"]) is not bool
+        or any(type(body[key]) is not str for key in ("section_id", "book_id"))
+    ):
+        raise BackupDatabaseError
+    row = connection.execute(
+        "SELECT page_uid FROM pages WHERE library_id=? AND page_id=?",
+        (body["library_id"], body["page_id"]),
+    ).fetchone()
+    if row is None:
+        raise BackupDatabaseError
+    key = (body["library_id"], row[0])
+    timeline = timelines.get(key)
+    if timeline is None:
+        timeline = load_page_state_timeline(
+            connection, schema_revision=schema_revision, library_id=key[0], page_uid=key[1]
+        )
+        timelines[key] = timeline
+    states = [
+        state
+        for state in timeline.states
+        if state.deleted_at is None
+        and state.revision_id == body["revision_id"]
+        and state.revision_number == body["revision_number"]
+        and state.updated_at <= created_at
+        and page_current_etag(
+            row[0], state.revision_id, state.revision_number, state.occurred_at, state.updated_at
+        )
+        == body["etag"]
+    ]
+    if len(states) != 1:
+        raise BackupDatabaseError
+    if save_fields <= body.keys() and (body["section_id"], body["book_id"]) != (
+        states[0].section_id,
+        states[0].book_id,
+    ):
+        raise BackupDatabaseError
+
+
+def _skill_response(connection: sqlite3.Connection, body: dict[str, Any], created_at: int) -> None:
+    if (
+        set(body) != {"skill", "changed", "created", "replayed", "overwritten_newer_revision"}
+        or type(body["skill"]) is not dict
+        or any(
+            type(body[key]) is not bool
+            for key in ("changed", "created", "overwritten_newer_revision")
+        )
+        or body["replayed"] is not False
+    ):
+        raise BackupDatabaseError
+    skill = body["skill"]
+    if any(type(skill[key]) is not str for key in ("library_id", "id", "revision_id")):
+        raise BackupDatabaseError
+    row = connection.execute(
+        "SELECT s.created_at,r.id,r.number,r.name,r.description,r.file_count,"
+        "r.total_size_bytes,r.snapshot_sha256,r.created_at "
+        "FROM library_skills s JOIN library_skill_revisions r "
+        "ON r.library_id=s.library_id AND r.skill_id=s.id "
+        "WHERE s.library_id=? AND s.id=? AND r.id=?",
+        (skill["library_id"], skill["id"], skill["revision_id"]),
+    ).fetchone()
+    if row is None or row[8] > created_at:
+        raise BackupDatabaseError
+    expected = {
+        "library_id": skill["library_id"],
+        "id": skill["id"],
+        "name": row[3],
+        "description": row[4],
+        "current_revision_id": row[1],
+        "current_revision_number": row[2],
+        "created_at": row[0],
+        "updated_at": row[8],
+        "revision_id": row[1],
+        "revision_number": row[2],
+        "file_count": row[5],
+        "total_size_bytes": row[6],
+        "snapshot_sha256": bytes(row[7]).hex(),
+        "etag": f'"skill-v1-{skill["id"]}-{row[1]}"',
+    }
+    if set(skill) != set(expected) or any(
+        type(skill[key]) is not type(value) or skill[key] != value
+        for key, value in expected.items()
+    ):
+        raise BackupDatabaseError
+    if body["created"] != (body["changed"] and row[2] == 1) or (
+        body["created"] and body["overwritten_newer_revision"]
+    ):
+        raise BackupDatabaseError
 
 
 def validate_workspace_graph(connection: sqlite3.Connection, *, skills: bool) -> None:
@@ -72,8 +196,11 @@ def validate_workspace_graph(connection: sqlite3.Connection, *, skills: bool) ->
         is None
     ):
         return
-    for identity, raw, created_at in connection.execute(
-        "SELECT identity_id,response_json,created_at FROM admin_workspace_save_receipts"
+    schema_revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+    timelines: dict[tuple[str, bytes], PageStateTimeline] = {}
+    for identity, raw, digest, created_at in connection.execute(
+        "SELECT identity_id,response_json,response_sha256,created_at "
+        "FROM admin_workspace_save_receipts"
     ):
         if (
             connection.execute(
@@ -83,30 +210,17 @@ def validate_workspace_graph(connection: sqlite3.Connection, *, skills: bool) ->
         ):
             raise BackupDatabaseError
         try:
-            body = json.loads(raw)
-            if "skill" in body:
-                body = body["skill"]
-                body = {**body, "id": body.get("id", body.get("skill_id"))}
-            library_id, revision_id, number = (
-                body["library_id"],
-                body["revision_id"],
-                body["revision_number"],
-            )
-            if "page_id" in body:
-                row = connection.execute(
-                    "SELECT r.created_at FROM revisions r JOIN pages p "
-                    "ON p.library_id=r.library_id AND p.page_uid=r.page_uid "
-                    "WHERE p.library_id=? AND p.page_id=? "
-                    "AND r.revision_id=? AND r.revision_number=?",
-                    (library_id, body["page_id"], revision_id, number),
-                ).fetchone()
-            else:
-                row = connection.execute(
-                    "SELECT created_at FROM library_skill_revisions "
-                    "WHERE library_id=? AND skill_id=? AND id=? AND number=?",
-                    (library_id, body["id"], revision_id, number),
-                ).fetchone()
-            if row is None or row[0] > created_at:
+            # Bind the frozen operation flags as well as the resource references.
+            # This is corruption detection, like file hashes, not a signature
+            # against someone rewriting both a response and its checksum.
+            if type(raw) is not str or hashlib.sha256(raw.encode("utf-8")).digest() != digest:
                 raise BackupDatabaseError
-        except (ValueError, TypeError, KeyError):
+            body = json.loads(raw)
+            if type(body) is not dict:
+                raise BackupDatabaseError
+            if "skill" in body:
+                _skill_response(connection, body, created_at)
+            else:
+                _page_response(connection, body, created_at, schema_revision, timelines)
+        except (ValueError, TypeError, KeyError, PageMembershipHistoryError):
             raise BackupDatabaseError from None

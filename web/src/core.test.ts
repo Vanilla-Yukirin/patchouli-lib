@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import vectors from "../../tests/vectors/revision-titles.json";
-import { titleFromMarkdown } from "./markdown";
+import { renderMarkdown, titleFromMarkdown } from "./markdown";
 import { applyReferenceEdits, referencesForRename } from "./references";
 
 describe("shared write-time title contract", () => {
@@ -12,6 +12,11 @@ describe("shared write-time title contract", () => {
 					: null;
 			expect(actual || "无标题", vector.name).toBe(vector.title);
 		}
+		const large = `# Large title\n\n${"<unsafe>&".repeat(140_000)}`;
+		expect(titleFromMarkdown(large)).toBe("Large title");
+		expect(renderMarkdown(large, [])).toBe(
+			`<pre># Large title\n\n${"&lt;unsafe&gt;&amp;".repeat(140_000)}</pre>`,
+		);
 	});
 });
 it("applies only selected Markdown targets and rejects stale offsets", () => {

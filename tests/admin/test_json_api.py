@@ -91,6 +91,64 @@ def browser(
     # Only the disposable restored copy is changed; restore the exact trigger SQL so
     # schema-hash validation cannot hide a missing content-graph check.
     with closing(sqlite3.connect(destination)) as tampered:
+        receipt_trigger = tampered.execute(
+            "SELECT sql FROM sqlite_schema WHERE type='trigger' "
+            "AND name='admin_workspace_save_receipts_no_update'"
+        ).fetchone()[0]
+        seen: set[str] = set()
+        for rowid, raw, digest in tampered.execute(
+            "SELECT rowid,response_json,response_sha256 FROM admin_workspace_save_receipts"
+        ).fetchall():
+            body = json.loads(raw)
+            kind = "skill" if "skill" in body else "save" if "book_id" in body else "restore"
+            if kind in seen:
+                continue
+            seen.add(kind)
+            assert hashlib.sha256(raw.encode("utf-8")).digest() == digest
+            # Frozen operation flags cannot be inferred from a later current
+            # resource; changing any stored boolean must break its checksum.
+            mutations = [
+                ({**body, key: not value}, False)
+                for key, value in body.items()
+                if type(value) is bool
+            ]
+            mutations.append(({**body, "unexpected": True}, True))
+            if "skill" in body:
+                for key, value in (
+                    ("name", "altered-skill-name"),
+                    ("etag", '"altered-etag"'),
+                    ("file_count", body["skill"]["file_count"] + 1),
+                    ("current_revision_id", "rev_" + "0" * 32),
+                ):
+                    mutations.append(({**body, "skill": {**body["skill"], key: value}}, True))
+            else:
+                mutations.append(({**body, "etag": '"altered-etag"'}, True))
+                if "book_id" in body:
+                    mutations.append(({**body, "book_id": "f" * 32}, True))
+            for changed, rehash in mutations:
+                altered = json.dumps(changed, ensure_ascii=False, separators=(",", ":"))
+                checksum = hashlib.sha256(altered.encode("utf-8")).digest() if rehash else digest
+                tampered.execute("DROP TRIGGER admin_workspace_save_receipts_no_update")
+                tampered.execute(
+                    "UPDATE admin_workspace_save_receipts SET response_json=?,response_sha256=? "
+                    "WHERE rowid=?",
+                    (altered, checksum, rowid),
+                )
+                tampered.execute(receipt_trigger)
+                tampered.commit()
+                try:
+                    with pytest.raises(BackupDatabaseError):
+                        validate_database(destination)
+                finally:
+                    tampered.execute("DROP TRIGGER admin_workspace_save_receipts_no_update")
+                    tampered.execute(
+                        "UPDATE admin_workspace_save_receipts "
+                        "SET response_json=?,response_sha256=? WHERE rowid=?",
+                        (raw, digest, rowid),
+                    )
+                    tampered.execute(receipt_trigger)
+                    tampered.commit()
+        validate_database(destination)
         if tampered.execute("SELECT 1 FROM revision_presentations LIMIT 1").fetchone():
             trigger_name = "revision_presentations_no_update"
             statement = "UPDATE revision_presentations SET primary_file='missing.md'"

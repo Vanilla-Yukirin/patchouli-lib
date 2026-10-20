@@ -901,7 +901,7 @@ _EXPECTED_SQL_HASHES_0037: Final = _EXPECTED_SQL_HASHES_0036 | {
     (
         "table",
         "admin_workspace_save_receipts",
-    ): "06da8ea4cd58b83e882c494dab7bca107791532ad9b61082b54061d32c2e79b0",
+    ): "f62bafbdcb2f1c9549689269a82678facf2a9a696f0ebf90436ed1f5393c5d61",
     (
         "trigger",
         "admin_workspace_save_receipts_no_update",
