@@ -182,6 +182,21 @@ def test_application_registers_exact_agent_access_routes(tmp_path: Path) -> None
             ("/api/v1/agent/skill/files/{resource_path}", "GET"),
             ("/api/v1/agent/skills/{skill_name}/manifest", "GET"),
             ("/api/v1/agent/skills/{skill_name}/files/{resource_path}", "GET"),
+            ("/api/v1/libraries/{library_id}/skills", "GET"),
+            ("/api/v1/libraries/{library_id}/skills", "POST"),
+            ("/api/v1/libraries/{library_id}/skills/{skill_id}", "GET"),
+            ("/api/v1/libraries/{library_id}/skills/{skill_id}/revisions", "GET"),
+            ("/api/v1/libraries/{library_id}/skills/{skill_id}/revisions", "POST"),
+            ("/api/v1/libraries/{library_id}/skills/{skill_id}/manifest", "GET"),
+            (
+                "/api/v1/libraries/{library_id}/skills/{skill_id}/revisions/{revision_id}/manifest",
+                "GET",
+            ),
+            (
+                "/api/v1/libraries/{library_id}/skills/{skill_id}/revisions/{revision_id}"
+                "/files/{resource_path}",
+                "GET",
+            ),
             ("/api/v1/libraries", "GET"),
             ("/api/v1/libraries/{library_id}", "GET"),
             ("/api/v1/libraries/{library_id}/readme", "PUT"),
@@ -411,9 +426,11 @@ def test_application_does_not_register_retrieval_without_cursor_secret(tmp_path:
             assert capabilities.json()["features"] == [
                 "archive",
                 "file-sets",
+                "library-skills",
                 "library-structure",
                 "page-lifecycle",
                 "page-move",
+                "primary-file",
                 "tags",
             ]
             assert (
@@ -471,9 +488,11 @@ def test_integrated_archive_create_replay_and_revise(
         assert capabilities.json()["features"] == [
             "archive",
             "file-sets",
+            "library-skills",
             "library-structure",
             "page-lifecycle",
             "page-move",
+            "primary-file",
             "retrieval",
             "tags",
         ]

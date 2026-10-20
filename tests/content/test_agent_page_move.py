@@ -141,6 +141,14 @@ def _run(
         )
 
 
+def _historical_story(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> Story:
+    assert engine.url.database is not None
+    # These cases exercise the older move-history downgrade boundary. Seed
+    # before immutable presentation history exists instead of discarding it.
+    alembic_command.downgrade(_config(Path(engine.url.database), monkeypatch), "20261020_0034")
+    return _story(engine)
+
+
 @pytest.mark.parametrize("kind", ["legacy", "markdown", "mixed", "binary"])
 @pytest.mark.parametrize("cross_section", [False, True])
 def test_agent_move_preserves_full_identity_and_real_actor(
@@ -398,7 +406,7 @@ def test_index_failure_rolls_back_audit_move_and_success(
 def test_caller_success_blocks_lossy_downgrade(
     content_engine: Engine, monkeypatch: pytest.MonkeyPatch, changed: bool
 ) -> None:
-    story = _story(content_engine)
+    story = _historical_story(content_engine, monkeypatch)
     page = _page(content_engine, story.command.library_id, story.command.page_id)
     agent = _agent(content_engine, page.library_id)
     target = _target(content_engine, page) if changed else (page.section_id, page.book_id)
@@ -453,7 +461,7 @@ def test_mixed_move_bundle_restore_exact_bytes(content_engine: Engine, tmp_path:
 def test_0028_master_history_exact_upgrade_and_backup(
     content_engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    story = _story(content_engine)
+    story = _historical_story(content_engine, monkeypatch)
     page = _page(content_engine, story.command.library_id, story.command.page_id)
     original = MasterPageMoveService(content_engine, clock=lambda: OPERATION_TIME + 10).move_page(
         _command(page, _target(content_engine, page)),

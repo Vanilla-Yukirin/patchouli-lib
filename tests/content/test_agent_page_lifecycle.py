@@ -7,7 +7,6 @@ import json
 import pytest
 from sqlalchemy import Engine, delete
 
-from patchouli_lib.admin.pages import dashboard_page
 from patchouli_lib.admin.read_model import AdminReadModel
 from patchouli_lib.auth.models import CredentialLibraryGrant
 from patchouli_lib.auth.repository import AuthRepository
@@ -87,9 +86,7 @@ def test_foreign_library_delete_restore_and_original_replay(
     deleted_activity = AdminReadModel(content_engine).recent_content_activity(
         actor=(agent.home, agent.caller_id)
     )
-    deleted_html = dashboard_page("synthetic-csrf", activities=deleted_activity)
-    assert deleted_html.count("Deleted a page") == 1
-    assert f"/trash/{page.page_id}" in deleted_html
+    assert [item.action for item in deleted_activity] == ["content.page.delete"]
     restore = command.model_copy(update={"action": "restore", "expected_etag": _etag(trashed)})
     _run(content_engine, agent, restore, "restore")
     assert _page(content_engine, page.library_id, page.page_id).deleted_at is None
@@ -120,8 +117,6 @@ def test_foreign_library_delete_restore_and_original_replay(
         "content.page.restore",
         "content.page.move",
     }
-    html = dashboard_page("synthetic-csrf", activities=items)
-    assert html.count("Deleted a page") == html.count("Restored a page") == 1
     with immediate_transaction(content_engine) as connection:
         connection.execute(delete(CredentialLibraryGrant))
     with pytest.raises(AuthorizationError):

@@ -24,13 +24,9 @@ from patchouli_lib.admin.contracts import (
     MasterTagFormInput,
     MasterUpdateAgentInput,
     MasterUpdatePageTitleInput,
-    MasterUpdateReadmeInput,
-    PageTagFormInput,
     ProvisionAgentInput,
     RecoverOperatorInput,
-    RestoreArchiveFormInput,
     RevokeAgentCredentialInput,
-    TagFormInput,
 )
 from patchouli_lib.admin.master_audit import (
     MasterAuditRepository,
@@ -56,34 +52,22 @@ from patchouli_lib.auth.schemas import (
 )
 from patchouli_lib.auth.service import (
     AuthenticationError,
-    AuthenticationService,
     CredentialIssuer,
     new_opaque_id,
     utc_microseconds,
 )
 from patchouli_lib.content.models import Page
 from patchouli_lib.content.repository import ContentRepository
-from patchouli_lib.content.schemas import (
-    ArchiveIdempotencyKey,
-    PageLifecycleCommand,
-    PageOccurrenceCorrectionCommand,
-)
+from patchouli_lib.content.schemas import PageOccurrenceCorrectionCommand
 from patchouli_lib.content.service import (
     ArchiveLifecycleUnchangedError,
     ArchiveNotFoundError,
     ArchivePersistenceError,
     ArchivePreconditionFailedError,
-    ArchiveService,
     page_current_etag,
 )
 from patchouli_lib.database import immediate_transaction
-from patchouli_lib.idempotency.schemas import (
-    OriginalResponse,
-    ReplayResponse,
-    digest_idempotency_key,
-)
 from patchouli_lib.identifiers import canonical_utc_wire, parse_occurrence_time
-from patchouli_lib.library.guides import get_guide, update_readme
 from patchouli_lib.library.models import Library
 from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.library.schemas import (
@@ -94,9 +78,6 @@ from patchouli_lib.library.schemas import (
     LibraryRecord,
     LibraryStructureSeed,
     SectionRecord,
-    UpdateBookInput,
-    UpdateLibraryInput,
-    UpdateSectionInput,
 )
 from patchouli_lib.library.service import LibrarySeedService, LibraryStructureService
 from patchouli_lib.operator.service import (
@@ -108,7 +89,7 @@ from patchouli_lib.operator.service import (
     ResourceNotFoundError,
 )
 from patchouli_lib.tags.repository import TagRepository, normalize_tag_name
-from patchouli_lib.tags.service import TagNotFoundError, TagService, TagValidationError
+from patchouli_lib.tags.service import TagNotFoundError, TagValidationError
 
 Clock = Callable[[], int]
 RequestIdFactory = Callable[[], str]
@@ -250,133 +231,6 @@ class AdminActionService:
                 target_type="book",
                 target_id=result.id,
             )
-        return result
-
-    def update_section_as_master(
-        self,
-        library_id: str,
-        section_id: str,
-        request: UpdateSectionInput,
-        *,
-        master_session: MasterAdminSession,
-    ) -> SectionRecord:
-        fingerprint = master_session.audit_fingerprint()
-        with immediate_transaction(self._engine) as connection:
-            self._require_current_admin_session(connection, master_session, fingerprint)
-            result, changed = LibraryStructureService(
-                LibraryRepository(connection), clock=self._clock
-            ).update_section(library_id, section_id, request)
-            if changed:
-                self._record_structure_event(
-                    connection,
-                    fingerprint,
-                    "section.update",
-                    library_id,
-                    result.updated_at,
-                    section_id=section_id,
-                    master_session=master_session,
-                    target_type="section",
-                    target_id=section_id,
-                )
-        return result
-
-    def update_readme_as_master(
-        self,
-        library_id: str,
-        request: MasterUpdateReadmeInput,
-        *,
-        section_id: str | None = None,
-        book_id: str | None = None,
-        master_session: MasterAdminSession,
-    ) -> None:
-        fingerprint = master_session.audit_fingerprint()
-        with immediate_transaction(self._engine) as connection:
-            self._require_current_admin_session(connection, master_session, fingerprint)
-            previous = get_guide(
-                connection, library_id=library_id, section_id=section_id, book_id=book_id
-            )
-            result = update_readme(
-                connection,
-                library_id=library_id,
-                section_id=section_id,
-                book_id=book_id,
-                readme=request.readme,
-                expected_updated_at=request.expected_updated_at,
-                now=self._clock(),
-            )
-            if result.updated_at != previous.updated_at:
-                target_type = (
-                    "book"
-                    if book_id is not None
-                    else ("section" if section_id is not None else "library")
-                )
-                self._record_structure_event(
-                    connection,
-                    fingerprint,
-                    f"{target_type}.readme.update",
-                    library_id,
-                    result.updated_at,
-                    section_id=section_id,
-                    book_id=book_id,
-                    master_session=master_session,
-                    target_type=target_type,
-                    target_id=book_id or section_id or library_id,
-                )
-
-    def update_library_as_master(
-        self,
-        library_id: str,
-        request: UpdateLibraryInput,
-        *,
-        master_session: MasterAdminSession,
-    ) -> LibraryRecord:
-        fingerprint = master_session.audit_fingerprint()
-        with immediate_transaction(self._engine) as connection:
-            self._require_current_admin_session(connection, master_session, fingerprint)
-            result, changed = LibraryStructureService(
-                LibraryRepository(connection), clock=self._clock
-            ).update_library(library_id, request)
-            if changed:
-                self._record_structure_event(
-                    connection,
-                    fingerprint,
-                    "library.update",
-                    library_id,
-                    result.updated_at,
-                    master_session=master_session,
-                    target_type="library",
-                    target_id=library_id,
-                )
-        return result
-
-    def update_book_as_master(
-        self,
-        library_id: str,
-        section_id: str,
-        book_id: str,
-        request: UpdateBookInput,
-        *,
-        master_session: MasterAdminSession,
-    ) -> BookRecord:
-        fingerprint = master_session.audit_fingerprint()
-        with immediate_transaction(self._engine) as connection:
-            self._require_current_admin_session(connection, master_session, fingerprint)
-            result, changed = LibraryStructureService(
-                LibraryRepository(connection), clock=self._clock
-            ).update_book(library_id, section_id, book_id, request)
-            if changed:
-                self._record_structure_event(
-                    connection,
-                    fingerprint,
-                    "book.update",
-                    library_id,
-                    result.updated_at,
-                    section_id=section_id,
-                    book_id=book_id,
-                    master_session=master_session,
-                    target_type="book",
-                    target_id=book_id,
-                )
         return result
 
     @staticmethod
@@ -1095,23 +949,6 @@ class AdminActionService:
             )
         return True
 
-    def create_tag(self, library_id: str, request: TagFormInput) -> tuple[str, bool]:
-        token = request.operator_token.get_secret_value()
-        now = self._clock()
-        with immediate_transaction(self._engine) as connection:
-            if MasterTokenRepository(connection).has_identity():
-                raise AuthenticationError
-            AuthenticationService(AuthRepository(connection), clock=lambda: now).require_operator(
-                token, library_id=library_id
-            )
-            tag, created = TagService(connection, clock=lambda: now).create_tag(
-                token,
-                library_id=library_id,
-                name=request.name,
-                request_id=self._request_id_factory(),
-            )
-        return tag.id, created
-
     def create_tag_as_master(
         self, library_id: str, request: MasterTagFormInput, *, master_session: MasterAdminSession
     ) -> tuple[str, bool]:
@@ -1154,43 +991,6 @@ class AdminActionService:
             )
             return apply_master_tag_batch(
                 connection, request, master_session=master_session, now=self._clock()
-            )
-
-    def set_page_tag(
-        self,
-        library_id: str,
-        section_id: str,
-        book_id: str,
-        page_id: str,
-        request: PageTagFormInput,
-    ) -> bool:
-        token = request.operator_token.get_secret_value()
-        now = self._clock()
-        with immediate_transaction(self._engine) as connection:
-            if MasterTokenRepository(connection).has_identity():
-                raise AuthenticationError
-            AuthenticationService(AuthRepository(connection), clock=lambda: now).require_operator(
-                token, library_id=library_id
-            )
-            page_uid = connection.execute(
-                select(Page.page_uid).where(
-                    Page.library_id == library_id,
-                    Page.section_id == section_id,
-                    Page.book_id == book_id,
-                    Page.page_id == page_id,
-                    Page.deleted_at.is_(None),
-                )
-            ).scalar_one_or_none()
-            if page_uid is None:
-                raise TagNotFoundError
-            return TagService(connection, clock=lambda: now).set_page_tag(
-                token,
-                library_id=library_id,
-                section_id=section_id,
-                page_id=page_id,
-                tag_id=request.tag_id,
-                attach=request.operation == "attach",
-                request_id=self._request_id_factory(),
             )
 
     def set_page_tag_as_master(
@@ -1250,33 +1050,6 @@ class AdminActionService:
                 event_id=uuid4().hex,
             )
             return True
-
-    def restore_archive_page(
-        self,
-        library_id: str,
-        section_id: str,
-        page_id: str,
-        request: RestoreArchiveFormInput,
-    ) -> OriginalResponse | ReplayResponse:
-        """Restore through the Archive domain service with a request-only Operator token."""
-
-        command = PageLifecycleCommand(
-            library_id=library_id,
-            section_id=section_id,
-            page_id=page_id,
-            expected_etag=request.expected_etag,
-            request_id=f"req_{uuid4().hex}",
-        )
-        idempotency = ArchiveIdempotencyKey(
-            key_digest=digest_idempotency_key(request.idempotency_key)
-        )
-        token = request.operator_token.get_secret_value()
-        with immediate_transaction(self._engine) as connection:
-            if MasterTokenRepository(connection).has_identity():
-                raise AuthenticationError
-            return ArchiveService(connection, clock=self._clock).restore_page_as_operator(
-                token, command, idempotency
-            )
 
     def restore_archive_page_as_master(
         self,

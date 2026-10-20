@@ -88,6 +88,10 @@ def main() -> None:
     run("uv", "run", "ruff", "format", "--check", ".")
     run("uv", "run", "ruff", "check", ".")
     run("uv", "run", "mypy", "src", "tests", "scripts")
+    run("npm", "ci", "--prefix", "web")
+    run("npm", "run", "check", "--prefix", "web")
+    run("npm", "run", "test", "--prefix", "web")
+    run("npm", "run", "build", "--prefix", "web")
     run("uv", "run", "pytest")
     run(
         find_posix_shell(),

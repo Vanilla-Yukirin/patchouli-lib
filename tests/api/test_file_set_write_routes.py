@@ -271,8 +271,8 @@ def test_write_routes_describe_distinct_json_metadata_and_repeated_binary_files(
         "/api/v1/libraries/{library_id}/sections/{section_id}/pages/{page_id}/file-revisions"
     )
     for path, required_metadata, metadata_fields in (
-        (create_path, {"title", "source"}, {"title", "source", "occurred_at"}),
-        (revise_path, {"source"}, {"source"}),
+        (create_path, {"title", "source"}, {"title", "source", "occurred_at", "primary_file"}),
+        (revise_path, {"source"}, {"source", "primary_file"}),
     ):
         body = paths[path]["post"]["requestBody"]
         assert body["required"] is True

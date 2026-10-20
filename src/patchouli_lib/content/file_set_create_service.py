@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Final, Literal
 from uuid import uuid4
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from sqlalchemy import Connection
 
 from patchouli_lib.auth.repository import AuthRepository
@@ -28,6 +28,7 @@ from patchouli_lib.content.file_set_create_core import (
     FileSetCreateTransactionRequiredError,
     FileSetPageCreateCore,
 )
+from patchouli_lib.content.presentation import presentation_for
 from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import (
     ArchiveIdempotencyKey,
@@ -92,6 +93,12 @@ class FileSetCreateCommand(ContentSchema):
     files: tuple[tuple[str, bytes], ...] = Field(repr=False)
     source: ArchiveSourceInput
     request_id: RequestId
+    primary_file: str | None = None
+
+    @model_validator(mode="after")
+    def validate_primary_file(self) -> FileSetCreateCommand:
+        presentation_for(build_file_manifest(self.files), self.primary_file)
+        return self
 
     @field_validator("title")
     @classmethod
@@ -186,6 +193,7 @@ class FileSetCreateService:
 
         self._create_core.require_transaction()
         manifest = build_file_manifest(command.files)
+        presentation_for(manifest, command.primary_file)
         with self._connection.begin_nested():
             # Obtain SQLite's writer reservation before reading auth, Book or
             # replay state. This preserves serialization even if a future
@@ -286,6 +294,7 @@ class FileSetCreateService:
                 operation_at=operation_at,
                 manifest=manifest,
                 source=command.source,
+                primary_file=command.primary_file,
             )
             audit = self._auth_repository.add_audit_event(
                 NewAuditEvent(
@@ -321,6 +330,8 @@ class FileSetCreateService:
                 "captured_at": command.source.captured_at,
             },
         }
+        if command.primary_file is not None:
+            metadata["primary_file"] = command.primary_file
         parts = [
             json.dumps(metadata, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode(
                 "utf-8"

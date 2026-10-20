@@ -13,7 +13,10 @@ from backup.conftest import _config, seed_complete_database
 from backup.test_service import _create
 
 from patchouli_lib.backup import validate_database, verify_backup_bundle
-from patchouli_lib.backup.manifest import ONBOARDING_TICKETS_SCHEMA_REVISION
+from patchouli_lib.backup.manifest import (
+    LIBRARY_GUIDES_SCHEMA_REVISION,
+    ONBOARDING_TICKETS_SCHEMA_REVISION,
+)
 
 
 def test_readme_migration_preserves_old_fields_and_backup(
@@ -26,7 +29,7 @@ def test_readme_migration_preserves_old_fields_and_backup(
     command.downgrade(config, ONBOARDING_TICKETS_SCHEMA_REVISION)
     before, old_schema = _snapshot(path), _schema(path)
     validate_database(path, schema_revision=ONBOARDING_TICKETS_SCHEMA_REVISION)
-    command.upgrade(config, "head")
+    command.upgrade(config, LIBRARY_GUIDES_SCHEMA_REVISION)
     after = _snapshot(path)
     assert {
         name: [row[:-1] for row in rows] if name in {"libraries", "sections", "books"} else rows
@@ -34,12 +37,11 @@ def test_readme_migration_preserves_old_fields_and_backup(
     } == before
     for name in ("libraries", "sections", "books"):
         assert all(row[-1] == "" for row in after[name])
-    validate_database(path)
-    command.check(config)
+    validate_database(path, schema_revision=LIBRARY_GUIDES_SCHEMA_REVISION)
     command.downgrade(config, ONBOARDING_TICKETS_SCHEMA_REVISION)
     assert _snapshot(path) == before
     assert _schema(path) == old_schema
-    command.upgrade(config, "head")
+    command.upgrade(config, LIBRARY_GUIDES_SCHEMA_REVISION)
     with closing(sqlite3.connect(path)) as connection:
         for table in ("libraries", "sections", "books"):
             connection.execute(f"UPDATE {table} SET readme = ?", ("  # Rules\n\n" + "文" * 5000,))
@@ -48,6 +50,9 @@ def test_readme_migration_preserves_old_fields_and_backup(
     with pytest.raises(RuntimeError, match="README exists"):
         command.downgrade(config, ONBOARDING_TICKETS_SCHEMA_REVISION)
     assert _snapshot(path) == populated
+    validate_database(path, schema_revision=LIBRARY_GUIDES_SCHEMA_REVISION)
+    command.upgrade(config, "head")
+    command.check(config)
     validate_database(path)
     from patchouli_lib.database import build_engine
 

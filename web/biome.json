@@ -1,0 +1,14 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+  "files": {"includes": ["src/**", "vite.config.ts", "!src/generated/**"]},
+  "formatter": {"enabled": true},
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "a11y": {"useButtonType": "error", "noAutofocus": "off"},
+      "security": {"noDangerouslySetInnerHtml": "off"},
+      "correctness": {"useExhaustiveDependencies": "off"}
+    }
+  }
+}

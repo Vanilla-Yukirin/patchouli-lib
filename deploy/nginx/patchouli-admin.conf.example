@@ -2,7 +2,14 @@
 # Replace the example server name and certificate locations only in private
 # operator configuration. This file belongs inside Nginx's `http` context.
 
-limit_req_zone $binary_remote_addr zone=patchouli_admin_login:10m rate=5r/m;
+# Only credential submissions consume login attempts; session reads and logout
+# use an empty key and are not counted by limit_req.
+map $request_method $patchouli_admin_login_key {
+    default "";
+    POST $binary_remote_addr;
+}
+
+limit_req_zone $patchouli_admin_login_key zone=patchouli_admin_login:10m rate=5r/m;
 
 upstream patchouli_api {
     server 127.0.0.1:8765;
@@ -20,7 +27,7 @@ server {
     server_tokens off;
     add_header Strict-Transport-Security "max-age=31536000" always;
 
-    location = /admin/login {
+    location = /admin/api/session {
         client_max_body_size 16k;
         limit_req zone=patchouli_admin_login burst=3 nodelay;
         proxy_pass http://patchouli_api;
@@ -39,8 +46,28 @@ server {
         proxy_set_header X-Forwarded-For $remote_addr;
     }
 
+    location = /admin/api/setup {
+        client_max_body_size 16k;
+        limit_req zone=patchouli_admin_login burst=3 nodelay;
+        proxy_pass http://patchouli_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
+
+    location ^~ /admin/api/ {
+        # 64 MiB complete file set plus bounded multipart/JSON overhead.
+        client_max_body_size 66m;
+        proxy_pass http://patchouli_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
+
     location ^~ /admin/ {
-        client_max_body_size 64k;
+        client_max_body_size 16k;
         proxy_pass http://patchouli_api;
         proxy_http_version 1.1;
         proxy_set_header Host $http_host;
@@ -49,7 +76,7 @@ server {
     }
 
     location / {
-        client_max_body_size 2304k;
+        client_max_body_size 66m;
         proxy_pass http://patchouli_api;
         proxy_http_version 1.1;
         proxy_set_header Host $http_host;

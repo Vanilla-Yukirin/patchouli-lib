@@ -115,6 +115,7 @@ class MasterRevisionRestoreService:
             files=tuple((entry.name, entry.content) for entry in snapshot.manifest.files),
             source=ArchiveSourceInput(kind="revision_restore", locator=snapshot.revision_id),
             request_id=generate_request_id(),
+            primary_file=snapshot.presentation.primary_file,
         )
         return MasterFileSetService(self._engine, clock=self._clock).revise_page(
             append, command.book_id, idempotency, master_session=master_session

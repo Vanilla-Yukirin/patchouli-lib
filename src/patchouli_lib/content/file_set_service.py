@@ -14,6 +14,12 @@ from dataclasses import dataclass, field
 from sqlalchemy import Connection
 
 from patchouli_lib.content.file_manifest import FileManifest, build_file_manifest
+from patchouli_lib.content.presentation import (
+    Presentation,
+    presentation_for,
+    read_presentation,
+    save_presentation,
+)
 from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import NewPageSource, PageRecord
 from patchouli_lib.content.service import page_current_etag
@@ -53,6 +59,8 @@ class FileSetRevisionService:
         revision_id: str,
         revision_at: int,
         source: NewPageSource,
+        primary_file: str | None = None,
+        presentation_override: Presentation | None = None,
     ) -> FileSetAppendResult:
         """Write one full flat snapshot or return an exact no-op.
 
@@ -73,6 +81,15 @@ class FileSetRevisionService:
         if type(expected_etag) is not str:
             raise TypeError("A current strong Page ETag is required.")
         manifest = build_file_manifest(files)
+        presentation = presentation_for(manifest, primary_file)
+        if presentation_override is not None:
+            if (
+                presentation_override.primary_file != primary_file
+                or not presentation_override.display_title.strip()
+                or "\x00" in presentation_override.display_title
+            ):
+                raise ValueError("Restored presentation must identify the same entry file.")
+            presentation = presentation_override
         page = self._repository.get_page(library_id, page_id)
         if page is None or page.deleted_at is not None:
             raise FileSetPageNotFoundError("Page is not available.")
@@ -86,7 +103,10 @@ class FileSetRevisionService:
         if not hmac.compare_digest(expected_etag, current_etag):
             raise FileSetPreconditionFailedError("Page current ETag does not match.")
         current_manifest = self._repository.get_current_file_manifest(page)
-        if manifest == current_manifest:
+        current_presentation = read_presentation(
+            self._connection, page.library_id, page.page_uid, page.current_revision_id
+        )
+        if manifest == current_manifest and presentation == current_presentation:
             return FileSetAppendResult(
                 changed=False,
                 page=page,
@@ -116,6 +136,14 @@ class FileSetRevisionService:
                 manifest=manifest,
             )
             self._repository.add_source(source)
+            save_presentation(
+                self._connection,
+                library_id=page.library_id,
+                page_uid=page.page_uid,
+                revision_id=revision_id,
+                revision_number=page.current_revision_number + 1,
+                presentation=presentation,
+            )
             advanced = self._repository.advance_file_set_current_revision(
                 page,
                 revision_id=revision_id,

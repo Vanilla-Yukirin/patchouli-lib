@@ -19,14 +19,13 @@ from patchouli_lib.admin.master_setup import (
     MasterSetupService,
     MasterSetupUnavailableError,
 )
-from patchouli_lib.admin.master_setup_session import MasterSetupSession, MasterSetupSessionCodec
+from patchouli_lib.admin.master_setup_session import MasterSetupSessionCodec
 from patchouli_lib.admin.master_token_store import (
     MasterTokenAlreadyInitialized,
     MasterTokenRepository,
     MasterTokenState,
 )
-from patchouli_lib.admin.passwords import hash_password
-from patchouli_lib.admin.session import AdminSession, AdminSessionCodec
+from patchouli_lib.admin.session import AdminSessionCodec
 from patchouli_lib.auth.models import Caller, Credential, MasterAuditEvent, MasterIdentity
 from patchouli_lib.backup.validation import validate_database
 from patchouli_lib.config import Settings
@@ -40,7 +39,6 @@ _PROOF = "synthetic separate first-setup authority 0001"
 _SIGNING_SECRET = "s" * 32
 _IDENTITY = "a" * 32
 _AUDIT = "b" * 32
-_PASSWORD_HASH = hash_password("synthetic legacy password", iterations=300_000)
 
 
 @pytest.fixture
@@ -56,13 +54,12 @@ def setup_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[En
         engine.dispose()
 
 
-def _settings(engine: Engine, *, legacy: bool = True, proof: bool = True) -> Settings:
+def _settings(engine: Engine, *, proof: bool = True) -> Settings:
     return Settings(  # type: ignore[call-arg]  # BaseSettings supports _env_file at runtime.
         _env_file=None,
         environment="test",
         database_url=str(engine.url),
         admin_session_signing_secret=SecretStr(_SIGNING_SECRET),
-        admin_password_hash=SecretStr(_PASSWORD_HASH) if legacy else None,
         admin_setup_token=SecretStr(_PROOF) if proof else None,
     )
 
@@ -108,25 +105,18 @@ def _empty(engine: Engine) -> None:
         assert connection.scalar(select(func.count()).select_from(MasterAuditEvent)) == 0
 
 
-@pytest.mark.parametrize("mode", ["legacy", "proof"])
 def test_first_setup_is_authorized_and_atomic_without_other_entities(
-    setup_engine: Engine, mode: str, monkeypatch: pytest.MonkeyPatch
+    setup_engine: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def reject_cli(*args: object, **kwargs: object) -> MasterTokenState:
         del args, kwargs
         raise AssertionError("Browser setup must not call the local CLI wrapper.")
 
     monkeypatch.setattr(MasterTokenRepository, "initialize_from_local_cli", reject_cli)
-    legacy, setup = _codecs()
-    session: AdminSession | MasterSetupSession
-    if mode == "legacy":
-        cookie, session = legacy.issue()
-        state = _service(setup_engine).initialize(_TOKEN, _TOKEN, legacy_cookie=cookie)
-    else:
-        cookie, session = setup.issue()
-        state = _service(setup_engine).initialize(
-            _TOKEN, _TOKEN, setup_proof=_PROOF, setup_cookie=cookie
-        )
+    cookie, session = _codecs()[1].issue()
+    state = _service(setup_engine).initialize(
+        _TOKEN, _TOKEN, setup_proof=_PROOF, setup_cookie=cookie
+    )
     assert state == MasterTokenState(_IDENTITY, 1)
     with setup_engine.connect() as connection:
         repository = MasterTokenRepository(connection)
@@ -202,7 +192,6 @@ def test_invalid_authority_cannot_initialize(setup_engine: Engine, case: str) ->
     elif case == "master_cookie_as_legacy":
         values = {"legacy_cookie": master_cookie}
     elif case == "legacy_disabled":
-        settings = _settings(setup_engine, legacy=False)
         values = {"legacy_cookie": legacy_cookie}
     elif case == "proof_disabled":
         settings = _settings(setup_engine, proof=False)
@@ -215,17 +204,12 @@ def test_invalid_authority_cannot_initialize(setup_engine: Engine, case: str) ->
     _empty(setup_engine)
 
 
-@pytest.mark.parametrize("mode", ["legacy", "proof"])
-def test_cookie_expiry_is_rechecked_inside_the_setup_write(setup_engine: Engine, mode: str) -> None:
+def test_cookie_expiry_is_rechecked_inside_the_setup_write(setup_engine: Engine) -> None:
     now = [1_000.0]
-    legacy, setup = _codecs(lambda: now[0])
-    cookie = legacy.issue()[0] if mode == "legacy" else setup.issue()[0]
+    _, setup = _codecs(lambda: now[0])
+    cookie = setup.issue()[0]
     now[0] = 1_300.0
-    values = (
-        {"legacy_cookie": cookie}
-        if mode == "legacy"
-        else {"setup_proof": _PROOF, "setup_cookie": cookie}
-    )
+    values = {"setup_proof": _PROOF, "setup_cookie": cookie}
     with pytest.raises(MasterSetupAuthorizationError):
         _service(setup_engine, clock=lambda: now[0]).initialize(_TOKEN, _TOKEN, **values)
     _empty(setup_engine)
@@ -328,7 +312,6 @@ def test_disabled_admin_configuration_cannot_be_bypassed_by_injected_codecs(
         _env_file=None,
         environment="test",
         database_url=str(setup_engine.url),
-        admin_password_hash=None,
         admin_setup_token=None,
         admin_session_signing_secret=None,
     )

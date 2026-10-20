@@ -22,6 +22,7 @@ from patchouli_lib.backup.errors import BackupDatabaseError, BackupManifestError
 from patchouli_lib.backup.manifest import (
     BACKUP_FILENAME,
     CALLER_PAGE_MOVE_SCHEMA_REVISION,
+    LIBRARY_GUIDES_SCHEMA_REVISION,
     LIBRARY_PAGE_LIFECYCLE_SCHEMA_REVISION,
     MASTER_FILE_SET_RECEIPTS_SCHEMA_REVISION,
     MASTER_OCCURRENCE_SCHEMA_REVISION,
@@ -141,18 +142,18 @@ def test_real_historical_bundles_restore_after_default_changes(
     monkeypatch: pytest.MonkeyPatch,
     revision: str,
 ) -> None:
+    source = _source(complete_engine)
+    command.downgrade(_config(source, monkeypatch), LIBRARY_GUIDES_SCHEMA_REVISION)
     session = _session(complete_engine)
     page_id = _create_file_set(complete_engine, session)
     _agent_correct(complete_engine, _credential(complete_engine), page_id, at=_TIME + 20)
     bundle = tmp_path / "historical-bundle"
     if revision == MASTER_OCCURRENCE_SCHEMA_REVISION:
         _master_correct(complete_engine, session, page_id, at=_TIME + 30)
-        source = _source(complete_engine)
         command.downgrade(_config(source, monkeypatch), revision)
         expected = replace(_historical_bundle(source, bundle), schema_revision=revision)
         (bundle / "manifest.json").write_bytes(expected.canonical_bytes())
     else:
-        source = _source(complete_engine)
         command.downgrade(_config(source, monkeypatch), revision)
         expected = _historical_bundle(source, bundle)
 

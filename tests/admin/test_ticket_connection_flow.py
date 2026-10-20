@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
-import re
 from hashlib import sha256
 
 import pytest
+from helpers import AdminWeb
+from helpers import admin_web as admin_web
 from sqlalchemy import select
-from test_routes import AdminWeb, _initialize_master, _login_master, _post
-from test_routes import admin_web as admin_web
 
 from patchouli_lib.auth.models import Credential, OnboardingTicket
 from patchouli_lib.request_log.models import RequestLogRecord
@@ -18,23 +17,17 @@ from patchouli_lib.request_log.models import RequestLogRecord
 def test_ticket_to_custom_scope_and_verified_skill_bundle(
     admin_web: AdminWeb, caplog: pytest.LogCaptureFixture
 ) -> None:
-    _initialize_master(admin_web)
-    _, csrf = _login_master(admin_web)
-
     def create_library(name: str) -> str:
-        response = _post(
-            admin_web.client, "/admin/libraries", data={"csrf_token": csrf, "name": name}
-        )
-        assert response.status_code == 303
-        return str(response.headers["location"].rsplit("/", 1)[-1])
+        response = admin_web.post("/admin/api/libraries", {"name": name})
+        assert response.status_code == 201
+        return str(response.json()["id"])
 
     first = create_library("Synthetic first collection")
     second = create_library("Synthetic editable collection")
-    generated = _post(admin_web.client, "/admin/onboarding-tickets", data={"csrf_token": csrf})
-    assert generated.status_code == 200
-    code_match = re.search(r'id="ticket-code"[^>]*>([A-Za-z0-9]{16})</textarea>', generated.text)
-    assert code_match is not None
-    code = code_match.group(1)
+    generated = admin_web.post("/admin/api/onboarding-tickets")
+    assert generated.status_code == 201
+    code = generated.json()["code"]
+    assert isinstance(code, str) and len(code) == 16
     assert "no-store" in generated.headers["cache-control"]
     assert generated.headers["referrer-policy"] == "same-origin"
 

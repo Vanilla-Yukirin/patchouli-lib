@@ -15,6 +15,7 @@ from sqlalchemy import Connection, insert
 
 from patchouli_lib.content.file_manifest import FileManifest
 from patchouli_lib.content.models import Revision, RevisionFile, RevisionFileSeal, RevisionFileSet
+from patchouli_lib.content.presentation import presentation_for, save_presentation
 from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import (
     ArchiveSourceInput,
@@ -83,6 +84,7 @@ class FileSetPageCreateCore:
         operation_at: int,
         manifest: FileManifest,
         source: ArchiveSourceInput,
+        primary_file: str | None = None,
     ) -> PageRecord:
         """Write Page, Revision 1, files, seal, identifier and Source atomically.
 
@@ -93,6 +95,7 @@ class FileSetPageCreateCore:
 
         self.require_transaction()
         manifest.__post_init__()
+        presentation = presentation_for(manifest, primary_file)
         canonical_utc_wire(occurred_at)
         canonical_utc_wire(operation_at)
         with self._connection.begin_nested():
@@ -120,6 +123,14 @@ class FileSetPageCreateCore:
                 )
             )
             self._insert_initial_revision(page, manifest)
+            save_presentation(
+                self._connection,
+                library_id=page.library_id,
+                page_uid=page.page_uid,
+                revision_id=page.current_revision_id,
+                revision_number=1,
+                presentation=presentation,
+            )
             self._content.add_identifier(
                 NewPageIdentifier(
                     library_id=page.library_id,

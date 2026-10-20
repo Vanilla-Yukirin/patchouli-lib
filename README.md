@@ -85,9 +85,10 @@ python scripts/validate.py --container
 源码启动、Compose、CI、镜像发布，以及由管理员发起的私有更新契约，见
 [开发、验证与交付](docs/development-and-delivery.md)。
 
-项目还提供可选的[网页管理面板](docs/admin-web-console.md)，支持主 Token 登录、
-内容与版本管理、凭据生命周期操作和 Agent/MCP 指引；主身份尚未设置时保留旧密码
-兼容路径。面板默认关闭，不具备部署、Docker、Shell 或数据库备份恢复控制能力。
+项目还提供可选的[管理工作区](docs/admin-workspace.md)，支持主 Token 登录、
+内容与版本管理、库内多文件 Skills、凭据生命周期操作和 Agent/MCP 指引。旧密码
+登录已退役，已有安装须完成主身份初始化。工作区默认关闭，不具备部署、Docker、
+Shell 或数据库备份恢复控制能力。
 公网入口使用 HTTPS；管理员控制的加密私网可按文档明确开启 HTTP，不要求另设
 TLS 反向代理。单人主 Token 登录、内容浏览及管理范围见该文档和路线图。
 

@@ -52,6 +52,68 @@ GET /api/v1/agent/skills/{skill_name}/files/{resource_path}
 安装位置由用户授权的宿主规则决定，已有文件须比较差异并保留私有配置。
 Token 无效或到期时返回 401，不应尝试用网页登录 Cookie 代替设备 Token。
 
+## 库内 Skills 与安装同步
+
+内置 Skill 上述兼容路径继续可用；库内自定义 Skill 保存于服务数据库，保存后立即
+提供最新版本，不需重新发布镜像。它们直属 Library，不是占位分区／书籍中的 Page。
+
+```text
+GET  /api/v1/libraries/{library_id}/skills
+GET  /api/v1/libraries/{library_id}/skills/{skill_id}
+GET  /api/v1/libraries/{library_id}/skills/{skill_id}/revisions
+GET  /api/v1/libraries/{library_id}/skills/{skill_id}/manifest
+GET  /api/v1/libraries/{library_id}/skills/{skill_id}/revisions/{revision_id}/manifest
+GET  /api/v1/libraries/{library_id}/skills/{skill_id}/revisions/{revision_id}/files/{resource_path}
+```
+
+摘要与版本列表需要该库 `read` 或 `write`，不含文件正文；manifest 和下载文件需要
+`read`。列表以 `limit`／`offset`、`next_offset` 翻页。当前 manifest 指向准确版本，
+下载时使用返回的该版本 `href`，不能混用两个版本的文件。`SKILL.md` 固定为根入口；
+包内可有 `scripts/`、`references/` 等目录。路径必须安全、相对、无空段、`.`、`..`、
+反斜杠、绝对路径或跨平台重名，不能有文件与目录前缀冲突。普通 Page 仍只允许平面
+文件名。服务器从不执行 Skill 脚本。
+
+每次新任务首次访问该库，读取线上 README（可用 ETag/304 复用）与 Skill 摘要，
+以准确服务、Library ID、Skill ID、`revision_id` 和 `snapshot_sha256` 比较本机
+安装记录，不用客户端时钟推断新旧。版本相同则复用；有新版或用户要求重装时：
+
+1. 下载准确 manifest 中全部文件，逐项验证路径、`bytes`、`sha256`，核对完整文件
+   集与 `snapshot_sha256`。不跟随跨 origin 跳转，不把 Token 传给模型或打印响应。
+   包摘要是 `SHA256(b"patchouli-library-skill-v1\0" + canonical_json)`：按规范化路径
+   UTF-8 字节排序，JSON 为 `[[path, bytes, sha256], ...]`，紧凑分隔符、不转义 Unicode，
+   再以 UTF-8 编码；逐文件 SHA-256 用小写十六进制字符串。
+2. 比较本机文件与上次安装记录。只要本机文件有修改、缺失、符号链接或 junction，或新包路径
+   与未跟踪私有文件冲突，停止覆盖，展示差异由用户决定合并或采用哪个版本。
+3. 按宿主授权安装到可发现的技能目录，不只写临时缓存。安装回执放在包外私有配置
+   目录，记录入口、Library／Skill／Revision ID、包摘要及已安装逐文件摘要；不记录
+   Token。确认安装完成后才更新回执，保留不属于包的私有配置。
+4. 版本查询或校验失败时，报告未同步；仅当仍能满足当前任务与已有授权时，明确使用
+   已安装旧版，不假称最新。不自动签发、借用凭据、降低 TLS 或覆盖本地修改。
+
+发布完整新 Skill 与完整修订分别使用上述集合路径的 POST、以及 `/{skill_id}/revisions`
+的 POST。multipart 为一个 `metadata` JSON 部分（`name`、`description`）加多个同名
+`file` 部分，filename 是包内相对路径。两者需 `Idempotency-Key`；修订还需当前强
+`If-Match`，失败不自动覆盖。成功返回 metadata、版本与 `changed`，`Location` 是准确
+版本 manifest；同包无变化不增版。超时保留完整请求和原幂等键，只能原样重试。
+普通 Agent 无权因此管理凭据或其他知识库。本机规则改动需发布时先遵守用户任务授权；
+服务器不会将本机改动自动反向上传。
+
+## 显式入口与展示标题
+
+服务公布 `primary-file` 时，文件集新建与修订 metadata 支持 `primary_file`，
+值为本次完整文件集内的准确安全 UTF-8 文本文件名；传 `null` 明确不设入口。
+省略仍可写入，但响应带 `X-Patchouli-Warnings: primary_file_missing`，网页不会猜选。
+修订须再次提交本次所需入口，不把上个版本的值当作服务隐式默认。
+
+准确 Revision manifest 返回 `primary_file` 和 `display_title`；标题来自入口 Markdown
+的首个一级标题，保存时固化，没有则为“无标题”。旧 `title` 输入保留稳定标识与兼容
+含义，不充当新网页展示标题。更换入口也会生成版本；文件名与 Page ID 不随标题改变。
+旧服务未公布此能力时，不发送其不认识的新字段。
+
+Agent 写入成功回执保留原有文件集 JSON 形状；新增展示元数据在准确 GET manifest
+中返回，不因旧写入回执缺少它就推断未设置。核验文件身份、摘要和展示字段时区分
+这两种响应，不能直接把字段更完整的读取对象与旧形状回执做整对象等值比较。
+
 ## 知识库结构与 README
 
 服务公布 `library-structure` 时，`library_grants` Agent 可以用目标库的 `read`

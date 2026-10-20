@@ -8,7 +8,7 @@ from sqlalchemy.engine import make_url
 
 SQLITE_BUSY_TIMEOUT_MS = 5_000
 # Keep this in sync with Alembic's single head. tests/test_database.py verifies it.
-CURRENT_SCHEMA_REVISION = "20261020_0034"
+CURRENT_SCHEMA_REVISION = "20261020_0037"
 
 
 class DatabaseNotReadyError(RuntimeError):

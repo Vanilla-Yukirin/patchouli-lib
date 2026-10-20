@@ -25,25 +25,17 @@ uv run ruff format --check .
 
 ### 精简后的浏览器冒烟范围
 
-以 `05288bfa` 为基线，实际启动 Chrome 的参数展开用例从 20 项减为 5 项，删除 15 项
-（75%）。此处只统计真实浏览器流程：文件名包含 `browser` 的 TestClient 测试和
-浏览器诊断单元测试不计入分母。删除重复用例及独占 helper，不使用 skip、xfail 或
-收集排除实现削减。
+此前以 `05288bfa` 为基线，将实际启动 Chrome 的参数展开用例从 20 项减为 5 项
+（75%）。独立前端替代旧模板后，旧五条页面流程合并为
+`tests/admin/test_workspace_browser.py` 中的一条真实 SPA 核心旅程。它覆盖主 Token
+登录、深链阅读、源码编辑与预览、附件改名引用调整、保存及窄屏目录。
 
-| 保留流程 | 覆盖重点 |
-| --- | --- |
-| `test_master_onboarding_journey_browser.py` | 初始化与登录、小票同源提交、独立读写范围和凭据回读 |
-| `test_management_journey_browser.py` | 层级与文档创建、修订、搜索、回收恢复和下载 |
-| `test_page_media_browser.py` | 原生文件选择、实际图片解码、预览切换和下载 |
-| `test_revision_restore_browser.py` | 前端恢复确认与完整文件组恢复 |
-| `test_tag_management_browser.py` | 筛选、选择、批量改名和删除 |
-
-五条流程复用现有 fixture。文件集重试、历史资源绑定、旧凭据迁移及复杂过滤的
-协议与事务边界继续由已有 HTTP/service 测试覆盖；不再为这些内容重复启动 Chrome。
-共用 fixture 和 helper 即使仍位于 `test_*browser.py` 内，也不算新的冒烟用例。
+退役模板的 HTML 断言及其独占 helper 已移除；协议、服务、鉴权、回执、备份和迁移
+测试保留或改为调用 JSON 接口。文件名包含 `browser` 的 TestClient 测试和浏览器
+诊断单元测试不计入真实 Chrome 数量。不使用 skip、xfail 或收集排除实现削减。
 
 ```sh
-uv run pytest --no-cov tests/admin/test_master_onboarding_journey_browser.py tests/admin/test_management_journey_browser.py tests/admin/test_page_media_browser.py tests/admin/test_revision_restore_browser.py tests/admin/test_tag_management_browser.py
+uv run pytest --no-cov tests/admin/test_workspace_browser.py
 ```
 
 用例数量减少不等于全仓运行时间同比下降。CI 仍执行其余单元、HTTP、迁移与覆盖率
@@ -167,6 +159,8 @@ uv run python scripts/bench_search_v2_matrix.py --scale --http --repeats 100 --c
 ```sh
 uv sync --frozen --all-groups
 uv run alembic upgrade head
+npm ci --prefix web
+npm run build --prefix web
 uv run uvicorn patchouli_lib.app:app --reload
 ```
 
@@ -232,9 +226,13 @@ docker compose up --build --wait
 
 ## 可选网页管理功能
 
-FastAPI 管理面板默认关闭。默认在 HTTPS 反向代理后启用，并配置生成的密码校验值、
-独立会话签名密钥。不需要配置域名或 IP 白名单，旧 `PATCHOULI_ADMIN_ORIGIN` 会被忽略。
-公开 Compose 文件传入这些管理设置，也传入 Uvicorn 的 `FORWARDED_ALLOW_IPS`。
+新工作区使用独立 `web/` 静态前端和主 Token 会话；配置与已有安装过渡见
+[管理工作区](admin-workspace.md)。前端构建和必要交互检查已纳入 `scripts/validate.py`，镜像使用独立
+Node 构建阶段，最终运行镜像不需要 Node。
+
+FastAPI 管理工作区默认关闭。在 HTTPS 反向代理后配置独立会话签名密钥即可启用，
+通过主 Token 登录；不再配置管理密码校验值。不需要配置域名或 IP 白名单。
+公开 Compose 文件传入管理设置，也传入 Uvicorn 的 `FORWARDED_ALLOW_IPS`。
 该项默认只信任回环；若代理从容器网桥连接 API，应在私有环境文件中填入实际直接
 代理地址，不能使用任意来源通配信任。代理应保留原始 Host 和正确的协议。
 
@@ -242,8 +240,9 @@ FastAPI 管理面板默认关闭。默认在 HTTPS 反向代理后启用，并�
 防护见[私网 HTTP 说明](admin-web-console.md#仅在加密私网中使用-http)。不要用切换到
 开发环境或跳过身份验证来实现它。
 
-密码校验值生成、与目标无关的 Nginx 示例、会话和 CSRF 边界、受支持的本地操作，
-以及明确不存在的部署权限，见[网页管理面板](admin-web-console.md)。
+主 Token 初始化、会话和 CSRF 边界及运维权限边界见[管理工作区](admin-workspace.md)。
+反向代理示例为 `deploy/nginx/patchouli-admin.conf.example`；旧密码配置仅保留在
+[历史面板说明](admin-web-console.md)中，不用于新安装。
 
 ## 数据库迁移
 
@@ -278,8 +277,14 @@ Revision 追加文件。后续开发分支已实现并测试统一文件集写�
 
 本轮接入小票开发分支新增 `20261019_0033`：保留所有已有业务数据，新增票据摘要与
 不可变消费历史。任意票据记录存在时拒绝降级，避免丢失授权审计；该版本尚未部署。
-当前开发分支的备份工具默认创建、验证和恢复准确的 `20261019_0033` 数据库。验证或恢复旧版
+本轮工作区新增 `20261020_0035` 的版本展示记录、`0036` 的库内 Skills 和 `0037` 的
+工作区保存回执。升级不推断或回填旧正文的入口与标题；产生相应记录后拒绝丢失它们的
+降级。准确迁移与上线状态须按发布和部署记录核实。
+
+当前开发分支的备份工具默认创建、验证和恢复准确的 `20261020_0037` 数据库。验证或恢复旧版
 备份时，须在服务函数或 `verify`／`restore` 命令中显式指定实际修订号，例如
+`--schema-revision 20261020_0036`、`--schema-revision 20261020_0035`、
+`--schema-revision 20261020_0034`、`--schema-revision 20261019_0033`、
 `--schema-revision 20261019_0032`、`--schema-revision 20261018_0031`、
 `--schema-revision 20261003_0030`、`--schema-revision 20261002_0029`、
 `--schema-revision 20261001_0028`、
