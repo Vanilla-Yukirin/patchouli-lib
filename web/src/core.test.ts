@@ -66,4 +66,22 @@ it("applies only selected Markdown targets and rejects stale offsets", () => {
 	expect(
 		resolveLocalTarget("docs/note.md", "https://example.invalid/old.png"),
 	).toBeNull();
+	const parenthesized = {
+		"paren.md":
+			"[asset](image(2).png)\n[escaped](image\\(2\\).png?download=1%202#preview \"Keep (title)\")\n[asset-ref]: <image(2).png#anchor> 'Ref title'\n",
+	};
+	const parenEdits = referencesForRename(
+		parenthesized,
+		"image(2).png",
+		"renamed.png",
+	);
+	expect(parenEdits).toHaveLength(3);
+	expect(
+		parenEdits.map((edit) =>
+			parenthesized["paren.md"].slice(edit.start, edit.end),
+		),
+	).toEqual(parenEdits.map((edit) => edit.before));
+	expect(applyReferenceEdits(parenthesized, parenEdits)["paren.md"]).toBe(
+		"[asset](renamed.png)\n[escaped](renamed.png?download=1%202#preview \"Keep (title)\")\n[asset-ref]: <renamed.png#anchor> 'Ref title'\n",
+	);
 });

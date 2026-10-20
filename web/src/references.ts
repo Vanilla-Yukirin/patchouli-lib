@@ -52,6 +52,7 @@ export function referencesForRename(
 	newName: string,
 ): ReferenceEdit[] {
 	const result: ReferenceEdit[] = [];
+	const parser = new MarkdownIt("commonmark", { html: true });
 	for (const [file, source] of Object.entries(sources)) {
 		if (!/\.(?:md|markdown|mdown|mkd)$/i.test(file)) continue;
 		// Mask fenced and inline code, preserving positions and newlines.
@@ -59,10 +60,7 @@ export function referencesForRename(
 		for (let index = 0; index < source.length; index++)
 			if (source[index] === "\n") lineOffsets.push(index + 1);
 		const masked = source.split("");
-		for (const token of new MarkdownIt("commonmark", { html: true }).parse(
-			source,
-			{},
-		))
+		for (const token of parser.parse(source, {}))
 			if (
 				token.map &&
 				["fence", "code_block", "html_block"].includes(token.type)
@@ -76,28 +74,52 @@ export function referencesForRename(
 			.join("")
 			.replace(/(`+)[^\n]*?\1/g, (value) => " ".repeat(value.length));
 		const patterns = [
-			/!?\[[^\]\n]*\]\(\s*(<[^>\n]+>|[^\s)]+)(?:\s+[^)]*)?\)/g,
-			/^\s{0,3}\[[^\]\n]+\]:\s*(<[^>\n]+>|\S+)/gm,
+			{ pattern: /!?\[[^\]\n]*\]\(\s*/g, inline: true },
+			{ pattern: /^\s{0,3}\[[^\]\n]+\]:\s*/gm, inline: false },
 		];
-		for (const pattern of patterns)
+		for (const { pattern, inline } of patterns)
 			for (const match of mask.matchAll(pattern)) {
-				const raw = match[1];
-				const target = raw.replace(/^<|>$/g, "");
-				const resolved = resolveLocalTarget(file, target);
+				const destinationStart = match.index + match[0].length;
+				const destination = parser.helpers.parseLinkDestination(
+					mask,
+					destinationStart,
+					mask.length,
+				);
+				if (!destination.ok) continue;
+				if (inline) {
+					let pos = destination.pos;
+					while (pos < mask.length && /[ \t\r\n]/.test(mask[pos])) pos++;
+					if (pos > destination.pos) {
+						const title = parser.helpers.parseLinkTitle(mask, pos, mask.length);
+						if (title.ok) {
+							pos = title.pos;
+							while (pos < mask.length && /[ \t\r\n]/.test(mask[pos])) pos++;
+						}
+					}
+					if (mask[pos] !== ")") continue;
+				}
+				const resolved = resolveLocalTarget(file, destination.str);
 				if (!resolved || resolved.path !== oldName) continue;
-				const start =
-					(match.index ?? 0) +
-					match[0].indexOf(raw) +
-					(raw.startsWith("<") ? 1 : 0);
+				const angled = mask[destinationStart] === "<";
+				const start = destinationStart + (angled ? 1 : 0);
+				const end = destination.pos - (angled ? 1 : 0);
+				const before = source.slice(start, end);
+				// Keep the source spelling of the suffix, including escapes/entities.
+				const marker = Array.from(
+					before.matchAll(
+						/\\[^\r\n]|&(?:#(?:x[\da-f]+|\d+)|[a-z][a-z\d]+);|[?#]/gi,
+					),
+				).find((part) => /^[?#]/.test(parser.utils.unescapeAll(part[0])));
+				const suffix = marker ? before.slice(marker.index) : resolved.suffix;
 				const prefix = source.slice(0, start);
 				result.push({
 					id: `${file}:${start}`,
 					file,
 					start,
-					end: start + target.length,
+					end,
 					line: prefix.split("\n").length,
 					column: start - prefix.lastIndexOf("\n"),
-					before: target,
+					before,
 					after:
 						relativeTarget(file === oldName ? newName : file, newName)
 							.split("/")
@@ -107,7 +129,7 @@ export function referencesForRename(
 									(char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
 								),
 							)
-							.join("/") + resolved.suffix,
+							.join("/") + suffix,
 					source,
 					selected: true,
 				});
