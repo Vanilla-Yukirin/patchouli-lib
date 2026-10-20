@@ -417,6 +417,15 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
         {"width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": False},
     )
     wait(tools, "innerWidth <= 390")
+    tools.evaluate("""(() => {
+      window.workspaceStyleViolations = 0;
+      window.addEventListener('securitypolicyviolation', event => {
+        if (event.effectiveDirective.startsWith('style-src')) {
+          window.workspaceStyleViolations += 1;
+        }
+      });
+      return true;
+    })()""")
     click(tools, "document.querySelector('.page-heading .mobile-menu')")
     wait(
         tools, "document.querySelector('[role=dialog]')?.textContent.includes('Contents and files')"
@@ -425,13 +434,47 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
         "document.querySelector('[role=dialog]').textContent.includes('renamed-note.txt')"
     )
     screenshot(tools, tmp_path / "narrow-directory.png")
-    dimensions = tools.evaluate("""(() => ({
-      width:innerWidth, scrollWidth:document.documentElement.scrollWidth,
-      overflow:Array.from(document.querySelectorAll('body *')).filter(e => {
-        const r=e.getBoundingClientRect(); return r.width>0 && r.right>innerWidth+1;
-      }).slice(0,12).map(e=>({tag:e.tagName,classes:e.className,right:e.getBoundingClientRect().right}))
-    }))()""")
-    assert dimensions["scrollWidth"] <= dimensions["width"] + 1, dimensions
+    dimensions = tools.evaluate("""(() => {
+      const root = document.documentElement;
+      const dialog = document.querySelector('[role=dialog]');
+      const rect = dialog.getBoundingClientRect();
+      const nonce = document.querySelector('meta[name="csp-nonce"]')?.content;
+      const lockStyle = Array.from(document.querySelectorAll('style'))
+        .find(style => style.textContent.includes('body[data-scroll-locked]'));
+      let lockStylesheetActive = false;
+      try { lockStylesheetActive = !!lockStyle?.sheet?.cssRules.length; } catch {}
+      return {
+        width: innerWidth, clientWidth: root.clientWidth, scrollWidth: root.scrollWidth,
+        clientHeight: root.clientHeight, scrollHeight: root.scrollHeight,
+        bodyLocked: document.body.hasAttribute('data-scroll-locked'),
+        bodyOverflowY: getComputedStyle(document.body).overflowY,
+        dialog: {
+          left: rect.left, right: rect.right,
+          clientWidth: dialog.clientWidth, scrollWidth: dialog.scrollWidth,
+          clientHeight: dialog.clientHeight, scrollHeight: dialog.scrollHeight
+        },
+        noncePresent: !!nonce,
+        lockStylePresent: !!lockStyle,
+        lockStyleNonceMatches: !!nonce && lockStyle?.nonce === nonce,
+        lockStylesheetActive,
+        styleViolations: window.workspaceStyleViolations,
+        overflow: Array.from(document.querySelectorAll('body *')).filter(element => {
+          const bounds = element.getBoundingClientRect();
+          return bounds.width > 0 && bounds.right > root.clientWidth + 1;
+        }).slice(0,12).map(element => ({
+          tag: element.tagName, classes: element.className,
+          right: element.getBoundingClientRect().right
+        }))
+      };
+    })()""")
+    print("Narrow drawer diagnostics:", dimensions)
+    assert dimensions["scrollWidth"] <= dimensions["clientWidth"] + 1, dimensions
+    assert dimensions["dialog"]["scrollWidth"] <= dimensions["dialog"]["clientWidth"] + 1
+    assert dimensions["dialog"]["right"] <= dimensions["clientWidth"] + 1, dimensions
+    assert dimensions["bodyLocked"] and dimensions["bodyOverflowY"] == "hidden", dimensions
+    assert dimensions["noncePresent"] and dimensions["lockStylePresent"], dimensions
+    assert dimensions["lockStyleNonceMatches"] and dimensions["lockStylesheetActive"], dimensions
+    assert dimensions["styleViolations"] == 0, dimensions
 
 
 def test_browser_failure_diagnostics_redact_local_details(tmp_path: Path) -> None:

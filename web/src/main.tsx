@@ -6,11 +6,17 @@ import {
 	Outlet,
 	RouterProvider,
 } from "@tanstack/react-router";
+import { setNonce } from "get-nonce";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./app";
 import { PreferencesProvider } from "./preferences";
 import "./styles.css";
+
+setNonce(
+	document.querySelector<HTMLMetaElement>('meta[name="csp-nonce"]')?.content ||
+		"",
+);
 
 const queryClient = new QueryClient({
 	defaultOptions: {
