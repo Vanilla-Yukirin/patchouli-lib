@@ -295,6 +295,10 @@ export const translations = {
 			"无法可靠保存重试记录，本次请求未发送。请恢复本标签页的会话存储后重试。",
 		"workspace.retryClearFailed":
 			"无法清除原重试记录，仍保留原操作。请恢复会话存储后再试。",
+		"workspace.confirmedSaveCleanup":
+			"保存已确认成功，仅待清除本标签页记录；无需重新选择文件或重试保存。",
+		"workspace.confirmedReceiptNotStored":
+			"已确认的版本信息暂未可靠保存。刷新后旧记录可能仍显示结果未知；请先恢复会话存储，按下方准确版本核对并清除记录。",
 		"workspace.reselectOriginalUpload":
 			"请为每个原上传项重新选择大小和 SHA-256 完全相同的文件。",
 		"workspace.retryOriginalInstructions":
@@ -634,6 +638,10 @@ export const translations = {
 			"Retry details could not be stored reliably. This request was not sent. Restore this tab's session storage before retrying.",
 		"workspace.retryClearFailed":
 			"The original retry record could not be cleared and remains locked. Restore session storage and try again.",
+		"workspace.confirmedSaveCleanup":
+			"The save is confirmed; only this tab's record needs clearing. No file reselection or save retry is needed.",
+		"workspace.confirmedReceiptNotStored":
+			"The confirmed revision could not be stored reliably. After refreshing, the old record may still show an unknown outcome. Restore session storage, check the exact revision below, and clear the record first.",
 		"workspace.reselectOriginalUpload":
 			"Reselect every original upload with exactly matching size and SHA-256.",
 		"workspace.retryOriginalInstructions":

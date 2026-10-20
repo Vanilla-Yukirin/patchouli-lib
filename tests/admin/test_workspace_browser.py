@@ -938,8 +938,50 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
     )
     assert tools.evaluate("document.querySelector('.source-pane') === null")
     assert tools.evaluate(f"({button('Set as entry')}) === undefined")
+    tools.evaluate("""(() => {
+      const original = Storage.prototype.removeItem;
+      Storage.prototype.removeItem = function(key) {
+        if (key.startsWith('patchouli.pending.libraries/')) return;
+        return original.call(this, key);
+      };
+      return true;
+    })()""")
     click(tools, button("Save"))
     wait(tools, "document.querySelector('[role=status]')?.textContent.includes('Saved')")
+    wait(
+        tools,
+        "Array.from(document.querySelectorAll('[role=alert]'))"
+        ".some(e=>e.textContent.includes('could not be cleared'))",
+    )
+    receipt_key = tools.evaluate(
+        "Object.keys(sessionStorage).find(key=>key.startsWith('patchouli.pending.libraries/'))"
+    )
+    assert receipt_key is not None
+    tools.command(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {
+            "source": """(() => {
+              window.cleanupReads = 0;
+              const originalFetch = window.fetch.bind(window);
+              window.fetch = (...args) => {
+                window.cleanupReads += 1;
+                return originalFetch(...args).finally(() => { window.cleanupReads -= 1; });
+              };
+            })()""",
+        },
+    )
+    tools.command("Page.reload")
+    wait(tools, f"Boolean({button('Checked; clear reminder')})")
+    assert tools.evaluate("document.querySelector('[data-retry-upload]') === null")
+    assert tools.evaluate(f"({button('Retry original save')}) === undefined")
+    tools.evaluate("window.confirm=()=>true; true")
+    click(tools, button("Checked; clear reminder"))
+    wait(tools, f"sessionStorage.getItem({json.dumps(receipt_key)}) === null")
+    # Finish the cleanup-triggered readback before intentionally expiring the session.
+    wait(
+        tools,
+        "window.cleanupReads === 0 && document.querySelector('.reading-pane') !== null",
+    )
     with browser.engine.connect() as connection:
         repository = ContentRepository(connection)
         binary_page = repository.get_page(browser.library, browser.page)

@@ -46,7 +46,11 @@ from patchouli_lib.api.onboarding_routes import TicketAttemptLimiter
 from patchouli_lib.auth.service import AuthenticationError, utc_microseconds
 from patchouli_lib.config import Settings
 from patchouli_lib.content.file_set_service import FileSetPreconditionFailedError
-from patchouli_lib.content.service import ArchiveNotFoundError, ArchivePreconditionFailedError
+from patchouli_lib.content.service import (
+    ArchiveLifecycleUnchangedError,
+    ArchiveNotFoundError,
+    ArchivePreconditionFailedError,
+)
 from patchouli_lib.database import immediate_transaction
 from patchouli_lib.library.service import (
     LibraryStructureNotFoundError,
@@ -95,6 +99,7 @@ class JsonRoute(APIRoute):
                 return reply({"error": {"code": "not_found", "message": "Item not found"}}, 404)
             except (
                 LibraryStructureVersionConflictError,
+                ArchiveLifecycleUnchangedError,
                 IntegrityError,
                 AgentMetadataVersionConflictError,
                 AgentNameConflictError,

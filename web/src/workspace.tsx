@@ -38,6 +38,11 @@ type DraftFile = {
 	removed?: boolean;
 };
 type SaveUpload = { name: string; size: number; sha256: string };
+type ConfirmedSave = {
+	revision_id: string;
+	revision_number: number;
+	resource_id: string;
+};
 type SaveReceipt = {
 	version: 1;
 	key: string;
@@ -46,7 +51,21 @@ type SaveReceipt = {
 	metadata: Record<string, unknown>;
 	uploads: SaveUpload[];
 	signature: string;
+	confirmed?: ConfirmedSave;
 };
+function isConfirmedSave(value: unknown): value is ConfirmedSave {
+	if (!value || typeof value !== "object") return false;
+	const saved = value as Partial<ConfirmedSave>;
+	return Boolean(
+		typeof saved.revision_id === "string" &&
+			/^rev_[a-f0-9]{32}$/.test(saved.revision_id) &&
+			Number.isSafeInteger(saved.revision_number) &&
+			(saved.revision_number ?? 0) > 0 &&
+			typeof saved.resource_id === "string" &&
+			saved.resource_id !== "new" &&
+			/^[a-z0-9_-]+$/.test(saved.resource_id),
+	);
+}
 function isSaveReceipt(value: unknown): value is SaveReceipt {
 	if (!value || typeof value !== "object") return false;
 	const receipt = value as Partial<SaveReceipt>;
@@ -61,6 +80,7 @@ function isSaveReceipt(value: unknown): value is SaveReceipt {
 			!Array.isArray(receipt.metadata) &&
 			typeof receipt.signature === "string" &&
 			/^[a-f0-9]{64}$/.test(receipt.signature) &&
+			(receipt.confirmed === undefined || isConfirmedSave(receipt.confirmed)) &&
 			Array.isArray(receipt.uploads) &&
 			receipt.uploads.every(
 				(file) =>
@@ -206,7 +226,6 @@ function ResourceWorkspace(
 	const [editing, setEdit] = useState(
 		!historical && (Boolean(props.editing) || creating),
 	);
-	const edit = !historical && editing;
 	const [files, setFiles] = useState<DraftFile[]>([]);
 	const [selected, setSelected] = useState<string>("");
 	const [primary, setPrimary] = useState<string | null>(null);
@@ -225,7 +244,10 @@ function ResourceWorkspace(
 			const value: unknown = JSON.parse(raw);
 			return isSaveReceipt(value) &&
 				value.target === writeTarget &&
-				value.method === (creating ? "POST" : "PUT")
+				value.method === (creating ? "POST" : "PUT") &&
+				(creating ||
+					!value.confirmed ||
+					value.confirmed.resource_id === props.resourceId)
 				? value
 				: "unreadable";
 		} catch {
@@ -236,6 +258,10 @@ function ResourceWorkspace(
 		previousOperation && previousOperation !== "unreadable"
 			? previousOperation
 			: null;
+	const confirmedSave = originalReceipt?.confirmed;
+	const edit = !historical && editing && !confirmedSave;
+	const [cleanupOnly, setCleanupOnly] = useState(false);
+	const [confirmationNotStored, setConfirmationNotStored] = useState(false);
 	const pendingOperation = useRef<{
 		receipt: SaveReceipt;
 		body: FormData;
@@ -376,8 +402,25 @@ function ResourceWorkspace(
 		setFiles((previous) => [...previous, ...added]);
 		setDirty(true);
 	};
+	const clearStoredReceipt = () => {
+		try {
+			sessionStorage.removeItem(receiptKey);
+			if (sessionStorage.getItem(receiptKey) !== null) throw new Error();
+			return true;
+		} catch {
+			setError(new Error(t("workspace.retryClearFailed")));
+			return false;
+		}
+	};
 	const save = async () => {
-		if ((!edit && !previousOperation) || historical || saving) return;
+		if (
+			(!edit && !previousOperation) ||
+			historical ||
+			saving ||
+			confirmedSave ||
+			cleanupOnly
+		)
+			return;
 		setSaving(true);
 		setError(undefined);
 		let sent = false;
@@ -518,18 +561,29 @@ function ResourceWorkspace(
 				body,
 				headers: { "Idempotency-Key": receipt.key },
 			});
-			pendingOperation.current = null;
-			unusedKey.current = null;
-			setRetryUploads({});
-			setPreviousOperation(null);
-			try {
-				sessionStorage.removeItem(receiptKey);
-			} catch {}
+			const savedRevision = result.skill || result;
+			const confirmed: ConfirmedSave = {
+				revision_id: savedRevision.revision_id,
+				revision_number: savedRevision.revision_number,
+				resource_id:
+					result.page_id ||
+					result.skill?.id ||
+					result.id ||
+					props.resourceId ||
+					"",
+			};
+			if (
+				!isConfirmedSave(confirmed) ||
+				(!creating && confirmed.resource_id !== props.resourceId)
+			)
+				throw new Error("save_receipt_invalid");
+			const confirmedReceipt = { ...receipt, confirmed };
+			setPreviousOperation(confirmedReceipt);
+			pendingOperation.current = { receipt: confirmedReceipt, body };
 			setUnconfirmed(false);
 			setDirty(false);
 			leaveAllowed.current = true;
 			setEdit(false);
-			const savedRevision = result.skill || result;
 			const message = retrying
 				? `${t("workspace.retryConfirmed")} v${savedRevision.revision_number} · ${savedRevision.revision_id}`
 				: result.overwritten_newer_revision
@@ -539,27 +593,44 @@ function ResourceWorkspace(
 						: t("workspace.identicalContentNoNewRevision");
 			setSavedNotice(message);
 			client.invalidateQueries({ queryKey: ["resource"] });
+			try {
+				const stored = JSON.stringify(confirmedReceipt);
+				sessionStorage.setItem(receiptKey, stored);
+				if (sessionStorage.getItem(receiptKey) !== stored) throw new Error();
+				setConfirmationNotStored(false);
+			} catch {
+				setConfirmationNotStored(true);
+			}
+			if (!clearStoredReceipt()) {
+				setCleanupOnly(true);
+				return;
+			}
+			pendingOperation.current = null;
+			unusedKey.current = null;
+			setRetryUploads({});
+			setPreviousOperation(null);
+			setCleanupOnly(false);
+			setConfirmationNotStored(false);
 			if (retrying && data.error) {
 				props.done(message);
 				props.go(`/libraries/${props.libraryId}`);
-			} else if (creating)
-				props.go(`/${base}/${result.page_id || result.skill?.id || result.id}`);
+			} else if (creating) props.go(`/${base}/${confirmed.resource_id}`);
 		} catch (error) {
 			setError(error);
 			if (
+				sent &&
 				!retrying &&
 				error instanceof Error &&
 				"status" in error &&
 				Number(error.status) !== 401 &&
 				Number(error.status) < 500
 			) {
-				pendingOperation.current = null;
-				unusedKey.current = null;
-				setPreviousOperation(null);
-				try {
-					sessionStorage.removeItem(receiptKey);
-				} catch {}
 				setUnconfirmed(false);
+				if (clearStoredReceipt()) {
+					pendingOperation.current = null;
+					unusedKey.current = null;
+					setPreviousOperation(null);
+				} else setCleanupOnly(true);
 			} else if (sent) setUnconfirmed(true);
 		} finally {
 			setSaving(false);
@@ -629,9 +700,24 @@ function ResourceWorkspace(
 			<p>
 				{previousOperation === "unreadable"
 					? t("workspace.retryDetailsUnavailable")
-					: t("workspace.retryOriginalInstructions")}
+					: confirmedSave
+						? t("workspace.confirmedSaveCleanup")
+						: cleanupOnly
+							? t("workspace.retryClearFailed")
+							: t("workspace.retryOriginalInstructions")}
 			</p>
+			{confirmedSave && (
+				<p>
+					{t("workspace.retryConfirmed")} v{confirmedSave.revision_number} ·{" "}
+					{confirmedSave.revision_id}
+				</p>
+			)}
+			{confirmationNotStored && (
+				<p>{t("workspace.confirmedReceiptNotStored")}</p>
+			)}
 			{originalReceipt &&
+				!confirmedSave &&
+				!cleanupOnly &&
 				!pendingOperation.current &&
 				originalReceipt.uploads.map((file) => (
 					<label key={file.name}>
@@ -651,13 +737,15 @@ function ResourceWorkspace(
 						/>
 					</label>
 				))}
-			<button
-				type="button"
-				disabled={saving || !originalReceipt}
-				onClick={save}
-			>
-				{t("workspace.retryOriginalSave")}
-			</button>
+			{!confirmedSave && !cleanupOnly && (
+				<button
+					type="button"
+					disabled={saving || !originalReceipt}
+					onClick={save}
+				>
+					{t("workspace.retryOriginalSave")}
+				</button>
+			)}
 			<button
 				type="button"
 				className="secondary"
@@ -665,24 +753,43 @@ function ResourceWorkspace(
 				onClick={() => {
 					if (!confirm(t("workspace.haveYouCheckedTheCurrentRevisionAnd")))
 						return;
-					try {
-						sessionStorage.removeItem(receiptKey);
-						if (sessionStorage.getItem(receiptKey) !== null) throw new Error();
-					} catch {
-						setError(new Error(t("workspace.retryClearFailed")));
-						return;
-					}
+					if (!clearStoredReceipt()) return;
 					pendingOperation.current = null;
 					unusedKey.current = null;
 					setPreviousOperation(null);
 					setRetryUploads({});
 					setUnconfirmed(false);
+					setCleanupOnly(false);
+					setConfirmationNotStored(false);
+					setError(undefined);
+					if (confirmedSave) {
+						props.done(
+							`${t("workspace.retryConfirmed")} v${confirmedSave.revision_number} · ${confirmedSave.revision_id}`,
+						);
+						if (creating) {
+							props.go(`/${base}/${confirmedSave.resource_id}`);
+							return;
+						}
+					}
+					if (!creating) data.refetch();
 				}}
 			>
 				{t("workspace.checkedClearReminder")}
 			</button>
 		</div>
 	);
+	if (confirmedSave)
+		return (
+			<>
+				{savedNotice && (
+					<p className="success" role="status">
+						{savedNotice}
+					</p>
+				)}
+				{Boolean(error) && <ErrorNotice error={error} />}
+				{retryPanel}
+			</>
+		);
 	if (!creating && data.isPending) return <Loading />;
 	if (!creating && (data.error || !data.data))
 		return (
@@ -819,7 +926,11 @@ function ResourceWorkspace(
 							>
 								{t("page-properties.cancel")}
 							</button>
-							<button type="button" disabled={saving} onClick={save}>
+							<button
+								type="button"
+								disabled={saving || cleanupOnly}
+								onClick={save}
+							>
 								<Save size={17} />
 								{saving ? t("workspace.saving") : t("credentials.save")}
 							</button>

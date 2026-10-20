@@ -558,13 +558,27 @@ def test_manual_file_save_history_and_retry(
     trashed = trash.json()["pages"][0]
     assert trashed["stored_title"] == "First title"
     assert client.get("/admin/api/trash").json()["libraries"]
+    repeated_delete = client.request(
+        "DELETE",
+        path,
+        json={"expected_etag": trashed["restore_etag"], "confirm_delete": "yes"},
+        headers=headers,
+    )
+    assert repeated_delete.status_code == 409, repeated_delete.text
+    assert repeated_delete.json()["error"]["code"] == "conflict"
     assert (
         client.post(
             path + "/restore", json={"expected_etag": trashed["restore_etag"]}, headers=headers
         ).status_code
         == 200
     )
-    assert client.get(path).json()["stored_title"] == "First title"
+    live = client.get(path).json()
+    assert live["stored_title"] == "First title"
+    repeated_restore = client.post(
+        path + "/restore", json={"expected_etag": live["current_etag"]}, headers=headers
+    )
+    assert repeated_restore.status_code == 409, repeated_restore.text
+    assert repeated_restore.json()["error"]["code"] == "conflict"
 
 
 def test_skill_package_and_credentials(browser: tuple[TestClient, dict[str, str], Any]) -> None:
