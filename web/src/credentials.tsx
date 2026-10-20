@@ -155,8 +155,13 @@ export function CredentialManager(
 	const { t } = usePreferences();
 	const callers = useResource<{ items: Caller[] }>("credentials");
 	const libraries = useResource<{ items: Structure[] }>("libraries");
+	const requestedLibrary = new URLSearchParams(location.search).get(
+		"library_id",
+	);
 	const match = items(callers.data).find(
-		(caller) => caller.id === props.credentialId,
+		(caller) =>
+			caller.id === props.credentialId &&
+			(!requestedLibrary || caller.library_id === requestedLibrary),
 	);
 	const selected = useResource<Caller>(
 		props.credentialId
@@ -294,6 +299,14 @@ export function CredentialManager(
 			{props.credentialId && selected.error && (
 				<ErrorNotice error={selected.error} />
 			)}
+			{props.credentialId && callers.error && (
+				<ErrorNotice error={callers.error} />
+			)}
+			{props.credentialId && !callers.isPending && !callers.error && !match && (
+				<Panel title="404">
+					<p>{t("app.pageNotFound")}</p>
+				</Panel>
+			)}
 			{caller ? (
 				<>
 					<Panel
@@ -388,6 +401,10 @@ export function CredentialManager(
 						</button>
 					</Panel>
 				</>
+			) : props.credentialId ? (
+				callers.isPending || (match && selected.isPending) ? (
+					<Loading />
+				) : null
 			) : (
 				<Panel title={t("credentials.credentialIdentities")}>
 					{callers.isPending ? (

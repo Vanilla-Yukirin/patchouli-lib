@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { type DocumentView, request, type Structure } from "./api";
 import type { PageProps } from "./app";
+import type { components } from "./generated/admin";
 import { useResource } from "./pages";
 import { LocalTime, usePreferences } from "./preferences";
 import { ErrorNotice, LocalDatePreview, Modal, Panel } from "./ui";
@@ -41,9 +42,8 @@ export function PageProperties(props: PageProps & { document: DocumentView }) {
 						? { "Idempotency-Key": crypto.randomUUID().replaceAll("-", "") }
 						: {},
 			});
-			if (!active.current) return false;
 			props.done(t("page-properties.updated"));
-			return true;
+			return active.current;
 		} catch (e) {
 			if (active.current) setError(e);
 			return false;
@@ -55,20 +55,23 @@ export function PageProperties(props: PageProps & { document: DocumentView }) {
 		setBusy(true);
 		setError(undefined);
 		try {
-			const result = await request<{ restore_etag: string }>(base, {
-				method: "DELETE",
-				body: JSON.stringify({
-					expected_etag: doc.current_etag,
-					confirm_delete: "yes",
-				}),
-			});
-			// A completed request must not navigate away from a newer page or login.
-			if (!active.current) return;
+			const result = await request<components["schemas"]["PageDeleteResult"]>(
+				base,
+				{
+					method: "DELETE",
+					body: JSON.stringify({
+						expected_etag: doc.current_etag,
+						confirm_delete: "yes",
+					}),
+				},
+			);
 			props.done(t("page-properties.movedToTrash"), {
 				libraryId: doc.library_id,
 				pageId: doc.page_id,
 				etag: result.restore_etag,
 			});
+			// Notify the same login even after leaving, but never interrupt a new page.
+			if (!active.current) return;
 			setRemoving(false);
 			props.go(`/libraries/${doc.library_id}`);
 		} catch (e) {

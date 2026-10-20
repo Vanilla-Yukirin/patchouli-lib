@@ -20,7 +20,9 @@ export function TagsManager(props: PageProps) {
 	const [selected, setSelected] = useState<string[]>([]);
 	const [names, setNames] = useState<Record<string, string>>({});
 	const [search, setSearch] = useState("");
-	const [library, setLibrary] = useState("");
+	const [library, setLibrary] = useState(
+		new URLSearchParams(location.search).get("library_id") || "",
+	);
 	const [create, setCreate] = useState(false);
 	const [deleting, setDeleting] = useState(false);
 	const [busy, setBusy] = useState(false);

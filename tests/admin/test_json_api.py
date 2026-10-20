@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from patchouli_lib.admin.json_api import create_admin_json_router
+from patchouli_lib.admin.json_api.schemas import PageDeleteResult
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.auth.service import utc_microseconds
 from patchouli_lib.backup.errors import BackupDatabaseError
@@ -613,6 +614,26 @@ def test_manual_file_save_history_and_retry(
         headers=headers,
     )
     assert deleted.status_code == 200, deleted.text
+    schema_response = client.get("/admin/api/openapi.json")
+    assert schema_response.status_code == 200
+    schema = schema_response.json()
+    assert schema["paths"]["/admin/api/libraries/{library_id}/pages/{page_id}"]["delete"][
+        "responses"
+    ]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/PageDeleteResult"
+    }
+    declared_result = schema["components"]["schemas"]["PageDeleteResult"]
+    assert (
+        set(deleted.json())
+        == set(declared_result["properties"])
+        == {
+            "changed",
+            "restore_etag",
+        }
+    )
+    assert set(declared_result["required"]) == set(deleted.json())
+    assert declared_result["properties"]["changed"]["const"] is True
+    assert PageDeleteResult.model_validate(deleted.json()).model_dump() == deleted.json()
     restore_etag = deleted.json()["restore_etag"]
     assert deleted.json()["changed"] is True
     assert restore_etag != current["current_etag"]

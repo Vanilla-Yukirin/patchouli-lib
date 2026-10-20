@@ -321,6 +321,24 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
         tools,
         f"location.pathname === '/admin/credentials' && Boolean({button('Create credential')})",
     )
+    with browser.engine.connect() as connection:
+        legacy_page = ContentRepository(connection).get_page(browser.library, browser.page)
+        assert legacy_page is not None
+        legacy_path = (
+            f"/admin/libraries/{browser.library}/sections/{legacy_page.section_id}"
+            f"/books/{legacy_page.book_id}/pages/{browser.page}"
+        )
+    tools.command("Page.navigate", {"url": browser.origin + legacy_path})
+    wait(
+        tools,
+        f"location.pathname === {json.dumps(page_path)} && "
+        "Boolean(document.querySelector('.reading-pane .prose')"
+        "?.textContent.includes('Original text.'))",
+    )
+    unknown_path = f"/admin/libraries/{browser.library}/unknown-screen"
+    tools.command("Page.navigate", {"url": browser.origin + unknown_path})
+    wait(tools, "document.querySelector('main .panel h2')?.textContent === '404'")
+    assert tools.evaluate("location.pathname") == unknown_path
     tools.command("Page.navigate", {"url": browser.origin + "/admin/tags"})
     wait(tools, "document.querySelector('.tag-row input[type=checkbox]') !== null")
     click(tools, "document.querySelector('.tag-row input[type=checkbox]')")
@@ -599,6 +617,9 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
     tools.evaluate(f"""(() => {{
       window.workspaceDeletedEtag = null;
       window.workspaceUndoEtag = null;
+      const releaseDelete = new Promise(resolve => {{
+        window.workspaceReleaseDelete = resolve;
+      }});
       const target = {json.dumps(other_api)};
       const originalFetch = window.fetch.bind(window);
       window.fetch = (input, options) => {{
@@ -607,6 +628,7 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
         if (options?.method === 'DELETE' && path === target) {{
           return response.then(async value => {{
             window.workspaceDeletedEtag = (await value.clone().json()).restore_etag;
+            await releaseDelete;
             return value;
           }});
         }}
@@ -624,10 +646,7 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
         "Array.from(document.querySelectorAll('[role=dialog] button'))"
         ".find(element=>element.textContent.trim()==='Move to trash')",
     )
-    wait(
-        tools,
-        "document.querySelector('.toast[role=status]')?.textContent.includes('Moved to Trash')",
-    )
+    wait(tools, "typeof window.workspaceDeletedEtag === 'string'")
     deleted_etag = tools.evaluate("window.workspaceDeletedEtag")
     assert isinstance(deleted_etag, str) and deleted_etag.startswith('"page-v2-')
     with browser.engine.connect() as connection:
@@ -637,6 +656,35 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
             other_uid,
             other_revision,
         )
+    click(tools, "document.querySelector('[role=dialog] button[aria-label=Close]')")
+    wait(tools, "document.querySelector('[role=dialog]') === null")
+    select_page(tools, "Workspace title")
+    wait(
+        tools,
+        "document.querySelector('.reading-pane .prose')?.textContent.includes('Original text.')",
+    )
+    click(tools, button("Edit"))
+    wait(
+        tools,
+        "document.querySelector('.source-pane .cm-content')"
+        "?.textContent.includes('Original text.')",
+    )
+    edit_source(tools, "# Newer A draft\n\nKeep this newer draft after delayed B deletion.\n")
+    wait(
+        tools,
+        "document.querySelector('.preview-pane .prose')?.textContent.includes('Newer A draft')",
+    )
+    newer_draft = tools.evaluate("document.querySelector('.source-pane .cm-content').textContent")
+    tools.evaluate("window.workspaceReleaseDelete(); true")
+    wait(
+        tools,
+        "document.querySelector('.toast[role=status]')?.textContent.includes('Moved to Trash')",
+    )
+    assert tools.evaluate("location.pathname") == page_path
+    assert (
+        tools.evaluate("document.querySelector('.source-pane .cm-content').textContent")
+        == newer_draft
+    )
     click(
         tools,
         "Array.from(document.querySelectorAll('.toast button'))"
@@ -646,7 +694,11 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
         tools,
         "document.querySelector('.toast[role=status]')?.textContent.includes('Document restored.')",
     )
-    assert tools.evaluate("location.pathname") == f"/admin/libraries/{browser.library}"
+    assert tools.evaluate("location.pathname") == page_path
+    assert (
+        tools.evaluate("document.querySelector('.source-pane .cm-content').textContent")
+        == newer_draft
+    )
     assert tools.evaluate("window.workspaceUndoEtag") == deleted_etag
     with browser.engine.connect() as connection:
         repository = ContentRepository(connection)
@@ -658,7 +710,7 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
         )
         assert restored_other.current_revision_number == 2
         assert repository.get_current_file_manifest(restored_other).files == other_files.files
-    tools.command("Page.navigate", {"url": browser.origin + page_path})
+    click(tools, button("Cancel"))
     wait(
         tools,
         "document.querySelector('.reading-pane .prose')?.textContent.includes('Original text.')",

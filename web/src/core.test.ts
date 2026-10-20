@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import vectors from "../../tests/vectors/revision-titles.json";
+import { isCanonicalAdminPath, legacyAdminDestination } from "./legacy-routes";
 import { renderMarkdown, titleFromMarkdown } from "./markdown";
 import {
 	applyReferenceEdits,
@@ -7,8 +8,8 @@ import {
 	resolveLocalTarget,
 } from "./references";
 
-describe("shared write-time title contract", () => {
-	it("matches the same vectors as the Python writer", () => {
+describe("shared browser contracts", () => {
+	it("matches write-time titles and retired navigation targets", () => {
 		for (const vector of vectors) {
 			const actual =
 				vector.filename && /\.(?:md|markdown|mdown|mkd)$/i.test(vector.filename)
@@ -21,6 +22,48 @@ describe("shared write-time title contract", () => {
 		expect(renderMarkdown(large, [])).toBe(
 			`<pre># Large title\n\n${"&lt;unsafe&gt;&amp;".repeat(140_000)}</pre>`,
 		);
+		const oldPage = "/libraries/lib/sections/section/books/book/pages/page";
+		const page = "/libraries/lib/pages/page";
+		for (const [old, target] of [
+			["/agents", "/credentials"],
+			["/onboarding-tickets", "/credentials"],
+			["/setup", "/settings"],
+			["/master/setup", "/settings"],
+			["/guide", "/help"],
+			["/agent", "/help/agent"],
+			["/mcp", "/help/mcp"],
+			[oldPage, page],
+			[`${oldPage}/files/edit`, page],
+			[`${oldPage}/revisions/2/restore`, `${page}/revisions/2`],
+			[`${oldPage}/revisions/2/files/docs%2Fnote.md`, `${page}/revisions/2`],
+			["/libraries/lib/callers/caller", "/credentials/caller?library_id=lib"],
+			[
+				"/libraries/lib/callers/caller/credentials/key/grants",
+				"/credentials/caller?library_id=lib",
+			],
+			["/libraries/lib/trash", "/trash?library_id=lib"],
+			["/libraries/lib/sections/section/trash/page", "/trash?library_id=lib"],
+			["/libraries/lib/tags", "/tags?library_id=lib"],
+			[
+				"/libraries/lib/sections/section/books/book/new-page",
+				"/libraries/lib/pages/new?section=section&book=book",
+			],
+		]) {
+			expect(legacyAdminDestination(old), old).toBe(target);
+			expect(isCanonicalAdminPath(target.split("?")[0]), target).toBe(true);
+		}
+		for (const unknown of [
+			"/libraries/lib/unknown",
+			"/libraries/lib/pages",
+			"/libraries/lib/callers/caller/unknown",
+			"/libraries/lib/callers/caller/requests",
+			`${oldPage}/revisions/2/extra`,
+			`${oldPage}/revisions/2/files/%2e%2e%2Fsecret.md`,
+			"/help/unknown",
+		]) {
+			expect(legacyAdminDestination(unknown), unknown).toBeNull();
+			expect(isCanonicalAdminPath(unknown), unknown).toBe(false);
+		}
 	});
 });
 it("applies only selected Markdown targets and rejects stale offsets", () => {

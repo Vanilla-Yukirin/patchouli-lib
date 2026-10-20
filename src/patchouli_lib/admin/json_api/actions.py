@@ -30,6 +30,7 @@ from patchouli_lib.admin.json_api.content import (
     save_page,
 )
 from patchouli_lib.admin.json_api.reads import book_location, found, section_location
+from patchouli_lib.admin.json_api.schemas import PageDeleteResult
 from patchouli_lib.admin.page_move_service import MasterPageMoveCommand, MasterPageMoveService
 from patchouli_lib.admin.service import AdminActionService
 from patchouli_lib.auth.onboarding import OnboardingTicketService
@@ -201,7 +202,7 @@ def register_actions(router: APIRouter, auth: BrowserAuth) -> None:
             page = found(ContentRepository(connection).get_page(library_id, page_id))
             return page.section_id, page.book_id
 
-    @router.delete("/libraries/{library_id}/pages/{page_id}")
+    @router.delete("/libraries/{library_id}/pages/{page_id}", response_model=PageDeleteResult)
     async def delete_page(request: Request, library_id: str, page_id: str) -> Response:
         session = auth.write_session(request)
         form = await body_json(request, MasterDeletePageFormInput)
@@ -215,7 +216,7 @@ def register_actions(router: APIRouter, auth: BrowserAuth) -> None:
             form,
             master_session=session,
         )
-        return reply({"changed": True, "restore_etag": restore_etag})
+        return reply(PageDeleteResult(changed=True, restore_etag=restore_etag))
 
     @router.post("/libraries/{library_id}/pages/{page_id}/restore")
     async def restore_page(request: Request, library_id: str, page_id: str) -> Response:

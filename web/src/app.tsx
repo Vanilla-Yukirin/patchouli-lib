@@ -25,6 +25,7 @@ import {
 	setSessionCsrf,
 } from "./api";
 import { CredentialManager } from "./credentials";
+import { isCanonicalAdminPath, legacyAdminDestination } from "./legacy-routes";
 import {
 	Dashboard,
 	HelpPage,
@@ -56,13 +57,16 @@ export function App() {
 	const navigate = useNavigate();
 	const pathname = useRouterState({ select: (s) => s.location.pathname });
 	// TanStack exposes the application-relative pathname after its basepath rewrite.
-	const path = pathname || "/";
+	const path = pathname.replace(/\/$/, "") || "/";
+	const legacyTarget = legacyAdminDestination(path);
 	const { t, locale, setLocale, dark, setDark } = usePreferences();
 	const [menu, setMenu] = useState(false);
 	const [command, setCommand] = useState(false);
 	const [notice, setNotice] = useState<Notice>();
 	const [sessionExpired, setSessionExpired] = useState(false);
 	const signingOut = useRef(false);
+	const notificationSession = useRef(0);
+	const notificationScope = notificationSession.current;
 	const session = useQuery({
 		queryKey: ["session"],
 		queryFn: api.session,
@@ -82,6 +86,7 @@ export function App() {
 			if (!queryClient.getQueryData<Session>(["session"])?.authenticated)
 				return;
 			setSessionCsrf("");
+			notificationSession.current += 1;
 			setSessionExpired(true);
 			setNotice(undefined);
 			setMenu(false);
@@ -93,9 +98,8 @@ export function App() {
 		return () => window.removeEventListener(SESSION_EXPIRED_EVENT, expire);
 	}, [queryClient]);
 	useEffect(() => {
-		if (path === "/agents" || path === "/agents/")
-			navigate({ to: "/credentials", replace: true });
-	}, [path, navigate]);
+		if (legacyTarget) navigate({ to: legacyTarget, replace: true });
+	}, [legacyTarget, navigate]);
 	useEffect(() => {
 		const handler = (event: KeyboardEvent) => {
 			if ((event.ctrlKey || event.metaKey) && event.key === "k") {
@@ -109,6 +113,7 @@ export function App() {
 	const done = (message: string, undo?: TrashUndo) => {
 		if (
 			signingOut.current ||
+			notificationScope !== notificationSession.current ||
 			!queryClient.getQueryData<Session>(["session"])?.authenticated
 		)
 			return;
@@ -163,6 +168,7 @@ export function App() {
 				session={session.data}
 				expired={sessionExpired}
 				onSuccess={(value) => {
+					notificationSession.current += 1;
 					setSessionExpired(false);
 					setSessionCsrf(value.csrf_token || "", true);
 					queryClient.setQueryData(["session"], value);
@@ -218,9 +224,16 @@ export function App() {
 		</>
 	);
 	const props = { go, done, nonce };
-	let content: React.ReactNode;
+	let content: React.ReactNode = (
+		<Panel title="404">
+			<p>{t("app.pageNotFound")}</p>
+		</Panel>
+	);
 	const parts = path.split("/").filter(Boolean);
-	if (path === "/") content = <Dashboard {...props} />;
+	if (legacyTarget) content = <Loading />;
+	else if (!isCanonicalAdminPath(path)) {
+		// Unknown descendants must never silently open an ancestor's contents.
+	} else if (path === "/") content = <Dashboard {...props} />;
 	else if (path === "/libraries") content = <Libraries {...props} />;
 	else if (parts[0] === "libraries" && parts[1]) {
 		const libraryId = parts[1];
@@ -257,26 +270,17 @@ export function App() {
 					bookId={parts[4] === "books" ? parts[5] : undefined}
 				/>
 			);
-		else content = <LibraryOverview {...props} libraryId={libraryId} />;
+		else if (parts.length === 2)
+			content = <LibraryOverview {...props} libraryId={libraryId} />;
 	} else if (parts[0] === "search") content = <SearchWorkspace {...props} />;
 	else if (parts[0] === "tags") content = <TagsManager {...props} />;
 	else if (parts[0] === "trash") content = <TrashManager {...props} />;
-	else if (
-		parts[0] === "credentials" ||
-		path === "/agents" ||
-		path === "/agents/"
-	)
+	else if (parts[0] === "credentials")
 		content = <CredentialManager {...props} credentialId={parts[1]} />;
 	else if (parts[0] === "requests") content = <RequestsPage {...props} />;
 	else if (parts[0] === "settings") content = <SettingsPage {...props} />;
 	else if (parts[0] === "help")
 		content = <HelpPage {...props} page={parts[1]} />;
-	else
-		content = (
-			<Panel title="404">
-				<p>{t("app.pageNotFound")}</p>
-			</Panel>
-		);
 	return (
 		<>
 			<header className="topbar">
@@ -340,6 +344,7 @@ export function App() {
 						className="icon-button"
 						aria-label={t("app.signOut")}
 						onClick={async () => {
+							notificationSession.current += 1;
 							signingOut.current = true;
 							setNotice(undefined);
 							try {

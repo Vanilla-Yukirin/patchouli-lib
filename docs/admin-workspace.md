@@ -59,6 +59,27 @@ Agent 读取知识库 README 后发现该库 Skills，按准确版本清单下�
 排除项；全部模式包含以后新建的库，写入不自动包含读取。设备凭据不授予宿主机权限。
 凭据管理地址为 `/admin/credentials`，旧列表地址 `/admin/agents` 会跳转到此入口。
 
+### 旧页面链接
+
+旧 GET 页面通过 `web/src/legacy-routes.ts` 集中转到新工作区，不自动执行原页面中的
+移动、删除、恢复或授权操作。表内路径均以 `/admin` 为前缀：
+
+| 旧页面 | 新入口 |
+| --- | --- |
+| `/libraries/{l}/sections/{s}/books/{b}/pages/{p}` | `/libraries/{l}/pages/{p}` |
+| 上述文档的 `revisions/{n}`、历史文件或恢复表单 | 对应准确历史版本的只读页面 |
+| `/libraries/{l}/callers/{c}`、凭据授权表单 | `/credentials/{c}?library_id={l}` |
+| 库回收站、分区回收站与其旧详情 | 所属知识库的回收站 |
+| `/libraries/{l}/tags` | 按该库筛选的标签页 |
+| `/guide`、`/agent`、`/mcp` | `/help`、`/help/agent`、`/help/mcp` |
+| `/setup`、`/master/setup` | `/settings` |
+| `/agents`、`/onboarding-tickets` | `/credentials` |
+
+未知子路径返回 404，不落到知识库或分区概览。没有精确对应页的旧身份请求记录链接
+也返回 404，不扩大为全局请求记录。旧分页、预览选择与语言查询不改变所选历史版本。
+成功写入即使离开页面也会刷新缓存并提示，但不会将用户从新编辑区跳走；提示只在
+发起操作的同一次管理登录内有效。
+
 “生成接入小票”在凭据页打开抽屉，直接生成并复制短期一次性接入指令，不再跳转到
 第二张管理页面。Agent 兑换前确认名称、说明、期限、独立范围、本机保存位置和变量
 名。长期 Token 由本机脚本保存和验证，不进入聊天或模型上下文。结果未知时先在凭据
