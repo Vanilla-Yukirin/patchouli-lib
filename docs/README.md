@@ -60,6 +60,12 @@
 - [管理面板入口简化提案](proposals/admin-request-origin.md)
 - [Agent Token 的可选无限有效期](proposals/non-expiring-agent-tokens.md)
 - [启用管理面板时的根地址导航](proposals/root-admin-navigation.md)
+- [管理前端体验整改与重构](proposals/admin-frontend-rebuild.md)：小修与 React
+  单页应用重构并行；分篇包括[现状问题](proposals/admin-frontend-ux-audit.md)、
+  [小修清单](proposals/admin-frontend-quick-fixes.md)、
+  [技术选型](proposals/admin-frontend-stack.md)、
+  [交互规范](proposals/admin-frontend-interaction.md)和
+  [迁移计划](proposals/admin-frontend-migration.md)；提案中，尚未实现。
 
 ADR 0004 确定多文件的 SQLite 存储方向；主分支已实现统一文件集写入、逐库授权及
 受保护的 Token 再次显示。旧 Archive 与旧 Section 凭据保留兼容边界，旧搜索入口
