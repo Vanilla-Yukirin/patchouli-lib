@@ -278,6 +278,9 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
     assert tools.evaluate(
         "document.querySelector('.reading-pane .prose a')?.getAttribute('href')"
     ).startswith("/admin/api/")
+    original_attachment_href = tools.evaluate(
+        "document.querySelector('.reading-pane .prose a').getAttribute('href')"
+    )
     screenshot(tools, tmp_path / "desktop-reading.png")
     for exact_path, title in (
         (page_path + "/revisions/1", "Workspace title"),
@@ -416,7 +419,19 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
             files: options.body.getAll('files').map(file => file.name)
           });
         }
-        return originalFetch(input, options);
+        const response = originalFetch(input, options);
+        if (window.workspaceHoldEntry && String(input).includes('/texts/entry.md?')) {
+          window.workspaceHoldEntry = false;
+          return response.then(async value => {
+            const bytes = await value.arrayBuffer();
+            return new Promise(resolve => {
+              window.workspaceReleaseEntry = () => resolve(new Response(bytes, {
+                status: value.status, headers: value.headers
+              }));
+            });
+          });
+        }
+        return response;
       };
       return true;
     })()""")
@@ -436,6 +451,7 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
         "document.querySelector('.source-pane .cm-content')"
         "?.textContent.includes('Exact attachment bytes.')",
     )
+    tools.evaluate("window.workspaceHoldEntry=true; window.workspaceReleaseEntry=null; true")
     click(
         tools,
         "Array.from(document.querySelectorAll('.directory button'))"
@@ -455,6 +471,21 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
         "document.querySelector('.preview-pane .prose')"
         "?.textContent.includes('Edited in the browser.')",
     )
+    wait(tools, "typeof window.workspaceReleaseEntry === 'function'")
+    after_delayed_read = tools.command(
+        "Runtime.evaluate",
+        {
+            "expression": """(async () => {
+              window.workspaceReleaseEntry();
+              await new Promise(requestAnimationFrame);
+              await new Promise(requestAnimationFrame);
+              return document.querySelector('.preview-pane .prose').textContent;
+            })()""",
+            "awaitPromise": True,
+            "returnByValue": True,
+        },
+    )
+    assert "Edited in the browser." in after_delayed_read["result"]["value"]
     screenshot(tools, tmp_path / "desktop-editor.png")
     click(
         tools,
@@ -477,8 +508,28 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
     screenshot(tools, tmp_path / "desktop-reference-review.png")
     click(tools, button("Apply to editor"))
     wait(tools, "document.querySelector('[role=dialog]') === null")
+    click(
+        tools,
+        "Array.from(document.querySelectorAll('[role=tab]'))"
+        ".find(b=>b.textContent.trim()==='Content')",
+    )
+    wait(tools, "document.querySelector('.preview-pane .prose a') !== null")
+    assert (
+        tools.evaluate("document.querySelector('.preview-pane .prose a').getAttribute('href')")
+        == original_attachment_href
+    )
+    assert (
+        tools.evaluate("document.querySelector('.source-pane .cm-content').textContent").find(
+            "renamed-note.txt"
+        )
+        >= 0
+    )
     click(tools, button("Save"))
     wait(tools, "document.querySelector('[role=status]')?.textContent.includes('Saved')")
+    wait(
+        tools,
+        "document.querySelector('.reading-pane .prose h1')?.textContent === 'Updated workspace'",
+    )
     with browser.engine.connect() as connection:
         page = ContentRepository(connection).get_page(browser.library, browser.page)
         assert page is not None and page.current_revision_number == 2
@@ -613,6 +664,11 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
         ".find(b=>b.textContent.trim()==='Files')",
     )
     tools.command("Page.setInterceptFileChooserDialog", {"enabled": True})
+    replaced_entry_href = tools.evaluate(
+        "Array.from(document.querySelectorAll('.file-row'))"
+        ".find(r=>r.querySelector('strong')?.textContent==='entry.md')"
+        ".querySelector('a[download]').getAttribute('href')"
+    )
     click(
         tools,
         "Array.from(Array.from(document.querySelectorAll('.file-row'))"
@@ -638,6 +694,10 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
     wait(
         tools,
         "document.querySelector('.reading-pane')?.textContent.includes('cannot be previewed')",
+    )
+    assert not tools.evaluate(
+        "Array.from(document.querySelectorAll('.reading-pane [href]'))"
+        f".some(element=>element.getAttribute('href')==={json.dumps(replaced_entry_href)})"
     )
     assert tools.evaluate("document.querySelector('.source-pane') === null")
     assert tools.evaluate(f"({button('Set as entry')}) === undefined")

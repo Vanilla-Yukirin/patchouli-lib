@@ -243,7 +243,11 @@ function ResourceWorkspace(
 	});
 	const active = files.find((file) => file.path === selected && !file.removed);
 	const text = useQuery({
-		queryKey: ["file-text", version?.revision_id, selected],
+		queryKey: [
+			"file-text",
+			active?.entry?.content_href || active?.entry?.download_href,
+			selected,
+		],
 		enabled: Boolean(
 			active?.entry &&
 				!active.upload &&
@@ -281,7 +285,11 @@ function ResourceWorkspace(
 				const source = await readText(file.entry);
 				setFiles((previous) =>
 					previous.map((item) =>
-						item.path === path && !item.upload && item.entry === file.entry
+						item.path === path &&
+						!item.upload &&
+						!item.changed &&
+						item.source === undefined &&
+						item.entry === file.entry
 							? { ...item, source }
 							: item,
 					),
@@ -835,7 +843,12 @@ function ResourceWorkspace(
 												active.path,
 											)}
 											files={files.flatMap((file) =>
-												file.entry ? [file.entry] : [],
+												file.entry &&
+												!file.removed &&
+												!file.upload &&
+												!file.changed
+													? [{ ...file.entry, path: file.path }]
+													: [],
 											)}
 										/>
 									) : source !== undefined ? (

@@ -149,19 +149,45 @@ def browser(
                     tampered.execute(receipt_trigger)
                     tampered.commit()
         validate_database(destination)
-        if tampered.execute("SELECT 1 FROM revision_presentations LIMIT 1").fetchone():
-            trigger_name = "revision_presentations_no_update"
-            statement = "UPDATE revision_presentations SET primary_file='missing.md'"
-            parameters: tuple[object, ...] = ()
+        if presentation := tampered.execute(
+            "SELECT rowid,primary_file,display_title FROM revision_presentations LIMIT 1"
+        ).fetchone():
+            original_sql = tampered.execute(
+                "SELECT sql FROM sqlite_schema WHERE type='trigger' "
+                "AND name='revision_presentations_no_update'"
+            ).fetchone()[0]
+            for primary, title in (
+                (presentation[1], presentation[2] + " altered"),
+                (None, presentation[2] + " altered"),
+                ("missing.md", presentation[2]),
+            ):
+                tampered.execute("DROP TRIGGER revision_presentations_no_update")
+                tampered.execute(
+                    "UPDATE revision_presentations SET primary_file=?,display_title=? "
+                    "WHERE rowid=?",
+                    (primary, title, presentation[0]),
+                )
+                tampered.execute(original_sql)
+                tampered.commit()
+                try:
+                    with pytest.raises(BackupDatabaseError):
+                        validate_database(destination)
+                finally:
+                    tampered.execute("DROP TRIGGER revision_presentations_no_update")
+                    tampered.execute(
+                        "UPDATE revision_presentations SET primary_file=?,display_title=? "
+                        "WHERE rowid=?",
+                        (presentation[1], presentation[2], presentation[0]),
+                    )
+                    tampered.execute(original_sql)
+                    tampered.commit()
+            validate_database(destination)
         elif row := tampered.execute(
             "SELECT rowid,content_bytes FROM library_skill_files LIMIT 1"
         ).fetchone():
             trigger_name = "library_skill_files_no_update"
             statement = "UPDATE library_skill_files SET content_bytes=? WHERE rowid=?"
-            parameters = (b"X" + row[1][1:], row[0])
-        else:
-            trigger_name = None
-        if trigger_name is not None:
+            parameters: tuple[object, ...] = (b"X" + row[1][1:], row[0])
             original_sql = tampered.execute(
                 "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=?", (trigger_name,)
             ).fetchone()[0]

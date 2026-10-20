@@ -13,7 +13,7 @@ from patchouli_lib.content.page_membership_history import (
     PageStateTimeline,
     load_page_state_timeline,
 )
-from patchouli_lib.content.presentation import preview_text
+from patchouli_lib.content.presentation import extract_title, preview_text
 from patchouli_lib.content.service import page_current_etag
 from patchouli_lib.library_skills.service import build_skill_snapshot
 
@@ -142,6 +142,7 @@ def validate_workspace_graph(connection: sqlite3.Connection, *, skills: bool) ->
     ):
         if not isinstance(title, str) or not title.strip() or "\x00" in title:
             raise BackupDatabaseError
+        content = None
         if primary is not None:
             row = connection.execute(
                 "SELECT content_bytes FROM revision_files WHERE library_id=? AND page_uid=? "
@@ -150,6 +151,11 @@ def validate_workspace_graph(connection: sqlite3.Connection, *, skills: bool) ->
             ).fetchone()
             if row is None or preview_text(row[0]) is None:
                 raise BackupDatabaseError
+            content = row[0]
+        # This format freezes the v1 write-time derivation. Future parser
+        # changes need versioned validation, never rewritten historical titles.
+        if title != extract_title(primary, content):
+            raise BackupDatabaseError
     if not skills:
         return
     for library_id, skill_id, revision_id, count, size, digest in connection.execute(
