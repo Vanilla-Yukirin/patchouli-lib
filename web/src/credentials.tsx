@@ -281,6 +281,7 @@ export function CredentialManager(
 						type="button"
 						onClick={() => {
 							setScope(emptyScope);
+							setUnlimited(false);
 							setCreate(true);
 						}}
 					>

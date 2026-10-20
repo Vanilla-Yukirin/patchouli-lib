@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import vectors from "../../tests/vectors/revision-titles.json";
 import { renderMarkdown, titleFromMarkdown } from "./markdown";
-import { applyReferenceEdits, referencesForRename } from "./references";
+import {
+	applyReferenceEdits,
+	referencesForRename,
+	resolveLocalTarget,
+} from "./references";
 
 describe("shared write-time title contract", () => {
 	it("matches the same vectors as the Python writer", () => {
@@ -38,4 +42,28 @@ it("applies only selected Markdown targets and rejects stale offsets", () => {
 			edits,
 		),
 	).toThrow("reference_suggestions_stale");
+	const nested = {
+		"docs/note.md": "![image](../old.png?download=1%202#preview%20part)\n",
+	};
+	const renamed = referencesForRename(
+		nested,
+		"old.png",
+		"assets/image#2?100% ready.(x).png",
+	);
+	expect(renamed).toHaveLength(1);
+	expect(renamed[0].after).toBe(
+		"../assets/image%232%3F100%25%20ready.%28x%29.png?download=1%202#preview%20part",
+	);
+	expect(applyReferenceEdits(nested, renamed)["docs/note.md"]).toBe(
+		"![image](../assets/image%232%3F100%25%20ready.%28x%29.png?download=1%202#preview%20part)\n",
+	);
+	expect(resolveLocalTarget("docs/note.md", renamed[0].after)).toEqual({
+		path: "assets/image#2?100% ready.(x).png",
+		suffix: "?download=1%202#preview%20part",
+	});
+	expect(resolveLocalTarget("docs/note.md", "/absolute.png")).toBeNull();
+	expect(resolveLocalTarget("docs/note.md", "../../outside.png")).toBeNull();
+	expect(
+		resolveLocalTarget("docs/note.md", "https://example.invalid/old.png"),
+	).toBeNull();
 });

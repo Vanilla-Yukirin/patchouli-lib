@@ -99,9 +99,15 @@ export function referencesForRename(
 					column: start - prefix.lastIndexOf("\n"),
 					before: target,
 					after:
-						encodeURI(
-							relativeTarget(file === oldName ? newName : file, newName),
-						) + resolved.suffix,
+						relativeTarget(file === oldName ? newName : file, newName)
+							.split("/")
+							.map((part) =>
+								encodeURIComponent(part).replace(
+									/[!'()*]/g,
+									(char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+								),
+							)
+							.join("/") + resolved.suffix,
 					source,
 					selected: true,
 				});

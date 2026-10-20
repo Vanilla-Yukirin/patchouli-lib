@@ -1083,7 +1083,10 @@ function ResourceWorkspace(
 									<input
 										type="datetime-local"
 										value={occurrence}
-										onChange={(event) => setOccurrence(event.target.value)}
+										onChange={(event) => {
+											setOccurrence(event.target.value);
+											setDirty(true);
+										}}
 									/>
 								</label>
 							)}
