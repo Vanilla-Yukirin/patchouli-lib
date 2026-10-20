@@ -518,8 +518,20 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
             edits: metadata.edits,
             files: options.body.getAll('files').map(file => file.name)
           });
+          window.workspaceRequest = {
+            target: String(input), metadata,
+            key: new Headers(options.headers).get('Idempotency-Key')
+          };
         }
         const response = originalFetch(input, options);
+        if (window.workspaceLoseSave && options?.method === 'PUT' &&
+            options.body instanceof FormData) {
+          window.workspaceLoseSave = false;
+          return response.then(async value => {
+            await value.arrayBuffer();
+            throw new TypeError('Synthetic save response lost');
+          });
+        }
         if (window.workspaceHoldEntry && String(input).includes('/texts/entry.md?')) {
           window.workspaceHoldEntry = false;
           return response.then(async value => {
@@ -624,23 +636,112 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
         )
         >= 0
     )
+    # Failed durable storage must stop before HTTP, retaining the unused key.
+    tools.evaluate("""(() => {
+      window.workspaceStorageKeys = [];
+      window.workspaceBlockStorage = true;
+      const original = Storage.prototype.setItem;
+      Storage.prototype.setItem = function(key, value) {
+        if (key.startsWith('patchouli.pending.')) {
+          window.workspaceStorageKeys.push(JSON.parse(value).key);
+          if (window.workspaceBlockStorage) {
+            throw new DOMException('Synthetic quota', 'QuotaExceededError');
+          }
+        }
+        return original.call(this, key, value);
+      };
+      return true;
+    })()""")
     click(tools, button("Save"))
-    wait(tools, "document.querySelector('[role=status]')?.textContent.includes('Saved')")
     wait(
         tools,
-        "document.querySelector('.reading-pane .prose h1')?.textContent === 'Updated workspace'",
+        "document.querySelector('[role=alert]')?.textContent.includes('This request was not sent')",
     )
+    assert tools.evaluate("window.workspaceEdits") == []
+    with browser.engine.connect() as connection:
+        unsent = ContentRepository(connection).get_page(browser.library, browser.page)
+        assert unsent is not None and unsent.current_revision_number == 1
+    tools.evaluate("window.workspaceBlockStorage=false; window.workspaceLoseSave=true; true")
+    click(tools, button("Save"))
+    wait(
+        tools,
+        "document.querySelector('[role=alert]')?.textContent"
+        ".includes('Synthetic save response lost')",
+    )
+    original_request = tools.evaluate("window.workspaceRequest")
+    assert tools.evaluate("window.workspaceStorageKeys") == [original_request["key"]] * 2
+    assert tools.evaluate("window.workspaceEdits") == [{"edits": [], "files": ["entry.md"]}]
     with browser.engine.connect() as connection:
         page = ContentRepository(connection).get_page(browser.library, browser.page)
         assert page is not None and page.current_revision_number == 2
         manifest = ContentRepository(connection).get_current_file_manifest(page)
         files = {entry.name: entry.content for entry in manifest.files}
+        audit_count = connection.exec_driver_sql(
+            "SELECT count(*) FROM admin_master_audit_events"
+        ).scalar_one()
     assert files["renamed-note.txt"] == ATTACHMENT
     assert b"[Attachment](renamed-note.txt)" in files["entry.md"]
     assert b"Edited in the browser." in files["entry.md"]
     assert "note.txt" not in files
-    assert tools.evaluate("window.workspaceEdits") == [{"edits": [], "files": ["entry.md"]}]
-    tools.command("Page.navigate", {"url": browser.origin + page_path})
+    original_upload = tmp_path / "entry.md"
+    original_upload.write_bytes(files["entry.md"])
+    # Explicitly discard this synthetic in-memory draft for the refresh exercise.
+    # This does not disable the application's leave guard in production.
+    tools.command(
+        "Runtime.evaluate",
+        {
+            "expression": """(() => {
+              for (const entry of getEventListeners(window).beforeunload || []) {
+                window.removeEventListener('beforeunload', entry.listener, entry.useCapture);
+              }
+              return true;
+            })()""",
+            "includeCommandLineAPI": True,
+            "returnByValue": True,
+        },
+    )
+    tools.command("Page.reload")
+    wait(tools, "document.querySelector('input[data-retry-upload=\"entry.md\"]') !== null")
+    tools.evaluate("""(() => {
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = (input, options) => {
+        if (options?.method === 'PUT' && options.body instanceof FormData) {
+          window.workspaceReplay = {
+            target: String(input), metadata: JSON.parse(options.body.get('metadata')),
+            key: new Headers(options.headers).get('Idempotency-Key')
+          };
+        }
+        return originalFetch(input, options);
+      };
+      return true;
+    })()""")
+    tools.command("Page.setInterceptFileChooserDialog", {"enabled": True})
+    document = tools.command("DOM.getDocument")
+    node = tools.command(
+        "DOM.querySelector",
+        {
+            "nodeId": document["root"]["nodeId"],
+            "selector": 'input[data-retry-upload="entry.md"]',
+        },
+    )
+    tools.command(
+        "DOM.setFileInputFiles", {"nodeId": node["nodeId"], "files": [str(original_upload)]}
+    )
+    click(tools, button("Retry original save"))
+    wait(
+        tools,
+        "document.querySelector('[role=status]')?.textContent.includes('Original save confirmed')",
+    )
+    assert tools.evaluate("window.workspaceReplay") == original_request
+    with browser.engine.connect() as connection:
+        replayed = ContentRepository(connection).get_page(browser.library, browser.page)
+        assert replayed is not None and replayed.current_revision_number == 2
+        assert (
+            connection.exec_driver_sql(
+                "SELECT count(*) FROM admin_master_audit_events"
+            ).scalar_one()
+            == audit_count
+        )
     wait(
         tools,
         "document.querySelector('.reading-pane .prose h1')?.textContent === 'Updated workspace'",

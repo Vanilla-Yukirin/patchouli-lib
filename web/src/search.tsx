@@ -28,7 +28,8 @@ export function SearchWorkspace(props: PageProps & { libraryId?: string }) {
 	const search = useRouterState({
 		select: (state) => state.location.searchStr,
 	});
-	const initialText = new URLSearchParams(search).get("q") || "";
+	const initialValue = new URLSearchParams(search).get("q") || "";
+	const initialText = initialValue.trim() ? initialValue : "";
 	const [text, setText] = useState(initialText);
 	const [submitted, setSubmitted] = useState<SearchInput | null>(
 		initialText ? { keywords: initialText.split(/\s+/).filter(Boolean) } : null,
@@ -44,11 +45,14 @@ export function SearchWorkspace(props: PageProps & { libraryId?: string }) {
 	const tags = useResource<{ items: Tag[] }>("tags", advanced);
 	useEffect(() => {
 		const value = new URLSearchParams(search).get("q");
-		if (value !== null) {
+		if (value?.trim()) {
 			setText(value);
 			setSubmitted({ keywords: value.split(/\s+/).filter(Boolean) });
-			setCursor("");
+		} else {
+			setText("");
+			setSubmitted(null);
 		}
+		setCursor("");
 	}, [search]);
 	useEffect(() => {
 		setSelectedLibraries([]);

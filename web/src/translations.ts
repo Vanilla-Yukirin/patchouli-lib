@@ -289,6 +289,19 @@ export const translations = {
 		"workspace.haveYouCheckedTheCurrentRevisionAnd":
 			"已检查当前版本并确认上一次结果？",
 		"workspace.checkedClearReminder": "已核对，清除提醒",
+		"workspace.retryDetailsUnavailable":
+			"原重试记录不完整或无法核验。请先核对上次结果，再明确放弃原重试；不会另建操作。",
+		"workspace.retryStorageUnavailable":
+			"无法可靠保存重试记录，本次请求未发送。请恢复本标签页的会话存储后重试。",
+		"workspace.retryClearFailed":
+			"无法清除原重试记录，仍保留原操作。请恢复会话存储后再试。",
+		"workspace.reselectOriginalUpload":
+			"请为每个原上传项重新选择大小和 SHA-256 完全相同的文件。",
+		"workspace.retryOriginalInstructions":
+			"仅重试原操作：目标和元数据已冻结。需要的原上传文件列在下方；正文不在浏览器存储中。若无法找回原字节，请先核对结果，再放弃原重试。",
+		"workspace.retryOriginalSave": "重试原保存",
+		"workspace.retryConfirmed":
+			"原保存结果已确认，以下为该操作的准确版本，不保证仍是当前版本：",
 		"workspace.skillName": "Skill 名称",
 		"workspace.purpose": "用途说明",
 		"workspace.history": "历史",
@@ -615,6 +628,19 @@ export const translations = {
 		"workspace.haveYouCheckedTheCurrentRevisionAnd":
 			"Have you checked the current revision and confirmed the previous result?",
 		"workspace.checkedClearReminder": "Checked; clear reminder",
+		"workspace.retryDetailsUnavailable":
+			"The original retry record is incomplete or cannot be verified. Check the previous outcome before explicitly abandoning it; no new operation will be sent.",
+		"workspace.retryStorageUnavailable":
+			"Retry details could not be stored reliably. This request was not sent. Restore this tab's session storage before retrying.",
+		"workspace.retryClearFailed":
+			"The original retry record could not be cleared and remains locked. Restore session storage and try again.",
+		"workspace.reselectOriginalUpload":
+			"Reselect every original upload with exactly matching size and SHA-256.",
+		"workspace.retryOriginalInstructions":
+			"Retry only the original operation: its target and metadata are frozen. Reselect the listed uploads; source bytes are not stored in the browser. If the original bytes cannot be recovered, check the outcome before abandoning the retry.",
+		"workspace.retryOriginalSave": "Retry original save",
+		"workspace.retryConfirmed":
+			"Original save confirmed; this is its exact revision and may no longer be current:",
 		"workspace.skillName": "Skill name",
 		"workspace.purpose": "Purpose",
 		"workspace.history": "History",

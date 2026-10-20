@@ -37,6 +37,42 @@ type DraftFile = {
 	upload?: File;
 	removed?: boolean;
 };
+type SaveUpload = { name: string; size: number; sha256: string };
+type SaveReceipt = {
+	version: 1;
+	key: string;
+	target: string;
+	method: "POST" | "PUT";
+	metadata: Record<string, unknown>;
+	uploads: SaveUpload[];
+	signature: string;
+};
+function isSaveReceipt(value: unknown): value is SaveReceipt {
+	if (!value || typeof value !== "object") return false;
+	const receipt = value as Partial<SaveReceipt>;
+	return Boolean(
+		receipt.version === 1 &&
+			typeof receipt.key === "string" &&
+			/^[a-f0-9]{32}$/.test(receipt.key) &&
+			typeof receipt.target === "string" &&
+			["POST", "PUT"].includes(receipt.method || "") &&
+			receipt.metadata &&
+			typeof receipt.metadata === "object" &&
+			!Array.isArray(receipt.metadata) &&
+			typeof receipt.signature === "string" &&
+			/^[a-f0-9]{64}$/.test(receipt.signature) &&
+			Array.isArray(receipt.uploads) &&
+			receipt.uploads.every(
+				(file) =>
+					file &&
+					typeof file.name === "string" &&
+					Number.isSafeInteger(file.size) &&
+					file.size >= 0 &&
+					typeof file.sha256 === "string" &&
+					/^[a-f0-9]{64}$/.test(file.sha256),
+			),
+	);
+}
 function editableText(file: DraftFile | undefined): boolean {
 	if (!file) return false;
 	return file.upload
@@ -179,21 +215,33 @@ function ResourceWorkspace(
 	const [saving, setSaving] = useState(false);
 	const [unconfirmed, setUnconfirmed] = useState(false);
 	const receiptKey = `patchouli.pending.${resource}:revision:${props.revision ?? "current"}${creating && props.kind === "pages" ? `:book:${props.targetBookId ?? "missing"}` : ""}`;
-	const [previousOperation, setPreviousOperation] = useState<{
-		key: string;
-		signature: string;
-		base_etag?: string;
-		primary_file: string | null;
-		occurred_at?: string | null;
-	} | null>(() => {
+	const [previousOperation, setPreviousOperation] = useState<
+		SaveReceipt | "unreadable" | null
+	>(() => {
 		if (historical) return null;
 		try {
-			return JSON.parse(sessionStorage.getItem(receiptKey) || "null");
+			const raw = sessionStorage.getItem(receiptKey);
+			if (raw === null) return null;
+			const value: unknown = JSON.parse(raw);
+			return isSaveReceipt(value) &&
+				value.target === writeTarget &&
+				value.method === (creating ? "POST" : "PUT")
+				? value
+				: "unreadable";
 		} catch {
-			return null;
+			return "unreadable";
 		}
 	});
-	const pendingOperation = useRef<{ key: string; body: FormData } | null>(null);
+	const originalReceipt =
+		previousOperation && previousOperation !== "unreadable"
+			? previousOperation
+			: null;
+	const pendingOperation = useRef<{
+		receipt: SaveReceipt;
+		body: FormData;
+	} | null>(null);
+	const unusedKey = useRef<string | null>(null);
+	const [retryUploads, setRetryUploads] = useState<Record<string, File>>({});
 	const [error, setError] = useState<unknown>();
 	const [suggestions, setSuggestions] = useState<ReferenceEdit[] | null>(null);
 	const [rename, setRename] = useState<{ from: string; to: string } | null>(
@@ -262,7 +310,7 @@ function ResourceWorkspace(
 	});
 	const source = active?.upload ? active.source : (active?.source ?? text.data);
 	const update = (value: string) => {
-		if (!edit || !editableText(active)) return;
+		if (!edit || previousOperation || !editableText(active)) return;
 		setFiles((previous) =>
 			previous.map((file) =>
 				file.path === selected
@@ -300,7 +348,7 @@ function ResourceWorkspace(
 		}
 	};
 	const addUploads = async (uploads: FileList | null) => {
-		if (!edit || saving || unconfirmed || !uploads) return;
+		if (!edit || saving || unconfirmed || previousOperation || !uploads) return;
 		const added: DraftFile[] = [];
 		for (const file of Array.from(uploads)) {
 			if (file.size > 16 * 1024 * 1024) {
@@ -329,17 +377,20 @@ function ResourceWorkspace(
 		setDirty(true);
 	};
 	const save = async () => {
-		if (!edit || historical || saving) return;
+		if ((!edit && !previousOperation) || historical || saving) return;
 		setSaving(true);
 		setError(undefined);
+		let sent = false;
+		const retrying = Boolean(previousOperation || pendingOperation.current);
 		try {
+			if (previousOperation === "unreadable")
+				throw new Error(t("workspace.retryDetailsUnavailable"));
 			if (creating && props.kind === "pages" && !props.targetBookId)
 				throw new Error(t("page-properties.chooseABook"));
-			const body = new FormData();
 			const kept = files.filter((file) => !file.removed);
-			const metadata: { [key: string]: unknown } = {
+			const metadata: Record<string, unknown> = originalReceipt?.metadata || {
 				primary_file: primary,
-				base_etag: previousOperation?.base_etag ?? data.data?.current_etag,
+				base_etag: data.data?.current_etag,
 				edits: [],
 				remove: files
 					.filter((file) => file.removed && file.entry)
@@ -348,31 +399,36 @@ function ResourceWorkspace(
 					.filter((file) => file.entry && file.path !== file.entry.path)
 					.map((file) => ({ from: file.entry?.path, to: file.path })),
 			};
-			if (creating && props.kind === "pages") {
+			if (!originalReceipt && creating && props.kind === "pages") {
 				metadata.occurred_at = occurrence
 					? new Date(occurrence).toISOString()
 					: null;
 			}
-			if (props.kind === "skills")
+			if (!originalReceipt && props.kind === "skills")
 				metadata.name =
 					skillName ||
 					titleFromMarkdown(
 						files.find((file) => file.path === "SKILL.md")?.source || "",
 					) ||
 					"Skill";
-			if (props.kind === "skills") {
+			if (!originalReceipt && props.kind === "skills") {
 				delete metadata.primary_file;
 				metadata.description = skillDescription;
 			}
-			if (previousOperation) {
-				metadata.primary_file = previousOperation.primary_file;
-				if (previousOperation.occurred_at !== undefined)
-					metadata.occurred_at = previousOperation.occurred_at;
-				if (props.kind === "skills") delete metadata.primary_file;
-			}
-			body.append("metadata", JSON.stringify(metadata));
 			const uploads: { path: string; body: Blob }[] = [];
-			for (const file of kept) {
+			if (originalReceipt && !pendingOperation.current) {
+				for (const file of originalReceipt.uploads) {
+					const upload = retryUploads[file.name];
+					if (
+						!upload ||
+						upload.size !== file.size ||
+						upload.size > 16 * 1024 * 1024
+					)
+						throw new Error(t("workspace.reselectOriginalUpload"));
+					uploads.push({ path: file.name, body: upload });
+				}
+			}
+			for (const file of originalReceipt ? [] : kept) {
 				if (file.source !== undefined && file.changed) {
 					const bytes = new TextEncoder().encode(file.source);
 					if (bytes.length > 16 * 1024 * 1024)
@@ -391,61 +447,80 @@ function ResourceWorkspace(
 					uploads.push({ path: file.path, body: file.upload });
 				}
 			}
-			for (const file of uploads) body.append("files", file.body, file.path);
+			uploads.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 			const hash = async (bytes: BufferSource) =>
 				Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
 					.map((byte) => byte.toString(16).padStart(2, "0"))
 					.join("");
-			const identity = JSON.stringify({
-				target: writeTarget,
+			const descriptors =
+				pendingOperation.current?.receipt.uploads ||
+				(await Promise.all(
+					uploads.map(async (file) => ({
+						name: file.path,
+						size: file.body.size,
+						sha256: await hash(await file.body.arrayBuffer()),
+					})),
+				));
+			if (
+				originalReceipt &&
+				JSON.stringify(descriptors) !== JSON.stringify(originalReceipt.uploads)
+			)
+				throw new Error(t("workspace.reselectOriginalUpload"));
+			const identity = {
+				target: originalReceipt?.target || writeTarget,
+				method:
+					originalReceipt?.method ||
+					((creating ? "POST" : "PUT") as "POST" | "PUT"),
 				metadata,
-				uploads: await Promise.all(
-					uploads.map(async (file) => [
-						file.path,
-						await hash(await file.body.arrayBuffer()),
-					]),
-				),
-			});
-			const signature = await hash(new TextEncoder().encode(identity));
-			if (previousOperation && signature !== previousOperation.signature)
-				throw new Error(
-					t("workspace.reselectTheOriginalFilesAndContentBefore"),
-				);
+				uploads: descriptors,
+			};
+			const signature = await hash(
+				new TextEncoder().encode(JSON.stringify(identity)),
+			);
+			if (originalReceipt && signature !== originalReceipt.signature)
+				throw new Error(t("workspace.retryDetailsUnavailable"));
+			const key =
+				originalReceipt?.key ||
+				unusedKey.current ||
+				crypto.randomUUID().replaceAll("-", "");
+			if (!originalReceipt) unusedKey.current = key;
+			const receipt: SaveReceipt = originalReceipt || {
+				version: 1,
+				key,
+				...identity,
+				signature,
+			};
+			const body = pendingOperation.current?.body || new FormData();
 			if (!pendingOperation.current) {
-				pendingOperation.current = {
-					key:
-						previousOperation?.key ?? crypto.randomUUID().replaceAll("-", ""),
-					body,
-				};
-				try {
-					sessionStorage.setItem(
-						receiptKey,
-						JSON.stringify({
-							key: pendingOperation.current.key,
-							signature,
-							base_etag: metadata.base_etag,
-							primary_file: primary,
-							...(metadata.occurred_at !== undefined
-								? { occurred_at: metadata.occurred_at }
-								: {}),
-						}),
-					);
-				} catch {}
+				body.append("metadata", JSON.stringify(receipt.metadata));
+				for (const file of uploads) body.append("files", file.body, file.path);
 			}
+			try {
+				const stored = JSON.stringify(receipt);
+				sessionStorage.setItem(receiptKey, stored);
+				if (sessionStorage.getItem(receiptKey) !== stored) throw new Error();
+			} catch {
+				throw new Error(t("workspace.retryStorageUnavailable"));
+			}
+			setPreviousOperation(receipt);
+			pendingOperation.current = { receipt, body };
+			sent = true;
 			const result = await request<{
 				page_id?: string;
-				skill?: { id: string };
+				skill?: { id: string; revision_id: string; revision_number: number };
 				id?: string;
 				revision_id: string;
 				revision_number: number;
 				changed: boolean;
 				overwritten_newer_revision?: boolean;
-			}>(writeTarget, {
-				method: creating ? "POST" : "PUT",
-				body: pendingOperation.current.body,
-				headers: { "Idempotency-Key": pendingOperation.current.key },
+			}>(receipt.target, {
+				method: receipt.method,
+				body,
+				headers: { "Idempotency-Key": receipt.key },
 			});
 			pendingOperation.current = null;
+			unusedKey.current = null;
+			setRetryUploads({});
 			setPreviousOperation(null);
 			try {
 				sessionStorage.removeItem(receiptKey);
@@ -454,31 +529,38 @@ function ResourceWorkspace(
 			setDirty(false);
 			leaveAllowed.current = true;
 			setEdit(false);
-			setSavedNotice(
-				result.overwritten_newer_revision
+			const savedRevision = result.skill || result;
+			const message = retrying
+				? `${t("workspace.retryConfirmed")} v${savedRevision.revision_number} · ${savedRevision.revision_id}`
+				: result.overwritten_newer_revision
 					? t("workspace.savedTheInterveningVersionRemainsInHistory")
 					: result.changed
 						? t("pages.saved")
-						: t("workspace.identicalContentNoNewRevision"),
-			);
+						: t("workspace.identicalContentNoNewRevision");
+			setSavedNotice(message);
 			client.invalidateQueries({ queryKey: ["resource"] });
-			if (creating)
+			if (retrying && data.error) {
+				props.done(message);
+				props.go(`/libraries/${props.libraryId}`);
+			} else if (creating)
 				props.go(`/${base}/${result.page_id || result.skill?.id || result.id}`);
 		} catch (error) {
 			setError(error);
 			if (
+				!retrying &&
 				error instanceof Error &&
 				"status" in error &&
 				Number(error.status) !== 401 &&
 				Number(error.status) < 500
 			) {
 				pendingOperation.current = null;
+				unusedKey.current = null;
 				setPreviousOperation(null);
 				try {
 					sessionStorage.removeItem(receiptKey);
 				} catch {}
 				setUnconfirmed(false);
-			} else if (pendingOperation.current) setUnconfirmed(true);
+			} else if (sent) setUnconfirmed(true);
 		} finally {
 			setSaving(false);
 		}
@@ -542,9 +624,74 @@ function ResourceWorkspace(
 			setError(error);
 		}
 	};
+	const retryPanel = previousOperation && (
+		<div className="alert" role="status">
+			<p>
+				{previousOperation === "unreadable"
+					? t("workspace.retryDetailsUnavailable")
+					: t("workspace.retryOriginalInstructions")}
+			</p>
+			{originalReceipt &&
+				!pendingOperation.current &&
+				originalReceipt.uploads.map((file) => (
+					<label key={file.name}>
+						{file.name} · {file.size} bytes
+						<input
+							type="file"
+							data-retry-upload={file.name}
+							disabled={saving}
+							onChange={(event) => {
+								const upload = event.target.files?.[0];
+								if (upload)
+									setRetryUploads((previous) => ({
+										...previous,
+										[file.name]: upload,
+									}));
+							}}
+						/>
+					</label>
+				))}
+			<button
+				type="button"
+				disabled={saving || !originalReceipt}
+				onClick={save}
+			>
+				{t("workspace.retryOriginalSave")}
+			</button>
+			<button
+				type="button"
+				className="secondary"
+				disabled={saving}
+				onClick={() => {
+					if (!confirm(t("workspace.haveYouCheckedTheCurrentRevisionAnd")))
+						return;
+					try {
+						sessionStorage.removeItem(receiptKey);
+						if (sessionStorage.getItem(receiptKey) !== null) throw new Error();
+					} catch {
+						setError(new Error(t("workspace.retryClearFailed")));
+						return;
+					}
+					pendingOperation.current = null;
+					unusedKey.current = null;
+					setPreviousOperation(null);
+					setRetryUploads({});
+					setUnconfirmed(false);
+				}}
+			>
+				{t("workspace.checkedClearReminder")}
+			</button>
+		</div>
+	);
 	if (!creating && data.isPending) return <Loading />;
 	if (!creating && (data.error || !data.data))
-		return <ErrorNotice error={data.error} />;
+		return (
+			<>
+				<ErrorNotice error={data.error} />
+				{Boolean(error) && <ErrorNotice error={error} />}
+				{retryPanel}
+			</>
+		);
 	const primarySource =
 		files.find((file) => file.path === primary)?.source ??
 		(selected === primary ? source : undefined);
@@ -642,7 +789,7 @@ function ResourceWorkspace(
 						<>
 							<button
 								type="button"
-								disabled={saving || unconfirmed}
+								disabled={saving || unconfirmed || Boolean(previousOperation)}
 								className="secondary"
 								onClick={() => {
 									if (!dirty || confirm(t("workspace.discardUnsavedChanges"))) {
@@ -680,6 +827,7 @@ function ResourceWorkspace(
 					) : !historical ? (
 						<button
 							type="button"
+							disabled={Boolean(previousOperation)}
 							onClick={() => {
 								leaveAllowed.current = false;
 								setEdit(true);
@@ -705,37 +853,13 @@ function ResourceWorkspace(
 				</p>
 			)}
 			{Boolean(error) && <ErrorNotice error={error} />}
-			{(unconfirmed || previousOperation) && (
-				<div className="alert" role="status">
-					{unconfirmed
-						? t("workspace.saveOutcomeIsUnknownPressSaveTo")
-						: t("workspace.aSaveWasPendingBeforeRefreshReselect")}{" "}
-					{!unconfirmed && (
-						<button
-							type="button"
-							className="secondary"
-							onClick={() => {
-								if (
-									confirm(t("workspace.haveYouCheckedTheCurrentRevisionAnd"))
-								) {
-									setPreviousOperation(null);
-									try {
-										sessionStorage.removeItem(receiptKey);
-									} catch {}
-								}
-							}}
-						>
-							{t("workspace.checkedClearReminder")}
-						</button>
-					)}
-				</div>
-			)}
+			{retryPanel}
 			{edit && props.kind === "skills" && (
 				<label>
 					{t("workspace.skillName")}
 					<input
 						value={skillName}
-						disabled={saving || unconfirmed}
+						disabled={saving || unconfirmed || Boolean(previousOperation)}
 						onChange={(event) => {
 							setSkillName(event.target.value);
 							setDirty(true);
@@ -748,7 +872,7 @@ function ResourceWorkspace(
 				<label>
 					{t("workspace.purpose")}
 					<textarea
-						disabled={saving || unconfirmed}
+						disabled={saving || unconfirmed || Boolean(previousOperation)}
 						value={skillDescription}
 						onChange={(event) => {
 							setSkillDescription(event.target.value);
@@ -758,7 +882,10 @@ function ResourceWorkspace(
 					/>
 				</label>
 			)}
-			<fieldset disabled={saving || unconfirmed} className="workspace-controls">
+			<fieldset
+				disabled={saving || unconfirmed || Boolean(previousOperation)}
+				className="workspace-controls"
+			>
 				<Tabs.Root defaultValue="content" className="document-tabs">
 					<Tabs.List className="tab-list">
 						{[
@@ -837,7 +964,12 @@ function ResourceWorkspace(
 											key={active.path}
 											value={source || ""}
 											sourceFile={active.path}
-											readOnly={saving || unconfirmed || source === undefined}
+											readOnly={
+												saving ||
+												unconfirmed ||
+												Boolean(previousOperation) ||
+												source === undefined
+											}
 											onChange={update}
 											nonce={props.nonce}
 											preview={/\.(?:md|markdown|mdown|mkd)$/i.test(
@@ -912,7 +1044,7 @@ function ResourceWorkspace(
 							ref={replaceInput}
 							className="visually-hidden"
 							onChange={async (event) => {
-								if (!edit || saving || unconfirmed) return;
+								if (!edit || saving || unconfirmed || previousOperation) return;
 								const upload = event.target.files?.[0];
 								if (!upload) return;
 								if (upload.size > 16 * 1024 * 1024) {
