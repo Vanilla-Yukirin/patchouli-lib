@@ -7,7 +7,7 @@ import {
 	Plus,
 	Search,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { request, type Structure, setSessionCsrf } from "./api";
 import type { PageProps } from "./app";
 import { SourceEditor } from "./async-editor";
@@ -347,6 +347,20 @@ export function StructureForm({
 	const [source, setSource] = useState(initial?.readme || "");
 	const [error, setError] = useState<unknown>();
 	const [saving, setSaving] = useState(false);
+	const identity = `${endpoint}:${initial?.id ?? "new"}`;
+	const previous = useRef({ open: false, identity });
+	const expectedUpdatedAt = useRef(initial?.updated_at);
+	useEffect(() => {
+		if (
+			open &&
+			(!previous.current.open || previous.current.identity !== identity)
+		) {
+			setSource(initial?.readme || "");
+			setError(undefined);
+			expectedUpdatedAt.current = initial?.updated_at;
+		}
+		previous.current = { open, identity };
+	}, [open, identity, initial?.readme, initial?.updated_at]);
 	return (
 		<Modal
 			open={open}
@@ -354,6 +368,7 @@ export function StructureForm({
 			title={title}
 		>
 			<form
+				key={identity}
 				onSubmit={async (event) => {
 					event.preventDefault();
 					setSaving(true);
@@ -365,7 +380,7 @@ export function StructureForm({
 							body: JSON.stringify({
 								...values,
 								readme: source,
-								expected_updated_at: initial?.updated_at,
+								expected_updated_at: expectedUpdatedAt.current,
 							}),
 						});
 						props.done(t("pages.saved"));

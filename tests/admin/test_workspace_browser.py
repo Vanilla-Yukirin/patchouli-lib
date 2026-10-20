@@ -70,14 +70,58 @@ def wait(tools: _DevTools, expression: str) -> None:
 
 
 def click(tools: _DevTools, expression: str) -> None:
-    point = tools.evaluate(f"""(() => {{
-      const element = ({expression});
-      if (!element) return null;
-      element.scrollIntoView({{block:'center', inline:'nearest', behavior:'instant'}});
-      const r = element.getBoundingClientRect();
-      return r.width && r.height ? {{x:r.x+r.width/2,y:r.y+r.height/2}} : null;
-    }})()""")
-    assert point is not None
+    sampled = tools.command(
+        "Runtime.evaluate",
+        {
+            "expression": f"""(async () => {{
+              const deadline = performance.now() + 15000;
+              let previous = null, stable = 0, observed = {{candidate: 'missing'}};
+              const describe = element => element ? {{
+                tag: element.tagName,
+                label: (element.getAttribute('aria-label') ||
+                  element.textContent || '').slice(0, 80)
+              }} : null;
+              while (performance.now() < deadline) {{
+                const element = ({expression});
+                if (element?.isConnected) {{
+                  element.scrollIntoView({{block:'center', inline:'nearest', behavior:'instant'}});
+                  const r = element.getBoundingClientRect(), style = getComputedStyle(element);
+                  const width = document.documentElement.clientWidth;
+                  const height = document.documentElement.clientHeight;
+                  const left = Math.max(0, r.left), right = Math.min(width, r.right);
+                  const top = Math.max(0, r.top), bottom = Math.min(height, r.bottom);
+                  const x = (left + right) / 2, y = (top + bottom) / 2;
+                  const hit = document.elementFromPoint(x, y);
+                  const disabled = element.matches(':disabled') ||
+                    element.closest('[inert]') !== null ||
+                    element.getAttribute('aria-disabled') === 'true';
+                  const actionable = right > left && bottom > top && !disabled &&
+                    style.visibility === 'visible' && style.display !== 'none' &&
+                    Number(style.opacity) > 0 && !!hit && element.contains(hit);
+                  observed = {{candidate: describe(element), hit: describe(hit), disabled,
+                    actionable, bounds: [r.x, r.y, r.width, r.height], point: {{x, y}},
+                    viewport: {{width, height}}}};
+                  const bounds = [r.x, r.y, r.width, r.height];
+                  const unchanged = previous?.element === element &&
+                    bounds.every((value, index) => Math.abs(value - previous.bounds[index]) < 0.25);
+                  stable = actionable && unchanged ? stable + 1 : 0;
+                  if (stable >= 2) return {{x, y}};
+                  previous = {{element, bounds}};
+                }} else {{
+                  stable = 0;
+                  previous = null;
+                  observed = {{candidate: 'missing'}};
+                }}
+                await new Promise(requestAnimationFrame);
+              }}
+              return {{error: 'target_not_actionable', observed}};
+            }})()""",
+            "awaitPromise": True,
+            "returnByValue": True,
+        },
+    )
+    point = sampled.get("result", {}).get("value")
+    assert isinstance(point, dict) and "x" in point and "y" in point, point
     for kind in ("mousePressed", "mouseReleased"):
         tools.command(
             "Input.dispatchMouseEvent", {"type": kind, "button": "left", "clickCount": 1, **point}
@@ -265,6 +309,23 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
     browser = workspace_browser
     tools = browser.tools
     page_path = f"/admin/libraries/{browser.library}/pages/{browser.page}"
+    tools.command("Page.navigate", {"url": f"{browser.origin}/admin/libraries/{browser.library}"})
+    wait(tools, f"Boolean({button('New section')})")
+    click(tools, button("New section"))
+    wait(tools, "document.querySelector('[role=dialog] .cm-content') !== null")
+    edit_source(tools, "# Discarded section rules\n")
+    wait(
+        tools,
+        "document.querySelector('[role=dialog] .cm-content')"
+        "?.textContent.includes('Discarded section rules')",
+    )
+    click(tools, "document.querySelector('[role=dialog] button[aria-label=Close]')")
+    wait(tools, "document.querySelector('[role=dialog]') === null")
+    click(tools, button("New section"))
+    wait(tools, "document.querySelector('[role=dialog] .cm-content') !== null")
+    assert tools.evaluate("document.querySelector('[role=dialog] .cm-content').textContent") == ""
+    click(tools, "document.querySelector('[role=dialog] button[aria-label=Close]')")
+    wait(tools, "document.querySelector('[role=dialog]') === null")
     tools.command("Page.navigate", {"url": browser.origin + page_path})
     wait(
         tools,
