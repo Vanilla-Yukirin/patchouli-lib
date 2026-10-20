@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { type DocumentView, request, type Structure } from "./api";
 import type { PageProps } from "./app";
 import { useResource } from "./pages";
 import { LocalTime, usePreferences } from "./preferences";
-import { ErrorNotice, Modal, Panel } from "./ui";
+import { ErrorNotice, LocalDatePreview, Modal, Panel } from "./ui";
 
 export function PageProperties(props: PageProps & { document: DocumentView }) {
 	const { t } = usePreferences();
@@ -15,6 +15,13 @@ export function PageProperties(props: PageProps & { document: DocumentView }) {
 	const [targetSection, setTargetSection] = useState(doc.section_id || "");
 	const [targetBook, setTargetBook] = useState("");
 	const [date, setDate] = useState("");
+	const active = useRef(false);
+	useEffect(() => {
+		active.current = true;
+		return () => {
+			active.current = false;
+		};
+	}, []);
 	const library = useResource<{ sections: Structure[] }>(
 		`libraries/${doc.library_id}`,
 	);
@@ -34,13 +41,40 @@ export function PageProperties(props: PageProps & { document: DocumentView }) {
 						? { "Idempotency-Key": crypto.randomUUID().replaceAll("-", "") }
 						: {},
 			});
+			if (!active.current) return false;
 			props.done(t("page-properties.updated"));
 			return true;
 		} catch (e) {
-			setError(e);
+			if (active.current) setError(e);
 			return false;
 		} finally {
-			setBusy(false);
+			if (active.current) setBusy(false);
+		}
+	};
+	const remove = async () => {
+		setBusy(true);
+		setError(undefined);
+		try {
+			const result = await request<{ restore_etag: string }>(base, {
+				method: "DELETE",
+				body: JSON.stringify({
+					expected_etag: doc.current_etag,
+					confirm_delete: "yes",
+				}),
+			});
+			// A completed request must not navigate away from a newer page or login.
+			if (!active.current) return;
+			props.done(t("page-properties.movedToTrash"), {
+				libraryId: doc.library_id,
+				pageId: doc.page_id,
+				etag: result.restore_etag,
+			});
+			setRemoving(false);
+			props.go(`/libraries/${doc.library_id}`);
+		} catch (e) {
+			if (active.current) setError(e);
+		} finally {
+			if (active.current) setBusy(false);
 		}
 	};
 	return (
@@ -69,6 +103,7 @@ export function PageProperties(props: PageProps & { document: DocumentView }) {
 							required
 						/>
 					</label>
+					<LocalDatePreview value={date} />
 					<button type="submit" className="secondary" disabled={busy}>
 						{t("page-properties.updateTime")}
 					</button>
@@ -194,18 +229,7 @@ export function PageProperties(props: PageProps & { document: DocumentView }) {
 						type="button"
 						className="danger"
 						disabled={busy}
-						onClick={async () => {
-							if (
-								await change(
-									"",
-									{ expected_etag: doc.current_etag, confirm_delete: "yes" },
-									"DELETE",
-								)
-							) {
-								setRemoving(false);
-								props.go(`/libraries/${doc.library_id}`);
-							}
-						}}
+						onClick={remove}
 					>
 						{t("page-properties.moveToTrash")}
 					</button>

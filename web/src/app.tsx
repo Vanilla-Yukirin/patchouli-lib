@@ -15,7 +15,7 @@ import {
 	Tags,
 	Trash2,
 } from "lucide-react";
-import { type FormEvent, Fragment, useEffect, useState } from "react";
+import { type FormEvent, Fragment, useEffect, useRef, useState } from "react";
 import {
 	ApiError,
 	api,
@@ -44,6 +44,13 @@ import { DocumentWorkspace, SkillWorkspace } from "./workspace";
 export const nonce =
 	document.querySelector<HTMLMetaElement>('meta[name="csp-nonce"]')?.content ||
 	"";
+type Notice = {
+	message: string;
+	undo?: TrashUndo;
+	pending?: boolean;
+	error?: boolean;
+};
+export type TrashUndo = { libraryId: string; pageId: string; etag: string };
 export function App() {
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
@@ -53,14 +60,16 @@ export function App() {
 	const { t, locale, setLocale, dark, setDark } = usePreferences();
 	const [menu, setMenu] = useState(false);
 	const [command, setCommand] = useState(false);
-	const [notice, setNotice] = useState("");
+	const [notice, setNotice] = useState<Notice>();
 	const [sessionExpired, setSessionExpired] = useState(false);
+	const signingOut = useRef(false);
 	const session = useQuery({
 		queryKey: ["session"],
 		queryFn: api.session,
 		retry: false,
 	});
 	const go = (destination: string) => {
+		if (signingOut.current) return;
 		navigate({ to: destination });
 		setMenu(false);
 		setCommand(false);
@@ -74,7 +83,7 @@ export function App() {
 				return;
 			setSessionCsrf("");
 			setSessionExpired(true);
-			setNotice("");
+			setNotice(undefined);
 			setMenu(false);
 			setCommand(false);
 			queryClient.clear();
@@ -83,6 +92,10 @@ export function App() {
 		window.addEventListener(SESSION_EXPIRED_EVENT, expire);
 		return () => window.removeEventListener(SESSION_EXPIRED_EVENT, expire);
 	}, [queryClient]);
+	useEffect(() => {
+		if (path === "/agents" || path === "/agents/")
+			navigate({ to: "/credentials", replace: true });
+	}, [path, navigate]);
 	useEffect(() => {
 		const handler = (event: KeyboardEvent) => {
 			if ((event.ctrlKey || event.metaKey) && event.key === "k") {
@@ -93,11 +106,55 @@ export function App() {
 		window.addEventListener("keydown", handler);
 		return () => window.removeEventListener("keydown", handler);
 	}, []);
-	const done = (message: string) => {
-		setNotice(message);
+	const done = (message: string, undo?: TrashUndo) => {
+		if (
+			signingOut.current ||
+			!queryClient.getQueryData<Session>(["session"])?.authenticated
+		)
+			return;
+		setNotice({ message, undo });
 		queryClient.invalidateQueries({
 			predicate: (q) => q.queryKey[0] !== "session",
 		});
+	};
+	const undoDelete = async () => {
+		const undo = notice?.undo;
+		if (!undo || notice?.pending) return;
+		setNotice((value) =>
+			value?.undo === undo ? { ...value, pending: true } : value,
+		);
+		try {
+			await request(
+				`libraries/${undo.libraryId}/pages/${undo.pageId}/restore`,
+				{
+					method: "POST",
+					body: JSON.stringify({ expected_etag: undo.etag }),
+				},
+			);
+			setNotice((value) =>
+				value?.undo === undo
+					? { message: t("page-properties.restored") }
+					: value,
+			);
+		} catch (error) {
+			// An unknown outcome must not become a fresh restore operation.
+			setNotice((value) =>
+				value?.undo === undo
+					? {
+							error: true,
+							message: t(
+								error instanceof ApiError && error.status < 500
+									? "page-properties.undoRejected"
+									: "page-properties.undoOutcomeUnknown",
+							),
+						}
+					: value,
+			);
+		} finally {
+			queryClient.invalidateQueries({
+				predicate: (q) => q.queryKey[0] !== "session",
+			});
+		}
 	};
 	if (session.isPending) return <Loading />;
 	if (!session.data?.authenticated)
@@ -204,7 +261,11 @@ export function App() {
 	} else if (parts[0] === "search") content = <SearchWorkspace {...props} />;
 	else if (parts[0] === "tags") content = <TagsManager {...props} />;
 	else if (parts[0] === "trash") content = <TrashManager {...props} />;
-	else if (parts[0] === "credentials")
+	else if (
+		parts[0] === "credentials" ||
+		path === "/agents" ||
+		path === "/agents/"
+	)
 		content = <CredentialManager {...props} credentialId={parts[1]} />;
 	else if (parts[0] === "requests") content = <RequestsPage {...props} />;
 	else if (parts[0] === "settings") content = <SettingsPage {...props} />;
@@ -279,8 +340,11 @@ export function App() {
 						className="icon-button"
 						aria-label={t("app.signOut")}
 						onClick={async () => {
+							signingOut.current = true;
+							setNotice(undefined);
 							try {
 								await api.logout();
+								setNotice(undefined);
 								setSessionCsrf("");
 								queryClient.clear();
 								session.refetch();
@@ -292,7 +356,11 @@ export function App() {
 										error.code === "sign_in_required"
 									)
 								)
-									setNotice(error instanceof Error ? error.message : "Error");
+									setNotice({
+										message: error instanceof Error ? error.message : "Error",
+									});
+							} finally {
+								signingOut.current = false;
 							}
 						}}
 					>
@@ -312,9 +380,26 @@ export function App() {
 				<Fragment key={pathname}>{content}</Fragment>
 			</main>
 			{notice && (
-				<div className="toast" role="status">
-					<span>{notice}</span>
-					<button type="button" onClick={() => setNotice("")}>
+				<div className="toast" role={notice.error ? "alert" : "status"}>
+					<span>{notice.message}</span>
+					{notice.undo && (
+						<button
+							type="button"
+							disabled={notice.pending}
+							onClick={undoDelete}
+						>
+							{t(
+								notice.pending
+									? "page-properties.restoring"
+									: "page-properties.undo",
+							)}
+						</button>
+					)}
+					<button
+						type="button"
+						onClick={() => setNotice(undefined)}
+						aria-label={t("ui.close")}
+					>
 						×
 					</button>
 				</div>
@@ -471,6 +556,6 @@ function Auth({
 }
 export type PageProps = {
 	go: (path: string) => void;
-	done: (message: string) => void;
+	done: (message: string, undo?: TrashUndo) => void;
 	nonce: string;
 };

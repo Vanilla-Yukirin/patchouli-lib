@@ -613,10 +613,14 @@ def test_manual_file_save_history_and_retry(
         headers=headers,
     )
     assert deleted.status_code == 200, deleted.text
+    restore_etag = deleted.json()["restore_etag"]
+    assert deleted.json()["changed"] is True
+    assert restore_etag != current["current_etag"]
     trash = client.get("/admin/api/trash", params={"library_id": library_id})
     assert trash.status_code == 200, trash.text
     trashed = trash.json()["pages"][0]
     assert trashed["stored_title"] == "First title"
+    assert trashed["restore_etag"] == restore_etag
     assert client.get("/admin/api/trash").json()["libraries"]
     repeated_delete = client.request(
         "DELETE",
@@ -628,17 +632,38 @@ def test_manual_file_save_history_and_retry(
     assert repeated_delete.json()["error"]["code"] == "conflict"
     assert (
         client.post(
-            path + "/restore", json={"expected_etag": trashed["restore_etag"]}, headers=headers
+            path + "/restore", json={"expected_etag": restore_etag}, headers=headers
         ).status_code
         == 200
     )
     live = client.get(path).json()
     assert live["stored_title"] == "First title"
+    for field in ("revision_id", "primary_file", "files", "book"):
+        assert live[field] == current[field]
     repeated_restore = client.post(
         path + "/restore", json={"expected_etag": live["current_etag"]}, headers=headers
     )
     assert repeated_restore.status_code == 409, repeated_restore.text
     assert repeated_restore.json()["error"]["code"] == "conflict"
+    # An old Undo must not restore a later deletion, even for identical content.
+    deleted_again = client.request(
+        "DELETE",
+        path,
+        json={"expected_etag": live["current_etag"], "confirm_delete": "yes"},
+        headers=headers,
+    )
+    assert deleted_again.status_code == 200, deleted_again.text
+    assert deleted_again.json()["restore_etag"] != restore_etag
+    later_trash = client.get("/admin/api/trash", params={"library_id": library_id}).json()
+    activity_before = client.get("/admin/api/activity").json()
+    stale_undo = client.post(
+        path + "/restore", json={"expected_etag": restore_etag}, headers=headers
+    )
+    assert stale_undo.status_code == 412, stale_undo.text
+    assert stale_undo.json()["error"]["code"] == "version_changed"
+    assert client.get("/admin/api/trash", params={"library_id": library_id}).json() == later_trash
+    assert client.get("/admin/api/activity").json() == activity_before
+    assert client.get(path).status_code == 404
 
 
 def test_skill_package_and_credentials(browser: tuple[TestClient, dict[str, str], Any]) -> None:

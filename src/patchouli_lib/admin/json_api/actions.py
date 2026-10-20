@@ -206,7 +206,7 @@ def register_actions(router: APIRouter, auth: BrowserAuth) -> None:
         session = auth.write_session(request)
         form = await body_json(request, MasterDeletePageFormInput)
         section_id, book_id = page_location(request, library_id, page_id)
-        await run_in_threadpool(
+        restore_etag = await run_in_threadpool(
             service.delete_page_as_master,
             library_id,
             section_id,
@@ -215,7 +215,7 @@ def register_actions(router: APIRouter, auth: BrowserAuth) -> None:
             form,
             master_session=session,
         )
-        return reply({"changed": True})
+        return reply({"changed": True, "restore_etag": restore_etag})
 
     @router.post("/libraries/{library_id}/pages/{page_id}/restore")
     async def restore_page(request: Request, library_id: str, page_id: str) -> Response:
