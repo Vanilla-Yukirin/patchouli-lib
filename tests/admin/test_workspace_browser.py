@@ -425,6 +425,42 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
             ".find(b=>b.textContent.trim()==='History')",
         )
         wait(tools, f"Boolean({button('Restore')})")
+        if title == "Workspace title":
+            tools.evaluate("""(() => {
+              window.restorePosts = 0;
+              const originalFetch = window.fetch.bind(window);
+              const originalStore = Storage.prototype.setItem;
+              window.fetch = (input, options) => {
+                if (options?.method === 'POST' && String(input).includes('/restore')) {
+                  window.restorePosts += 1;
+                }
+                return originalFetch(input, options);
+              };
+              Storage.prototype.setItem = function(key, value) {
+                if (key.startsWith('patchouli.pending.restore.')) {
+                  throw new DOMException('Synthetic quota', 'QuotaExceededError');
+                }
+                return originalStore.call(this, key, value);
+              };
+              window.restoreStorage = () => { Storage.prototype.setItem = originalStore; };
+              return true;
+            })()""")
+            click(tools, button("Restore"))
+            wait(tools, "document.querySelector('[role=dialog]') !== null")
+            click(
+                tools,
+                "Array.from(document.querySelectorAll('[role=dialog] button'))"
+                ".find(b=>b.textContent.trim()==='Restore')",
+            )
+            wait(
+                tools,
+                "Array.from(document.querySelectorAll('[role=alert]'))"
+                ".some(e=>e.textContent.includes('This request was not sent'))",
+            )
+            assert tools.evaluate("window.restorePosts") == 0
+            click(tools, "document.querySelector('[role=dialog] button[aria-label=Close]')")
+            wait(tools, "document.querySelector('[role=dialog]') === null")
+            tools.evaluate("window.restoreStorage(); true")
         click(tools, button("Back to latest"))
         wait(tools, f"Boolean({button('Edit')})")
         assert "/revisions/" not in tools.evaluate("location.pathname")

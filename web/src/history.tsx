@@ -21,34 +21,43 @@ function readRestoreReceipt(
 	storageKey: string,
 	resource: string,
 	kind: "pages" | "skills",
-): RestoreReceipt | null {
+): RestoreReceipt | "unreadable" | null {
 	try {
-		const receipt = JSON.parse(
-			sessionStorage.getItem(storageKey) || "null",
-		) as RestoreReceipt | null;
+		const raw = sessionStorage.getItem(storageKey);
+		if (raw === null) return null;
+		const receipt = JSON.parse(raw) as RestoreReceipt | null;
 		if (
 			!receipt?.version ||
+			typeof receipt.version.revision_id !== "string" ||
+			!/^rev_[a-f0-9]{32}$/.test(receipt.version.revision_id) ||
+			!Number.isSafeInteger(receipt.version.revision_number) ||
+			receipt.version.revision_number < 1 ||
+			!Number.isSafeInteger(receipt.version.created_at) ||
 			typeof receipt.key !== "string" ||
 			!/^[a-f0-9]{32}$/.test(receipt.key) ||
 			typeof receipt.body !== "string"
 		)
-			return null;
+			return "unreadable";
 		const target =
 			kind === "skills"
 				? receipt.version.revision_id
 				: receipt.version.revision_number;
 		if (!target || receipt.path !== `${resource}/revisions/${target}/restore`)
-			return null;
+			return "unreadable";
 		const body = JSON.parse(receipt.body);
 		if (
+			!body ||
+			typeof body !== "object" ||
+			Array.isArray(body) ||
 			Object.keys(body).length !== 2 ||
 			body.confirm_restore !== "yes" ||
-			typeof body.expected_etag !== "string"
+			typeof body.expected_etag !== "string" ||
+			!/^"[^"\r\n]+"$/.test(body.expected_etag)
 		)
-			return null;
+			return "unreadable";
 		return receipt;
 	} catch {
-		return null;
+		return "unreadable";
 	}
 }
 export function VersionHistory(
@@ -61,16 +70,44 @@ export function VersionHistory(
 	const [initialReceipt] = useState(() =>
 		readRestoreReceipt(storageKey, props.resource, props.kind),
 	);
+	const originalReceipt =
+		initialReceipt && initialReceipt !== "unreadable" ? initialReceipt : null;
 	const [restore, setRestore] = useState<Version | null>(
-		initialReceipt?.version ?? null,
+		originalReceipt?.version ?? null,
 	);
 	const [restoring, setRestoring] = useState(false);
-	const [restoreUnknown, setRestoreUnknown] = useState(initialReceipt !== null);
-	const restoreOperation = useRef<RestoreOperation | null>(initialReceipt);
+	const [restoreUnknown, setRestoreUnknown] = useState(
+		originalReceipt !== null,
+	);
+	const [receiptBlocked, setReceiptBlocked] = useState<
+		"workspace.retryDetailsUnavailable" | "workspace.retryClearFailed" | null
+	>(
+		initialReceipt === "unreadable"
+			? "workspace.retryDetailsUnavailable"
+			: null,
+	);
+	const restoreOperation = useRef<RestoreReceipt | null>(originalReceipt);
+	const unusedOperation = useRef<RestoreReceipt | null>(null);
 	const clearReceipt = () => {
 		try {
 			sessionStorage.removeItem(storageKey);
-		} catch {}
+			if (sessionStorage.getItem(storageKey) !== null) throw new Error();
+			return true;
+		} catch {
+			setError(new Error(t("workspace.retryClearFailed")));
+			return false;
+		}
+	};
+	const abandonRestore = () => {
+		if (!confirm(t("workspace.haveYouCheckedTheCurrentRevisionAnd"))) return;
+		if (!clearReceipt()) return;
+		restoreOperation.current = null;
+		unusedOperation.current = null;
+		setReceiptBlocked(null);
+		setRestoreUnknown(false);
+		setRestore(null);
+		setError(undefined);
+		data.refetch();
 	};
 	const [comparison, setComparison] = useState<{
 		old: string;
@@ -117,6 +154,14 @@ export function VersionHistory(
 			<p className="muted">
 				{t("history.restoreCreatesANewRevisionAndPreserves")}
 			</p>
+			{receiptBlocked && !restore && (
+				<div className="alert" role="status">
+					<p>{t(receiptBlocked)}</p>
+					<button type="button" disabled={restoring} onClick={abandonRestore}>
+						{t("workspace.checkedClearReminder")}
+					</button>
+				</div>
+			)}
 			{Boolean(error) && <ErrorNotice error={error} />}{" "}
 			{data.isPending ? (
 				<Loading />
@@ -156,7 +201,9 @@ export function VersionHistory(
 							</button>
 							<button
 								type="button"
-								disabled={restoring || restoreUnknown}
+								disabled={
+									restoring || restoreUnknown || Boolean(receiptBlocked)
+								}
 								onClick={() => {
 									setError(undefined);
 									setRestore(version);
@@ -184,9 +231,13 @@ export function VersionHistory(
 			)}
 			<Modal
 				open={restore !== null}
-				onOpenChange={(value) =>
-					!value && !restoring && !restoreUnknown && setRestore(null)
-				}
+				onOpenChange={(value) => {
+					if (value || restoring || restoreUnknown || receiptBlocked) return;
+					if (unusedOperation.current && !clearReceipt()) return;
+					unusedOperation.current = null;
+					setRestore(null);
+					setError(undefined);
+				}}
 				title={t("history.restoreThisRevision")}
 			>
 				<p>{t("history.allFilesInThisRevisionWillBecome")}</p>
@@ -195,57 +246,128 @@ export function VersionHistory(
 						{t("history.restoreOutcomeUnknown")}
 					</p>
 				)}
+				{receiptBlocked && <p className="alert">{t(receiptBlocked)}</p>}
+				{(restoreUnknown || receiptBlocked) && (
+					<button type="button" disabled={restoring} onClick={abandonRestore}>
+						{t("workspace.checkedClearReminder")}
+					</button>
+				)}
 				<button
 					type="button"
-					disabled={restoring}
+					disabled={restoring || Boolean(receiptBlocked)}
 					onClick={async () => {
-						if (!restore) return;
+						if (!restore || receiptBlocked) return;
 						setRestoring(true);
 						setError(undefined);
+						let sent = false;
+						const retrying = restoreOperation.current !== null;
 						try {
-							if (!restoreOperation.current) {
+							let operation =
+								restoreOperation.current || unusedOperation.current;
+							const stored = readRestoreReceipt(
+								storageKey,
+								props.resource,
+								props.kind,
+							);
+							if (stored === "unreadable") {
+								setReceiptBlocked("workspace.retryDetailsUnavailable");
+								throw new Error(t("workspace.retryDetailsUnavailable"));
+							}
+							if (
+								stored &&
+								(stored.key !== operation?.key ||
+									stored.path !== operation?.path ||
+									stored.body !== operation?.body)
+							) {
+								restoreOperation.current = stored;
+								unusedOperation.current = null;
+								setRestore(stored.version);
+								setRestoreUnknown(true);
+								throw new Error(t("workspace.retryDetailsUnavailable"));
+							}
+							if (!operation) {
 								const current = await request<DocumentView>(props.resource);
-								restoreOperation.current = {
+								operation = {
 									path: `${props.resource}/revisions/${select(restore)}/restore`,
 									body: JSON.stringify({
 										expected_etag: current.current_etag,
 										confirm_restore: "yes",
 									}),
 									key: crypto.randomUUID().replaceAll("-", ""),
+									version: restore,
 								};
-								try {
-									sessionStorage.setItem(
-										storageKey,
-										JSON.stringify({
-											...restoreOperation.current,
-											version: restore,
-										}),
-									);
-								} catch {}
+								unusedOperation.current = operation;
 							}
-							const operation = restoreOperation.current;
-							await request(operation.path, {
+							try {
+								const serialized = JSON.stringify(operation);
+								sessionStorage.setItem(storageKey, serialized);
+								if (sessionStorage.getItem(storageKey) !== serialized)
+									throw new Error();
+							} catch {
+								throw new Error(t("workspace.retryStorageUnavailable"));
+							}
+							restoreOperation.current = operation;
+							unusedOperation.current = null;
+							sent = true;
+							const result = await request<{
+								revision_id: string;
+								revision_number: number;
+								skill?: { revision_id: string; revision_number: number };
+								changed: boolean;
+								replayed?: boolean;
+							}>(operation.path, {
 								method: "POST",
 								body: operation.body,
 								headers: { "Idempotency-Key": operation.key },
 							});
-							restoreOperation.current = null;
-							clearReceipt();
+							const saved = result.skill || result;
+							if (
+								typeof saved.revision_id !== "string" ||
+								!/^rev_[a-f0-9]{32}$/.test(saved.revision_id) ||
+								!Number.isSafeInteger(saved.revision_number) ||
+								saved.revision_number < 1
+							)
+								throw new Error("restore_receipt_invalid");
+							const message =
+								retrying || result.replayed
+									? t("workspace.retryConfirmed")
+									: result.changed
+										? t("history.restoredAsANewRevision")
+										: t("workspace.identicalContentNoNewRevision");
+							props.done(
+								`${message} v${saved.revision_number} · ${saved.revision_id}`,
+							);
 							setRestoreUnknown(false);
 							setRestore(null);
-							props.done(t("history.restoredAsANewRevision"));
-							props.go(`/${props.resource}`);
+							if (!clearReceipt()) {
+								setReceiptBlocked("workspace.retryClearFailed");
+								return;
+							}
+							restoreOperation.current = null;
+							props.go(
+								`/${props.resource}/revisions/${
+									props.kind === "skills"
+										? saved.revision_id
+										: saved.revision_number
+								}`,
+							);
 						} catch (error) {
 							setError(error);
 							if (
+								sent &&
+								!retrying &&
 								error instanceof Error &&
 								"status" in error &&
+								Number(error.status) !== 401 &&
 								Number(error.status) < 500
 							) {
-								restoreOperation.current = null;
-								clearReceipt();
 								setRestoreUnknown(false);
-							} else setRestoreUnknown(restoreOperation.current !== null);
+								if (clearReceipt()) restoreOperation.current = null;
+								else {
+									setReceiptBlocked("workspace.retryClearFailed");
+									setRestore(null);
+								}
+							} else if (sent) setRestoreUnknown(true);
 						} finally {
 							setRestoring(false);
 						}
