@@ -169,7 +169,7 @@ def workspace_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterat
             description="Synthetic browser package",
             files=(("SKILL.md", b"# Historical Skill\n"),),
         ).skill
-        skills.revise(
+        LibrarySkillService(connection, authorize=lambda *_: None, clock=lambda: 4_000_000).revise(
             structure.library.id,
             str(skill["id"]),
             name="browser-skill",
@@ -308,6 +308,14 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
                 "input:not([type=file]), "
                 "[role=tabpanel][data-state=active] textarea') === null"
             )
+            if tab == "Properties" and title == "Historical Skill":
+                assert (
+                    tools.evaluate(
+                        "document.querySelector('[role=tabpanel][data-state=active] time')"
+                        "?.getAttribute('datetime')"
+                    )
+                    == "1970-01-01T00:00:03.000Z"
+                )
         click(
             tools,
             "Array.from(document.querySelectorAll('[role=tab]'))"

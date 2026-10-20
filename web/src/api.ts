@@ -166,7 +166,8 @@ export async function request<T>(
 			library_id: result.skill.library_id,
 			page_id: result.skill.id,
 			title: (result.selected_revision || result.skill).name,
-			occurred_at: result.skill.updated_at,
+			occurred_at:
+				result.selected_revision?.created_at ?? result.skill.updated_at,
 			updated_at: result.skill.updated_at,
 			current_etag: result.skill.etag,
 			revision: {

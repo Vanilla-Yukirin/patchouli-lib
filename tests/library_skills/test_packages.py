@@ -107,6 +107,22 @@ def test_package_journey_permissions_history_and_replay(content_engine: Engine) 
         ("file", ("scripts/run.py", b"print('not executed')\n", "text/plain")),
     ]
     base = f"/api/v1/libraries/{library}/skills"
+
+    def package_state() -> dict[str, tuple[tuple[object, ...], ...]]:
+        with content_engine.connect() as connection:
+            return {
+                table: tuple(
+                    tuple(row) for row in connection.exec_driver_sql(f"SELECT * FROM {table}")
+                )
+                for table in (
+                    "library_skills",
+                    "library_skill_revisions",
+                    "library_skill_files",
+                    "auth_audit_events",
+                    "idempotency_records",
+                )
+            }
+
     with TestClient(app) as client:
         assert client.get(base).status_code == 401
         created = client.post(base, headers=headers, files=payload)
@@ -114,6 +130,27 @@ def test_package_journey_permissions_history_and_replay(content_engine: Engine) 
         body = created.json()
         replay = client.post(base, headers=headers, files=payload)
         assert replay.json() == body and replay.headers["Idempotency-Replayed"] == "true"
+        before = package_state()
+        reused = client.post(
+            base, headers={**headers, "Idempotency-Key": "same-name-create"}, files=payload
+        )
+        assert reused.status_code == 200 and reused.json() == {**body, "changed": False}
+        after = package_state()
+        assert {key: value for key, value in after.items() if key != "idempotency_records"} == {
+            key: value for key, value in before.items() if key != "idempotency_records"
+        }
+        assert len(after["idempotency_records"]) == len(before["idempotency_records"]) + 1
+        conflicting = [*payload]
+        conflicting[1] = ("file", ("SKILL.md", b"# Different content\n", "text/markdown"))
+        assert (
+            client.post(
+                base,
+                headers={**headers, "Idempotency-Key": "same-name-conflict"},
+                files=conflicting,
+            ).status_code
+            == 409
+        )
+        assert package_state() == after
         skill = base + "/" + body["id"]
         manifest = client.get(created.headers["Location"], headers=headers)
         assert [entry["path"] for entry in manifest.json()["files"]] == [
@@ -266,15 +303,52 @@ def test_package_journey_permissions_history_and_replay(content_engine: Engine) 
         assert (
             client.get(f"/api/v1/libraries/{'f' * 32}/skills", headers=headers).status_code == 403
         )
+        with immediate_transaction(content_engine) as connection:
+            connection.execute(
+                insert(CredentialLibraryGrant),
+                {**identity, "target_library_id": library, "action": "read"},
+            )
+            connection.execute(
+                delete(CredentialLibraryGrant).where(CredentialLibraryGrant.action == "write")
+            )
+        readonly_manifest = client.get(skill + "/manifest", headers=headers)
+        assert readonly_manifest.status_code == 200
+        assert readonly_manifest.json()["revision_id"] == revised.json()["revision_id"]
+        entry = next(
+            item for item in readonly_manifest.json()["files"] if item["path"] == "SKILL.md"
+        )
+        downloaded = client.get(entry["href"], headers=headers)
+        assert downloaded.status_code == 200 and downloaded.content == b"# New version\n"
+        before = package_state()
+        assert (
+            client.post(
+                base, headers={**headers, "Idempotency-Key": "readonly-create"}, files=payload
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                skill + "/revisions",
+                headers={
+                    **headers,
+                    "Idempotency-Key": "readonly-revise",
+                    "If-Match": revised.json()["etag"],
+                },
+                files=payload,
+            ).status_code
+            == 403
+        )
+        assert package_state() == before
     assert content_engine.url.database is not None
-    with closing(sqlite3.connect(content_engine.url.database)) as connection:
+    with closing(sqlite3.connect(content_engine.url.database)) as raw_connection:
         for response, route in (
             (created, CREATE_SKILL_ROUTE),
+            (reused, CREATE_SKILL_ROUTE),
             (unchanged, REVISE_SKILL_ROUTE),
             (revised, REVISE_SKILL_ROUTE),
         ):
             validate_skill_replay(
-                connection,
+                raw_connection,
                 library_id=library,
                 caller_id=caller.id,
                 method="POST",
@@ -287,7 +361,7 @@ def test_package_journey_permissions_history_and_replay(content_engine: Engine) 
             )
         with pytest.raises(ValueError, match="Changed Skill replay metadata"):
             validate_skill_replay(
-                connection,
+                raw_connection,
                 library_id=library,
                 caller_id=caller.id,
                 method="POST",
@@ -298,9 +372,11 @@ def test_package_journey_permissions_history_and_replay(content_engine: Engine) 
                 etag=revised.headers["etag"],
                 original_request_id=revised.headers["X-Request-ID"],
             )
-        assert connection.execute("SELECT count(*) FROM library_skill_revisions").fetchone() == (2,)
+        assert raw_connection.execute(
+            "SELECT count(*) FROM library_skill_revisions"
+        ).fetchone() == (2,)
         with pytest.raises(sqlite3.IntegrityError):
-            connection.execute("UPDATE library_skill_files SET content_bytes=x'00'")
+            raw_connection.execute("UPDATE library_skill_files SET content_bytes=x'00'")
 
 
 def test_skill_paths_do_not_relax_page_names(
