@@ -1080,10 +1080,10 @@ class AdminActionService:
         request: MasterDeletePageFormInput,
         *,
         master_session: MasterAdminSession,
-    ) -> None:
-        """Move a whole Page to Trash, preserving every Revision and file."""
+    ) -> str:
+        """Move a whole Page to Trash and return this transition's restore ETag."""
 
-        self._change_page_lifecycle_as_master(
+        return self._change_page_lifecycle_as_master(
             library_id,
             section_id,
             page_id,
@@ -1103,7 +1103,7 @@ class AdminActionService:
         action: Literal["delete", "restore"],
         master_session: MasterAdminSession,
         book_id: str | None = None,
-    ) -> None:
+    ) -> str:
         with immediate_transaction(self._engine) as connection:
             self._require_current_admin_session(
                 connection, master_session, master_session.audit_fingerprint()
@@ -1146,7 +1146,7 @@ class AdminActionService:
                 occurred_at=changed_at,
                 event_id=event_id,
             )
-            content.transition_page_lifecycle(
+            updated, _ = content.transition_page_lifecycle(
                 page,
                 action=action,
                 actor_caller_id=None,
@@ -1154,6 +1154,13 @@ class AdminActionService:
                 master_audit_event_id=event_id,
                 request_id=f"req_{uuid4().hex}",
                 changed_at=changed_at,
+            )
+            return page_current_etag(
+                updated.page_uid,
+                updated.current_revision_id,
+                updated.current_revision_number,
+                updated.occurred_at,
+                updated.updated_at,
             )
 
     def update_page_title_as_master(

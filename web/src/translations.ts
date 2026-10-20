@@ -1,6 +1,17 @@
 /** Semantic bilingual UI messages. No credentials or deployment configuration. */
 export const translations = {
 	"zh-CN": {
+		"ui.browserTimezone": "浏览器时区",
+		"ui.utcToSubmit": "将提交 UTC",
+		"ui.utcAfterChoosingTime": "选择有效的本地时间后显示",
+		"page-properties.movedToTrash": "已移入回收站",
+		"page-properties.undo": "撤销",
+		"page-properties.restoring": "恢复中…",
+		"page-properties.restored": "已恢复文档，当前编辑内容保持不变。",
+		"page-properties.undoRejected":
+			"无法撤销，文档状态或会话可能已变化。请到回收站核对后操作。",
+		"page-properties.undoOutcomeUnknown":
+			"恢复结果待确认。请到回收站核对；本次操作不会自动重试。",
 		"activity.administrator": "管理员",
 		"activity.pageCreated": "创建了文档",
 		"activity.pageRevised": "修订了文档",
@@ -335,6 +346,19 @@ export const translations = {
 		"workspace.applyToEditor": "应用到编辑区",
 	},
 	en: {
+		"ui.browserTimezone": "Browser time zone",
+		"ui.utcToSubmit": "UTC to submit",
+		"ui.utcAfterChoosingTime":
+			"Shown after choosing a valid local date and time",
+		"page-properties.movedToTrash": "Moved to Trash",
+		"page-properties.undo": "Undo",
+		"page-properties.restoring": "Restoring…",
+		"page-properties.restored":
+			"Document restored. Your current editing context is unchanged.",
+		"page-properties.undoRejected":
+			"Undo was rejected. The document or session may have changed. Check Trash before acting again.",
+		"page-properties.undoOutcomeUnknown":
+			"The restore outcome is unknown. Check Trash; this action will not retry automatically.",
 		"activity.administrator": "Administrator",
 		"activity.pageCreated": "Created a document",
 		"activity.pageRevised": "Revised a document",

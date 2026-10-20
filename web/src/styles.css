@@ -207,6 +207,13 @@ a {
 	color: var(--muted);
 	font-size: 0.88rem;
 }
+.date-preview {
+	display: grid;
+	gap: 0.3rem;
+	margin-top: 0.5rem;
+	font-weight: 400;
+	overflow-wrap: anywhere;
+}
 .panel {
 	background: var(--surface);
 	border: 1px solid var(--line);
@@ -631,6 +638,8 @@ pre {
 .toast button {
 	padding: 0.2rem;
 	background: none;
+	min-width: 44px;
+	flex-shrink: 0;
 }
 .ticket-code {
 	font-family: monospace;
@@ -768,6 +777,7 @@ pre {
 	}
 	.source-workspace {
 		grid-template-columns: 1fr;
+		grid-template-rows: auto minmax(0, 1fr);
 	}
 	.mobile-editor-tabs {
 		display: flex;

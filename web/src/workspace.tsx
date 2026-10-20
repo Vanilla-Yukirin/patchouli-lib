@@ -27,7 +27,14 @@ import {
 	referencesForRename,
 } from "./references";
 import { Markdown } from "./rendered-markdown";
-import { Empty, ErrorNotice, Loading, Modal, Panel } from "./ui";
+import {
+	Empty,
+	ErrorNotice,
+	Loading,
+	LocalDatePreview,
+	Modal,
+	Panel,
+} from "./ui";
 
 type DraftFile = {
 	path: string;
@@ -1332,6 +1339,7 @@ function ResourceWorkspace(
 											setDirty(true);
 										}}
 									/>
+									<LocalDatePreview value={occurrence} />
 								</label>
 							)}
 							<details>
@@ -1365,6 +1373,10 @@ function ResourceWorkspace(
 				{data.data?.section_id && props.kind === "pages" ? (
 					<DirectoryTree
 						{...props}
+						go={(path) => {
+							props.go(path);
+							setMobileTree(false);
+						}}
 						sectionId={data.data.section_id}
 						bookId={data.data.book_id}
 						pageId={props.resourceId}

@@ -789,6 +789,16 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /** PageDeleteResult */
+        PageDeleteResult: {
+            /**
+             * Changed
+             * @constant
+             */
+            changed: true;
+            /** Restore Etag */
+            restore_etag: string;
+        };
         /** SessionAuth */
         SessionAuth: {
             /** Authenticated */
@@ -1289,7 +1299,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["PageDeleteResult"];
                 };
             };
             /** @description Validation Error */

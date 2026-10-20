@@ -1,6 +1,10 @@
-"""Small session DTOs shared with generated browser client types."""
+"""Small response DTOs shared with generated browser client types."""
+
+from typing import Literal
 
 from pydantic import BaseModel
+
+from patchouli_lib.content.schemas import StrongPageETag
 
 
 class SessionState(BaseModel):
@@ -16,3 +20,8 @@ class SessionAuth(BaseModel):
     authenticated: bool
     csrf_token: str | None = None
     requires_sign_in: bool = False
+
+
+class PageDeleteResult(BaseModel):
+    changed: Literal[True]
+    restore_etag: StrongPageETag
