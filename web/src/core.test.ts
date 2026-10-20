@@ -68,20 +68,20 @@ it("applies only selected Markdown targets and rejects stale offsets", () => {
 	).toBeNull();
 	const parenthesized = {
 		"paren.md":
-			"[asset](image(2).png)\n[escaped](image\\(2\\).png?download=1%202#preview \"Keep (title)\")\n[asset-ref]: <image(2).png#anchor> 'Ref title'\n",
+			"[asset](image(2).png)\n[escaped](image\\(2\\).png?download=1%202#preview \"Keep (title) [literal](image(2).png)\")\n\n[asset-ref]: <image(2).png#anchor> 'Ref [literal](image(2).png)'\n[see [icon]](image(2).png)\n[escaped \\]](image(2).png)\n\\[literal](image(2).png)\n",
 	};
 	const parenEdits = referencesForRename(
 		parenthesized,
 		"image(2).png",
 		"renamed.png",
 	);
-	expect(parenEdits).toHaveLength(3);
+	expect(parenEdits).toHaveLength(5);
 	expect(
 		parenEdits.map((edit) =>
 			parenthesized["paren.md"].slice(edit.start, edit.end),
 		),
 	).toEqual(parenEdits.map((edit) => edit.before));
 	expect(applyReferenceEdits(parenthesized, parenEdits)["paren.md"]).toBe(
-		"[asset](renamed.png)\n[escaped](renamed.png?download=1%202#preview \"Keep (title)\")\n[asset-ref]: <renamed.png#anchor> 'Ref title'\n",
+		"[asset](renamed.png)\n[escaped](renamed.png?download=1%202#preview \"Keep (title) [literal](image(2).png)\")\n\n[asset-ref]: <renamed.png#anchor> 'Ref [literal](image(2).png)'\n[see [icon]](renamed.png)\n[escaped \\]](renamed.png)\n\\[literal](image(2).png)\n",
 	);
 });

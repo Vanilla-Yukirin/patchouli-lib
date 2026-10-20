@@ -53,6 +53,8 @@ export function referencesForRename(
 ): ReferenceEdit[] {
 	const result: ReferenceEdit[] = [];
 	const parser = new MarkdownIt("commonmark", { html: true });
+	// Retain parsed definition source maps instead of guessing their label syntax.
+	parser.core.ruler.disable("strip_references");
 	for (const [file, source] of Object.entries(sources)) {
 		if (!/\.(?:md|markdown|mdown|mkd)$/i.test(file)) continue;
 		// Mask fenced and inline code, preserving positions and newlines.
@@ -60,7 +62,16 @@ export function referencesForRename(
 		for (let index = 0; index < source.length; index++)
 			if (source[index] === "\n") lineOffsets.push(index + 1);
 		const masked = source.split("");
-		for (const token of parser.parse(source, {}))
+		const environment = {};
+		const tokens = parser.parse(source, environment);
+		const definitions = new Map<number, number>();
+		for (const token of tokens) {
+			if (token.map && token.type === "reference_definition") {
+				const start = lineOffsets[token.map[0]] ?? source.length;
+				const end = lineOffsets[token.map[1]] ?? source.length;
+				const label = source.indexOf("[", start);
+				if (label >= start && label < end) definitions.set(label, end);
+			}
 			if (
 				token.map &&
 				["fence", "code_block", "html_block"].includes(token.type)
@@ -70,70 +81,105 @@ export function referencesForRename(
 				for (let index = start; index < end; index++)
 					if (masked[index] !== "\n") masked[index] = " ";
 			}
+		}
 		const mask = masked
 			.join("")
 			.replace(/(`+)[^\n]*?\1/g, (value) => " ".repeat(value.length));
-		const patterns = [
-			{ pattern: /!?\[[^\]\n]*\]\(\s*/g, inline: true },
-			{ pattern: /^\s{0,3}\[[^\]\n]+\]:\s*/gm, inline: false },
-		];
-		for (const { pattern, inline } of patterns)
-			for (const match of mask.matchAll(pattern)) {
-				const destinationStart = match.index + match[0].length;
-				const destination = parser.helpers.parseLinkDestination(
-					mask,
-					destinationStart,
-					mask.length,
-				);
-				if (!destination.ok) continue;
-				if (inline) {
-					let pos = destination.pos;
-					while (pos < mask.length && /[ \t\r\n]/.test(mask[pos])) pos++;
-					if (pos > destination.pos) {
-						const title = parser.helpers.parseLinkTitle(mask, pos, mask.length);
-						if (title.ok) {
-							pos = title.pos;
-							while (pos < mask.length && /[ \t\r\n]/.test(mask[pos])) pos++;
-						}
-					}
-					if (mask[pos] !== ")") continue;
-				}
-				const resolved = resolveLocalTarget(file, destination.str);
-				if (!resolved || resolved.path !== oldName) continue;
-				const angled = mask[destinationStart] === "<";
-				const start = destinationStart + (angled ? 1 : 0);
-				const end = destination.pos - (angled ? 1 : 0);
-				const before = source.slice(start, end);
-				// Keep the source spelling of the suffix, including escapes/entities.
-				const marker = Array.from(
-					before.matchAll(
-						/\\[^\r\n]|&(?:#(?:x[\da-f]+|\d+)|[a-z][a-z\d]+);|[?#]/gi,
-					),
-				).find((part) => /^[?#]/.test(parser.utils.unescapeAll(part[0])));
-				const suffix = marker ? before.slice(marker.index) : resolved.suffix;
-				const prefix = source.slice(0, start);
-				result.push({
-					id: `${file}:${start}`,
-					file,
-					start,
-					end,
-					line: prefix.split("\n").length,
-					column: start - prefix.lastIndexOf("\n"),
-					before,
-					after:
-						relativeTarget(file === oldName ? newName : file, newName)
-							.split("/")
-							.map((part) =>
-								encodeURIComponent(part).replace(
-									/[!'()*]/g,
-									(char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
-								),
-							)
-							.join("/") + suffix,
-					source,
-					selected: true,
-				});
+		const state = new parser.inline.State(mask, parser, environment, []);
+		const escaped = (position: number) => {
+			let previous = position - 1;
+			while (previous >= 0 && mask[previous] === "\\") previous--;
+			return (position - previous - 1) % 2 === 1;
+		};
+		let skippedThrough = 0;
+		const nonLinks: { start: number; end: number }[] = [];
+		for (const candidate of mask.matchAll(/\[|</g)) {
+			const opening = candidate.index;
+			let excluded = nonLinks.at(-1);
+			while (excluded && opening >= excluded.end) {
+				nonLinks.pop();
+				excluded = nonLinks.at(-1);
 			}
+			if (excluded && opening >= excluded.start) continue;
+			if (opening < skippedThrough || escaped(opening)) continue;
+			state.pos = opening;
+			if (mask[opening] === "<") {
+				parser.inline.skipToken(state);
+				skippedThrough = state.pos;
+				continue;
+			}
+			const image = mask[opening - 1] === "!" && !escaped(opening - 1);
+			const labelEnd = parser.helpers.parseLinkLabel(state, opening, !image);
+			const inline = mask[labelEnd + 1] === "(";
+			if (
+				labelEnd < 0 ||
+				(!inline && (!definitions.has(opening) || mask[labelEnd + 1] !== ":"))
+			)
+				continue;
+			let destinationStart = labelEnd + 2;
+			while (
+				destinationStart < mask.length &&
+				/[ \t\r\n]/.test(mask[destinationStart])
+			)
+				destinationStart++;
+			const destination = parser.helpers.parseLinkDestination(
+				mask,
+				destinationStart,
+				mask.length,
+			);
+			if (!destination.ok) continue;
+			let nonLinkEnd = definitions.get(opening) ?? destination.pos;
+			if (inline) {
+				let pos = destination.pos;
+				while (pos < mask.length && /[ \t\r\n]/.test(mask[pos])) pos++;
+				if (pos > destination.pos) {
+					const title = parser.helpers.parseLinkTitle(mask, pos, mask.length);
+					if (title.ok) {
+						pos = title.pos;
+						while (pos < mask.length && /[ \t\r\n]/.test(mask[pos])) pos++;
+					}
+				}
+				if (mask[pos] !== ")") continue;
+				nonLinkEnd = pos + 1;
+			}
+			// Labels can contain images; only the destination/title is non-link text.
+			nonLinks.push({ start: destinationStart, end: nonLinkEnd });
+			const resolved = resolveLocalTarget(file, destination.str);
+			if (!resolved || resolved.path !== oldName) continue;
+			const angled = mask[destinationStart] === "<";
+			const start = destinationStart + (angled ? 1 : 0);
+			const end = destination.pos - (angled ? 1 : 0);
+			const before = source.slice(start, end);
+			// Keep the source spelling of the suffix, including escapes/entities.
+			const marker = Array.from(
+				before.matchAll(
+					/\\[^\r\n]|&(?:#(?:x[\da-f]+|\d+)|[a-z][a-z\d]+);|[?#]/gi,
+				),
+			).find((part) => /^[?#]/.test(parser.utils.unescapeAll(part[0])));
+			const suffix = marker ? before.slice(marker.index) : resolved.suffix;
+			const prefix = source.slice(0, start);
+			result.push({
+				id: `${file}:${start}`,
+				file,
+				start,
+				end,
+				line: prefix.split("\n").length,
+				column: start - prefix.lastIndexOf("\n"),
+				before,
+				after:
+					relativeTarget(file === oldName ? newName : file, newName)
+						.split("/")
+						.map((part) =>
+							encodeURIComponent(part).replace(
+								/[!'()*]/g,
+								(char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+							),
+						)
+						.join("/") + suffix,
+				source,
+				selected: true,
+			});
+		}
 	}
 	return result;
 }
