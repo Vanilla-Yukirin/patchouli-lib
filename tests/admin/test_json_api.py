@@ -229,6 +229,25 @@ def test_session_boundary_and_structure(browser: tuple[TestClient, dict[str, str
     assert rotated.status_code == 200, rotated.text
     assert rotated.json()["requires_sign_in"] is True
     assert client.get("/admin/api/libraries").status_code == 401
+    assert (
+        client.post(
+            "/admin/api/session", json={"token": TOKEN}, headers={"Origin": ORIGIN}
+        ).status_code
+        == 401
+    )
+    signed_in = client.post(
+        "/admin/api/session",
+        json={"token": "rotated synthetic workspace master token"},
+        headers={"Origin": ORIGIN},
+    )
+    assert signed_in.status_code == 200 and signed_in.json()["authenticated"] is True
+    signed_out = client.delete(
+        "/admin/api/session",
+        headers={"Origin": ORIGIN, "X-CSRF-Token": signed_in.json()["csrf_token"]},
+    )
+    assert signed_out.status_code == 200 and signed_out.json()["authenticated"] is False
+    assert client.get("/admin/api/session").json()["authenticated"] is False
+    assert client.get("/admin/api/libraries").status_code == 401
 
 
 def test_manual_file_save_history_and_retry(

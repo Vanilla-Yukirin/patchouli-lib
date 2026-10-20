@@ -340,6 +340,16 @@ def test_skill_paths_do_not_relax_page_names(
     }
     destination = tmp_path / "skills/sample-skill"
     receipt = tmp_path / "private/receipt.json"
+    ancestor_receipt = tmp_path / "uncreated-receipt"
+    with pytest.raises(SkillConflictError, match="unsafe"):
+        install_skill_package(
+            ancestor_receipt / "sample-skill",
+            manifest,
+            files,
+            service_origin="https://example.invalid",
+            receipt_path=ancestor_receipt,
+        )
+    assert not ancestor_receipt.exists()
     assert (
         install_skill_package(
             destination,
@@ -384,3 +394,94 @@ def test_skill_paths_do_not_relax_page_names(
                 service_origin="https://example.invalid",
                 receipt_path=receipt,
             )
+
+    def update_package(updated: dict[str, bytes], revision: str) -> str:
+        package = build_skill_snapshot(updated.items())
+        return install_skill_package(
+            destination,
+            {
+                **manifest,
+                "revision_id": "rev_" + revision * 32,
+                "snapshot_sha256": package.snapshot_sha256.hex(),
+                "files": [
+                    {"path": path, "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+                    for path, body in updated.items()
+                ],
+            },
+            updated,
+            service_origin="https://example.invalid",
+            receipt_path=receipt,
+        )
+
+    def local_state() -> tuple[dict[str, bytes | None], bytes]:
+        return (
+            {
+                path.relative_to(destination).as_posix(): None
+                if path.is_dir()
+                else path.read_bytes()
+                for path in destination.rglob("*")
+            },
+            receipt.read_bytes(),
+        )
+
+    (destination / "SKILL.md").write_bytes(files["SKILL.md"])
+    nested = {
+        "SKILL.md": b"# Nested resources\n",
+        "references/a.md": b"first",
+        "references/nested/b.md": b"second",
+    }
+    flat = {"SKILL.md": b"# Flat resource\n", "references": b"flat resource"}
+    assert update_package(nested, "4") == "installed"
+    assert not (destination / "scripts").exists()
+    before = local_state()
+    with pytest.raises(SkillConflictError, match="untracked"):
+        update_package({**flat, "local-config.json": b"replacement"}, "5")
+    assert local_state() == before
+
+    extra = destination / "references/private.json"
+    extra.write_bytes(b"synthetic private configuration")
+    before = local_state()
+    with pytest.raises(SkillConflictError, match="untracked"):
+        update_package(flat, "5")
+    assert local_state() == before
+    extra.unlink()
+
+    extra_alias = destination / "references/alias.md"
+    extra_alias.hardlink_to(destination / "references/a.md")
+    before = local_state()
+    with pytest.raises(SkillConflictError, match="untracked"):
+        update_package(flat, "5")
+    assert local_state() == before
+    extra_alias.unlink()
+
+    extra_directory = destination / "references/private-empty"
+    extra_directory.mkdir()
+    before = local_state()
+    with pytest.raises(SkillConflictError, match="untracked local directory"):
+        update_package(flat, "5")
+    assert local_state() == before
+    with monkeypatch.context() as guard:
+        guard.setattr(Path, "is_junction", lambda path: path == extra_directory)
+        with pytest.raises(SkillConflictError, match="junction"):
+            update_package(flat, "5")
+    assert local_state() == before
+    extra_directory.rmdir()
+
+    tracked = destination / "references/a.md"
+    tracked.write_bytes(b"local edits")
+    before = local_state()
+    with pytest.raises(SkillConflictError, match="explicit merge"):
+        update_package(flat, "5")
+    assert local_state() == before
+    tracked.write_bytes(nested["references/a.md"])
+
+    assert update_package(flat, "5") == "installed"
+    assert (destination / "references").read_bytes() == flat["references"]
+    assert update_package(nested, "6") == "installed"
+    assert (destination / "references/a.md").read_bytes() == nested["references/a.md"]
+    assert (destination / "references/nested/b.md").read_bytes() == nested["references/nested/b.md"]
+    renamed = {**nested, "references/A.md": nested["references/a.md"]}
+    del renamed["references/a.md"]
+    assert update_package(renamed, "7") == "installed"
+    assert (destination / "references/A.md").read_bytes() == renamed["references/A.md"]
+    assert private.read_text(encoding="utf-8") == "synthetic configuration"

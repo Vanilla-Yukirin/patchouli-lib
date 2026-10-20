@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from hashlib import sha256
 from time import time_ns
 from typing import Any
 
@@ -58,7 +57,6 @@ from patchouli_lib.retrieval.file_set_read import (
 from patchouli_lib.retrieval.repository import RetrievalRepository
 from patchouli_lib.tags.models import PageTag, Tag
 
-_MAX_FILE_SET_PREVIEW_BYTES = 64 * 1024
 _PAGE_HISTORY_SIZE = 20
 _ACTIVITY_PAGE_SIZE = 20
 _BOOK_PAGE_SIZE = 20
@@ -268,7 +266,6 @@ class PageView:
     section: SectionItem
     book: BookItem
     page: PageItem
-    markdown: str | None
     selected_revision_number: int
     selected_revision_created_at: int
     files: tuple[RevisionFileItem, ...]
@@ -1352,26 +1349,6 @@ class AdminReadModel:
                 library, section, book, tuple(_page_item(row) for row in visible), next_cursor
             )
 
-    def get_page(
-        self,
-        library_id: str,
-        section_id: str,
-        book_id: str,
-        page_id: str,
-        revision_number: int | None = None,
-        before_revision_number: int | None = None,
-    ) -> PageView | None:
-        with self._connect() as connection:
-            return self._get_page(
-                connection,
-                library_id,
-                section_id,
-                book_id,
-                page_id,
-                revision_number,
-                before_revision_number,
-            )
-
     def get_page_by_id(
         self,
         library_id: str,
@@ -1435,7 +1412,6 @@ class AdminReadModel:
 
         The callback must use this connection without ending its transaction.
         Rendering and raster decoding belong after this method returns.
-        The older metadata/plain-preview methods intentionally remain unchanged.
         """
         with self._connect() as connection:
             if self._bound_connection is None:
@@ -1520,7 +1496,6 @@ class AdminReadModel:
                     Page.occurred_at,
                     Page.current_revision_number,
                     Page.updated_at,
-                    Revision.content_md,
                     Page.current_revision_id,
                     Revision.revision_id.label("selected_revision_id"),
                     Revision.revision_number.label("selected_revision_number"),
@@ -1572,42 +1547,6 @@ class AdminReadModel:
                 .order_by(RevisionFile.filename)
             ).mappings()
         )
-        markdown: str | None
-        if row["content_md"] is not None:
-            # Preserve the existing legacy Archive preview, including its size limit.
-            markdown = bytes(row["content_md"]).decode("utf-8")
-        else:
-            # A file-set Revision has no legacy Markdown mirror. Preview only
-            # a small, verified content.md as escaped plain text in the page.
-            preview = (
-                connection.execute(
-                    select(
-                        RevisionFile.content_bytes,
-                        RevisionFile.size_bytes,
-                        RevisionFile.content_sha256,
-                    ).where(
-                        RevisionFile.library_id == library_id,
-                        RevisionFile.page_uid == row["page_uid"],
-                        RevisionFile.revision_id == row["selected_revision_id"],
-                        RevisionFile.revision_number == row["selected_revision_number"],
-                        RevisionFile.filename == "content.md",
-                        RevisionFile.size_bytes <= _MAX_FILE_SET_PREVIEW_BYTES,
-                        func.length(RevisionFile.content_bytes) <= _MAX_FILE_SET_PREVIEW_BYTES,
-                    )
-                )
-                .mappings()
-                .one_or_none()
-            )
-            markdown = None
-            if preview is not None:
-                content = bytes(preview["content_bytes"])
-                if (
-                    len(content) == preview["size_bytes"]
-                    and sha256(content).digest() == bytes(preview["content_sha256"])
-                    and b"\x00" not in content
-                ):
-                    with suppress(UnicodeDecodeError):
-                        markdown = content.decode("utf-8", errors="strict")
         history_before = before_revision_number or current_revision_number + 1
         if before_revision_number is None and (
             current_revision_number - row["selected_revision_number"] >= _PAGE_HISTORY_SIZE
@@ -1658,7 +1597,6 @@ class AdminReadModel:
             section,
             book,
             _page_item(row),
-            markdown,
             row["selected_revision_number"],
             row["selected_revision_created_at"],
             files,

@@ -43,7 +43,7 @@ OR_TERMS = tuple(f"needle-long-{number:02d}" for number in range(16))
 class PageFixture:
     library_id: str
     page_id: str
-    title: str
+    title: str  # Expected stored H1 title, or the pre-presentation history fallback.
     files: tuple[tuple[str, bytes], ...]
     occurred_at: int
     visible: bool
@@ -114,7 +114,10 @@ def corpus(
                     )
                     for name, content in original_files
                 )
-                files += (("unrelated.txt", b"neutral content " * 600),)
+                files += (
+                    ("entry.md", f"# {title}\n".encode()),
+                    ("unrelated.txt", b"neutral content " * 600),
+                )
                 uid = (number + 1).to_bytes(16, "big")
                 revision_id = f"rev_{number + 1:032x}"
 
@@ -144,8 +147,11 @@ def corpus(
                         (("old.md", b"legacy-only-needle"),) if is_history else files
                     ),
                     source=ArchiveSourceInput(kind="synthetic"),
+                    primary_file=None if is_history else "entry.md",
                 )
                 if is_history:
+                    # This exact historical Revision intentionally has no
+                    # presentation row and retains its legacy title fallback.
                     new_id = "rev_" + "f" * 32
                     repository.add_file_set_revision(
                         page,
@@ -300,6 +306,8 @@ def test_literal_oracle_and_unfiltered_reader_agree(
     query = _query(keywords)
     actual = _search(engine, context, query)
     expected = _literal_oracle(pages, query)
+    titles = {page.page_id: page.title for page in pages}
+    assert all(item.title == titles[item.page_id] for item in actual.items)
     assert {
         item.page_id: {(source.kind, source.file_name) for source in item.match_sources}
         for item in actual.items
