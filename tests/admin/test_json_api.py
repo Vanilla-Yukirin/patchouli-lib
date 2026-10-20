@@ -20,8 +20,10 @@ from pydantic import SecretStr
 from patchouli_lib.admin.json_api import create_admin_json_router
 from patchouli_lib.admin.master_token_store import MasterTokenRepository
 from patchouli_lib.auth.service import utc_microseconds
+from patchouli_lib.backup.errors import BackupDatabaseError
 from patchouli_lib.backup.manifest import BackupArtifactIdentity
 from patchouli_lib.backup.service import create_backup, restore_backup, verify_backup_bundle
+from patchouli_lib.backup.validation import validate_database
 from patchouli_lib.config import Settings
 from patchouli_lib.database import CURRENT_SCHEMA_REVISION, build_engine, immediate_transaction
 from patchouli_lib.search.index_v2 import rebuild_search_index
@@ -85,6 +87,32 @@ def browser(
                 before.execute(f"SELECT * FROM {table}").fetchall()
                 == after.execute(f"SELECT * FROM {table}").fetchall()
             )
+    # An otherwise exact backup must reject a dangling entry or changed package bytes.
+    # Only the disposable restored copy is changed; restore the exact trigger SQL so
+    # schema-hash validation cannot hide a missing content-graph check.
+    with closing(sqlite3.connect(destination)) as tampered:
+        if tampered.execute("SELECT 1 FROM revision_presentations LIMIT 1").fetchone():
+            trigger_name = "revision_presentations_no_update"
+            statement = "UPDATE revision_presentations SET primary_file='missing.md'"
+            parameters: tuple[object, ...] = ()
+        elif row := tampered.execute(
+            "SELECT rowid,content_bytes FROM library_skill_files LIMIT 1"
+        ).fetchone():
+            trigger_name = "library_skill_files_no_update"
+            statement = "UPDATE library_skill_files SET content_bytes=? WHERE rowid=?"
+            parameters = (b"X" + row[1][1:], row[0])
+        else:
+            trigger_name = None
+        if trigger_name is not None:
+            original_sql = tampered.execute(
+                "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=?", (trigger_name,)
+            ).fetchone()[0]
+            tampered.execute(f"DROP TRIGGER {trigger_name}")
+            tampered.execute(statement, parameters)
+            tampered.execute(original_sql)
+            tampered.commit()
+            with pytest.raises(BackupDatabaseError):
+                validate_database(destination)
     engine.dispose()
 
 
@@ -293,6 +321,50 @@ def test_manual_file_save_history_and_retry(
     restores = [item for item in activity if item["action"] == "content.page.revision_restore"]
     assert len(restores) == 1 and restores[0]["revision_id"] == restore.json()["revision_id"]
     assert client.get("/admin/api/dashboard").json()["activity"][0]["page_id"] == value["page_id"]
+    current = client.get(path).json()
+    conflict = client.put(
+        path + "/files",
+        json={
+            "primary_file": "renamed.md",
+            "renames": [{"from": "renamed.md", "to": "attachment.bin"}],
+        },
+        headers={**headers, "Idempotency-Key": "workspace-collision"},
+    )
+    assert conflict.status_code == 409, conflict.text
+    invalid_entry = client.put(
+        path + "/files",
+        json={"primary_file": "missing.md", "remove": ["attachment.bin"]},
+        headers={**headers, "Idempotency-Key": "workspace-invalid-entry"},
+    )
+    assert invalid_entry.status_code == 422, invalid_entry.text
+    assert client.get(path).json() == current
+    mixed = client.put(
+        path + "/files",
+        data={
+            "metadata": json.dumps(
+                {
+                    "primary_file": "renamed.md",
+                    "remove": ["attachment.bin"],
+                    "renames": [{"from": "renamed.md", "to": "attachment.bin"}],
+                    "edits": [{"name": "renamed.md", "content": "# First title\n"}],
+                }
+            )
+        },
+        files=[("files", ("replacement.bin", b"\x00\xff"))],
+        headers={**headers, "Idempotency-Key": "workspace-combined-file-changes"},
+    )
+    assert mixed.status_code == 200, mixed.text
+    modified = client.get(path).json()
+    expected = {
+        "attachment.bin": b"# First title\n",
+        "renamed.md": b"# First title\n",
+        "replacement.bin": b"\x00\xff",
+    }
+    assert {
+        item["name"]: client.get(item["download_href"]).content for item in modified["files"]
+    } == expected
+    assert modified["stored_title"] == "First title" and modified["primary_file"] == "renamed.md"
+    assert client.get(attachment["download_href"]).content == b"\x00\xff"
     tag = client.post(
         f"/admin/api/libraries/{library_id}/tags", json={"name": "Draft"}, headers=headers
     )

@@ -364,9 +364,26 @@ def _rows_for_scope(
         if exact_short_keyword
         else "".join(", instr(d.normalized_text, ?) > 0" for _ in needles)
     )
+    presentation_join = ""
+    title_column = "p.title"
+    if (
+        connection.exec_driver_sql(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'revision_presentations'"
+        ).scalar_one_or_none()
+        is not None
+    ):
+        presentation_join = (
+            "LEFT JOIN revision_presentations AS presentation "
+            "ON presentation.library_id = p.library_id AND presentation.page_uid = p.page_uid "
+            "AND presentation.revision_id = p.current_revision_id "
+            "AND presentation.revision_number = p.current_revision_number "
+        )
+        title_column = "coalesce(presentation.display_title, p.title)"
     sql = (
         candidate_cte + "SELECT p.library_id, p.section_id, p.book_id, p.page_id, "
-        "p.current_revision_id, p.current_revision_number, p.title, p.occurred_at, "
+        "p.current_revision_id, p.current_revision_number, "
+        + title_column
+        + ", p.occurred_at, "
         + tag_count
         + ", d.source_kind, d.file_name"
         + exact_columns
@@ -377,7 +394,8 @@ def _rows_for_scope(
         "AND p.page_id = s.page_id AND p.current_revision_id = s.revision_id "
         "AND p.current_revision_number = s.revision_number "
         "AND p.occurred_at = s.occurred_at "
-        "JOIN search_documents AS d ON d.generation = s.generation "
+        + presentation_join
+        + "JOIN search_documents AS d ON d.generation = s.generation "
         "AND d.library_id = s.library_id AND d.page_uid = s.page_uid "
         "AND d.revision_id = s.revision_id AND d.revision_number = s.revision_number "
         + exact_document_join

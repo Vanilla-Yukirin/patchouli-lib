@@ -159,6 +159,8 @@ uv run python scripts/bench_search_v2_matrix.py --scale --http --repeats 100 --c
 ```sh
 uv sync --frozen --all-groups
 uv run alembic upgrade head
+npm ci --prefix web
+npm run build --prefix web
 uv run uvicorn patchouli_lib.app:app --reload
 ```
 
@@ -225,13 +227,12 @@ docker compose up --build --wait
 ## 可选网页管理功能
 
 新工作区使用独立 `web/` 静态前端和主 Token 会话；配置与已有安装过渡见
-[管理工作区](admin-workspace.md)。下列密码登录内容保留为历史配置背景，不再用于
-新工作区。前端构建和必要交互检查已纳入 `scripts/validate.py`，镜像使用独立
+[管理工作区](admin-workspace.md)。前端构建和必要交互检查已纳入 `scripts/validate.py`，镜像使用独立
 Node 构建阶段，最终运行镜像不需要 Node。
 
-FastAPI 管理面板默认关闭。默认在 HTTPS 反向代理后启用，并配置生成的密码校验值、
-独立会话签名密钥。不需要配置域名或 IP 白名单，旧 `PATCHOULI_ADMIN_ORIGIN` 会被忽略。
-公开 Compose 文件传入这些管理设置，也传入 Uvicorn 的 `FORWARDED_ALLOW_IPS`。
+FastAPI 管理工作区默认关闭。在 HTTPS 反向代理后配置独立会话签名密钥即可启用，
+通过主 Token 登录；不再配置管理密码校验值。不需要配置域名或 IP 白名单。
+公开 Compose 文件传入管理设置，也传入 Uvicorn 的 `FORWARDED_ALLOW_IPS`。
 该项默认只信任回环；若代理从容器网桥连接 API，应在私有环境文件中填入实际直接
 代理地址，不能使用任意来源通配信任。代理应保留原始 Host 和正确的协议。
 
@@ -239,8 +240,9 @@ FastAPI 管理面板默认关闭。默认在 HTTPS 反向代理后启用，并�
 防护见[私网 HTTP 说明](admin-web-console.md#仅在加密私网中使用-http)。不要用切换到
 开发环境或跳过身份验证来实现它。
 
-密码校验值生成、与目标无关的 Nginx 示例、会话和 CSRF 边界、受支持的本地操作，
-以及明确不存在的部署权限，见[网页管理面板](admin-web-console.md)。
+主 Token 初始化、会话和 CSRF 边界及运维权限边界见[管理工作区](admin-workspace.md)。
+反向代理示例为 `deploy/nginx/patchouli-admin.conf.example`；旧密码配置仅保留在
+[历史面板说明](admin-web-console.md)中，不用于新安装。
 
 ## 数据库迁移
 
@@ -275,8 +277,14 @@ Revision 追加文件。后续开发分支已实现并测试统一文件集写�
 
 本轮接入小票开发分支新增 `20261019_0033`：保留所有已有业务数据，新增票据摘要与
 不可变消费历史。任意票据记录存在时拒绝降级，避免丢失授权审计；该版本尚未部署。
-当前开发分支的备份工具默认创建、验证和恢复准确的 `20261019_0033` 数据库。验证或恢复旧版
+本轮工作区新增 `20261020_0035` 的版本展示记录、`0036` 的库内 Skills 和 `0037` 的
+工作区保存回执。升级不推断或回填旧正文的入口与标题；产生相应记录后拒绝丢失它们的
+降级。准确迁移与上线状态须按发布和部署记录核实。
+
+当前开发分支的备份工具默认创建、验证和恢复准确的 `20261020_0037` 数据库。验证或恢复旧版
 备份时，须在服务函数或 `verify`／`restore` 命令中显式指定实际修订号，例如
+`--schema-revision 20261020_0036`、`--schema-revision 20261020_0035`、
+`--schema-revision 20261020_0034`、`--schema-revision 20261019_0033`、
 `--schema-revision 20261019_0032`、`--schema-revision 20261018_0031`、
 `--schema-revision 20261003_0030`、`--schema-revision 20261002_0029`、
 `--schema-revision 20261001_0028`、

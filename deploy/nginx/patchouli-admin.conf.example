@@ -2,7 +2,14 @@
 # Replace the example server name and certificate locations only in private
 # operator configuration. This file belongs inside Nginx's `http` context.
 
-limit_req_zone $binary_remote_addr zone=patchouli_admin_login:10m rate=5r/m;
+# Only credential submissions consume login attempts; session reads and logout
+# use an empty key and are not counted by limit_req.
+map $request_method $patchouli_admin_login_key {
+    default "";
+    POST $binary_remote_addr;
+}
+
+limit_req_zone $patchouli_admin_login_key zone=patchouli_admin_login:10m rate=5r/m;
 
 upstream patchouli_api {
     server 127.0.0.1:8765;

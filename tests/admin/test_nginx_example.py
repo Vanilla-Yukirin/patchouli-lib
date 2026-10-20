@@ -9,7 +9,11 @@ def test_nginx_example_preserves_admin_security_and_archive_size_boundaries() ->
     )
 
     assert "admin.example.invalid" in example
-    assert "limit_req_zone $binary_remote_addr" in example
+    assert 'map $request_method $patchouli_admin_login_key {\n    default "";\n' in example
+    assert "    POST $binary_remote_addr;\n}" in example
+    assert (
+        "limit_req_zone $patchouli_admin_login_key zone=patchouli_admin_login:10m rate=5r/m;"
+    ) in example
     assert "location = /admin/api/session" in example
     assert "location = /admin/api/setup" in example
     assert example.count("limit_req zone=patchouli_admin_login") == 2

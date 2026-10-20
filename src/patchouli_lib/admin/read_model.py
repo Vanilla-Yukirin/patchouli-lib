@@ -42,7 +42,7 @@ from patchouli_lib.content.models import (
     RevisionFile,
 )
 from patchouli_lib.content.page_membership_history import load_page_state_timeline
-from patchouli_lib.content.presentation import read_presentation
+from patchouli_lib.content.presentation import RevisionPresentation, read_presentation
 from patchouli_lib.content.service import page_current_etag
 from patchouli_lib.identifiers import validate_revision_id
 from patchouli_lib.identifiers.page_ids import InvalidPageIdError, validate_page_id
@@ -65,6 +65,7 @@ _BOOK_PAGE_SIZE = 20
 _REQUEST_LOG_PAGE_SIZE = 20
 _WORKSPACE_PAGE_ACTIONS = ("content.page.workspace_save", "content.page.revision_restore")
 _WORKSPACE_SKILL_ACTIONS = ("library.skill.workspace_save", "library.skill.revision_restore")
+_AGENT_SKILL_ACTIONS = ("library.skill.create", "library.skill.revise")
 
 
 def _lower_hex_id(value: str) -> bool:
@@ -228,12 +229,6 @@ class PageTagChoice:
     id: str
     name: str
     attached: bool
-
-
-@dataclass(frozen=True)
-class TagDirectoryView:
-    library: LibraryItem
-    tags: tuple[TagItem, ...]
 
 
 @dataclass(frozen=True)
@@ -697,6 +692,7 @@ class AdminReadModel:
                             "tag.create",
                             "tag.page.attach",
                             "tag.page.detach",
+                            *_AGENT_SKILL_ACTIONS,
                         )
                     ),
                 )
@@ -722,9 +718,20 @@ class AdminReadModel:
             items: list[tuple[int, str, str, ContentActivityItem]] = []
             for event in events:
                 action = event["action"]
+                if action in _AGENT_SKILL_ACTIONS:
+                    items.append(
+                        (
+                            event["occurred_at"],
+                            "a",
+                            event["id"],
+                            _agent_skill_activity_item(connection, event),
+                        )
+                    )
+                    continue
                 resource_type = event["resource_type"]
                 page_id: str | None = None
                 tag_id: str | None = None
+                revision_id: str | None = None
                 revision_number: int | None = None
                 page = None
                 if (
@@ -738,11 +745,13 @@ class AdminReadModel:
                     page = (
                         connection.execute(
                             select(
+                                Page.page_uid,
                                 Page.section_id,
                                 Page.book_id,
                                 Page.page_id,
                                 Page.title,
                                 Page.deleted_at,
+                                Revision.revision_id,
                                 Revision.revision_number,
                             )
                             .join(
@@ -761,6 +770,7 @@ class AdminReadModel:
                         .one_or_none()
                     )
                     revision_number = None if page is None else page["revision_number"]
+                    revision_id = None if page is None else page["revision_id"]
                 elif action == "tag.create" and resource_type == "tag":
                     tag_id = event["resource_id"]
                 elif action in ("tag.page.attach", "tag.page.detach"):
@@ -777,6 +787,7 @@ class AdminReadModel:
                     page = (
                         connection.execute(
                             select(
+                                Page.page_uid,
                                 Page.section_id,
                                 Page.book_id,
                                 Page.page_id,
@@ -792,6 +803,24 @@ class AdminReadModel:
                     )
                 if action == "content.page.move":
                     revision_number = _caller_move_activity_revision(connection, event)
+                title = None if page is None else page["title"]
+                if page is not None and revision_number is not None:
+                    if revision_id is None:
+                        revision_id = connection.scalar(
+                            select(Revision.revision_id).where(
+                                Revision.library_id == event["library_id"],
+                                Revision.page_uid == page["page_uid"],
+                                Revision.revision_number == revision_number,
+                            )
+                        )
+                    if revision_id is not None:
+                        title = _saved_activity_title(
+                            connection,
+                            event["library_id"],
+                            page["page_uid"],
+                            revision_id,
+                            page["title"],
+                        )
                 tag = (
                     connection.execute(
                         select(Tag.id, Tag.display_name).where(
@@ -815,7 +844,7 @@ class AdminReadModel:
                             actor_name=event["actor_name"],
                             action=action,
                             occurred_at=event["occurred_at"],
-                            page_title=None if page is None else page["title"],
+                            page_title=title,
                             section_id=None if page is None else page["section_id"],
                             book_id=None if page is None else page["book_id"],
                             page_id=None if page is None else page["page_id"],
@@ -823,6 +852,7 @@ class AdminReadModel:
                             page_deleted=page is not None and page["deleted_at"] is not None,
                             tag_id=None if tag is None else tag["id"],
                             tag_name=None if tag is None else tag["display_name"],
+                            revision_id=revision_id,
                         ),
                     )
                 )
@@ -1204,14 +1234,6 @@ class AdminReadModel:
                 for row in connection.execute(_tag_summary_query()).mappings()
             )
 
-    def list_library_tags(self, library_id: str) -> TagDirectoryView | None:
-        with self._connect() as connection:
-            library = _get_library(connection, library_id)
-            if library is None:
-                return None
-            rows = connection.execute(_tag_summary_query(library_id)).mappings()
-            return TagDirectoryView(library, tuple(_tag_item(row) for row in rows))
-
     def get_library_tag(self, library_id: str, tag_id: str) -> TagView | None:
         with self._connect() as connection:
             library = _get_library(connection, library_id)
@@ -1271,33 +1293,6 @@ class AdminReadModel:
             ).mappings()
             books = tuple(_book_item(row) for row in rows)
             return SectionView(library, section, books)
-
-    def get_book(self, library_id: str, section_id: str, book_id: str) -> BookView | None:
-        with self._connect() as connection:
-            library = _get_library(connection, library_id)
-            section = _get_section(connection, library_id, section_id)
-            book = _get_book(connection, library_id, section_id, book_id, include_readme=True)
-            if library is None or section is None or book is None:
-                return None
-            rows = connection.execute(
-                select(
-                    Page.page_id,
-                    Page.title,
-                    Page.page_type,
-                    Page.occurred_at,
-                    Page.current_revision_number,
-                    Page.updated_at,
-                )
-                .where(
-                    Page.library_id == library_id,
-                    Page.section_id == section_id,
-                    Page.book_id == book_id,
-                    Page.deleted_at.is_(None),
-                )
-                .order_by(Page.occurred_at.desc(), Page.page_id)
-            ).mappings()
-            pages = tuple(_page_item(row) for row in rows)
-            return BookView(library, section, book, pages)
 
     def get_book_page(
         self, library_id: str, section_id: str, book_id: str, before: str | None = None
@@ -1751,6 +1746,66 @@ def _master_move_activity_revision(
         raise RuntimeError("Page history requires SQLite.")
     validate_master_move_receipt(raw, receipt)
     return receipt.revision_number
+
+
+def _saved_activity_title(
+    connection: Connection,
+    library_id: str,
+    page_uid: bytes,
+    revision_id: str,
+    legacy_title: str,
+) -> str:
+    if (
+        connection.exec_driver_sql(
+            "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='revision_presentations'"
+        ).scalar_one_or_none()
+        is None
+    ):
+        return legacy_title
+    title = connection.scalar(
+        select(RevisionPresentation.display_title).where(
+            RevisionPresentation.library_id == library_id,
+            RevisionPresentation.page_uid == page_uid,
+            RevisionPresentation.revision_id == revision_id,
+        )
+    )
+    return legacy_title if title is None else title
+
+
+def _agent_skill_activity_item(connection: Connection, event: RowMapping) -> ContentActivityItem:
+    if event["resource_type"] != "library_skill" or not _lower_hex_id(event["resource_id"]):
+        raise RuntimeError("Invalid Skill activity audit target.")
+    skill = connection.execute(
+        select(
+            LibrarySkillRevision.id, LibrarySkillRevision.number, LibrarySkillRevision.name
+        ).where(
+            LibrarySkillRevision.library_id == event["library_id"],
+            LibrarySkillRevision.skill_id == event["resource_id"],
+            LibrarySkillRevision.created_at == event["occurred_at"],
+            LibrarySkillRevision.number == 1
+            if event["action"] == "library.skill.create"
+            else LibrarySkillRevision.number > 1,
+        )
+    ).one_or_none()
+    return ContentActivityItem(
+        library_id=event["library_id"],
+        actor_home_library_id=event["actor_home_library_id"],
+        actor_id=event["actor_caller_id"],
+        actor_name=event["actor_name"],
+        action=event["action"],
+        occurred_at=event["occurred_at"],
+        page_title=None,
+        section_id=None,
+        book_id=None,
+        page_id=None,
+        revision_number=None if skill is None else skill.number,
+        page_deleted=False,
+        tag_id=None,
+        tag_name=None,
+        revision_id=None if skill is None else skill.id,
+        skill_id=event["resource_id"],
+        skill_name=None if skill is None else skill.name,
+    )
 
 
 def _workspace_activity_item(connection: Connection, event: RowMapping) -> ContentActivityItem:

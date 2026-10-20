@@ -28,9 +28,14 @@ from patchouli_lib.auth.schemas import (
 from patchouli_lib.auth.service import AuthenticationError
 from patchouli_lib.auth.tokens import generate_token
 from patchouli_lib.content.file_manifest import build_file_manifest
+from patchouli_lib.content.file_set_create_core import FileSetPageCreateCore
+from patchouli_lib.content.file_set_service import FileSetRevisionService
 from patchouli_lib.content.repository import ContentRepository
+from patchouli_lib.content.schemas import ArchiveSourceInput, NewPageSource
+from patchouli_lib.content.service import page_current_etag
 from patchouli_lib.database import build_engine, immediate_transaction
 from patchouli_lib.library.models import Book, Library, Section
+from patchouli_lib.library.repository import LibraryRepository
 from patchouli_lib.search.index_v2 import SearchIndexUnavailableError, rebuild_search_index
 from patchouli_lib.search.query_v2 import SearchQueryV2, parse_query_v2_json
 from patchouli_lib.search.service_v2 import (
@@ -394,7 +399,89 @@ def test_short_literal_matches_exactly_within_its_own_field(engine: Engine) -> N
     assert [item.page_id for item in combined] == [title_hit[1], body_hit[1]]
     assert [source.kind for source in combined[0].match_sources] == ["title"]
     assert [source.kind for source in combined[1].match_sources] == ["file_text"]
-    assert [item.page_id for item in _search(engine, context, keywords=["ß"])] == [folded_hit[1]]
+    legacy_hits = _search(engine, context, keywords=["ß"])
+    assert [(item.page_id, item.title) for item in legacy_hits] == [(folded_hit[1], "Straße")]
+
+    files = (("notes.md", b"# Fresh heading\nordinary text\n"),)
+    with immediate_transaction(engine) as connection:
+        book = LibraryRepository(connection).get_book(*home)
+        assert book is not None
+        core = FileSetPageCreateCore(connection)
+        no_entry = core.create_page(
+            book=book,
+            title="obsolete noentry create",
+            occurred_at=CLOCK,
+            operation_at=CLOCK,
+            manifest=build_file_manifest((("plain.txt", b"ordinary"),)),
+            source=ArchiveSourceInput(kind="synthetic"),
+        )
+        entry = core.create_page(
+            book=book,
+            title="obsolete entry create",
+            occurred_at=CLOCK,
+            operation_at=CLOCK,
+            manifest=build_file_manifest(files),
+            source=ArchiveSourceInput(kind="synthetic"),
+            primary_file="notes.md",
+        )
+
+    # Newly saved no-entry metadata is authoritative, unlike the legacy graph
+    # above which intentionally has no presentation row. Both incremental and
+    # rebuilt candidates must use the same title returned by public search.
+    for rebuilt in (False, True):
+        if rebuilt:
+            rebuild_search_index(engine, clock=lambda: CLOCK)
+        untitled = _search(engine, context, keywords=["无标题"])
+        assert [(item.page_id, item.title) for item in untitled] == [(no_entry.page_id, "无标题")]
+        heading = _search(engine, context, keywords=["Fresh heading"])
+        assert [(item.page_id, item.title) for item in heading] == [
+            (entry.page_id, "Fresh heading")
+        ]
+        assert heading[0].match_sources[0].kind == "title"
+        assert not _search(engine, context, keywords=["obsolete"])
+
+    revision_id = f"rev_{'7' * 32}"
+    with immediate_transaction(engine) as connection:
+        appended = FileSetRevisionService(connection).append_existing_page(
+            library_id=home[0],
+            page_id=entry.page_id,
+            expected_etag=page_current_etag(
+                entry.page_uid,
+                entry.current_revision_id,
+                entry.current_revision_number,
+                entry.occurred_at,
+                entry.updated_at,
+            ),
+            files=files,
+            revision_id=revision_id,
+            revision_at=CLOCK + 1,
+            source=NewPageSource(
+                library_id=home[0],
+                source_id="f" * 32,
+                page_uid=entry.page_uid,
+                revision_id=revision_id,
+                revision_number=2,
+                kind="synthetic",
+                created_at=CLOCK + 1,
+            ),
+        )
+        assert appended.changed
+
+    for rebuilt in (False, True):
+        if rebuilt:
+            rebuild_search_index(engine, clock=lambda: CLOCK)
+        untitled = _search(engine, context, keywords=["无标题"])
+        assert {(item.page_id, item.title) for item in untitled} == {
+            (no_entry.page_id, "无标题"),
+            (entry.page_id, "无标题"),
+        }
+        heading = _search(engine, context, keywords=["Fresh heading"])
+        assert [(item.page_id, item.title) for item in heading] == [(entry.page_id, "无标题")]
+        assert [source.kind for source in heading[0].match_sources] == ["file_text"]
+        assert not _search(engine, context, keywords=["obsolete"])
+        assert [
+            (item.page_id, item.title) for item in _search(engine, context, keywords=["ß"])
+        ] == [(folded_hit[1], "Straße")]
 
 
 def test_page_top_k_uses_stable_tie_breaker_without_candidate_truncation(engine: Engine) -> None:

@@ -18,7 +18,7 @@ from sqlalchemy import Connection, Engine, select
 
 from patchouli_lib.auth.service import utc_microseconds
 from patchouli_lib.content.models import Page
-from patchouli_lib.content.presentation import read_presentation
+from patchouli_lib.content.presentation import RevisionPresentation
 from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.content.schemas import PageRecord
 from patchouli_lib.search.literal_v2 import (
@@ -36,7 +36,9 @@ from patchouli_lib.search.text_classification_v2 import (
 if TYPE_CHECKING:
     from patchouli_lib.content.file_manifest import FileManifest
 
-INDEX_VERSION = f"v2:libscope1:{GRAM_VERSION}:{TEXT_CLASSIFICATION_VERSION}:u{UNICODE_DATA_VERSION}"
+INDEX_VERSION = (
+    f"v2:libscope1:pres1:{GRAM_VERSION}:{TEXT_CLASSIFICATION_VERSION}:u{UNICODE_DATA_VERSION}"
+)
 
 
 class SearchIndexUnavailableError(RuntimeError):
@@ -216,11 +218,22 @@ def _project_page(
     if row is None:
         return
     page = PageRecord.model_validate(dict(row))
-    presentation = read_presentation(
-        connection, page.library_id, page.page_uid, page.current_revision_id
-    )
-    if presentation.primary_file is not None:
-        page = page.model_copy(update={"title": presentation.display_title})
+    if (
+        connection.exec_driver_sql(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'revision_presentations'"
+        ).scalar_one_or_none()
+        is not None
+    ):
+        display_title = connection.scalar(
+            select(RevisionPresentation.display_title).where(
+                RevisionPresentation.library_id == page.library_id,
+                RevisionPresentation.page_uid == page.page_uid,
+                RevisionPresentation.revision_id == page.current_revision_id,
+                RevisionPresentation.revision_number == page.current_revision_number,
+            )
+        )
+        if display_title is not None:
+            page = page.model_copy(update={"title": display_title})
     repository = ContentRepository(connection)
     manifest = repository.get_current_file_manifest(page)
     documents = _documents(page, manifest, repository)
