@@ -5,9 +5,13 @@
 
 ## 结论
 
-采用 **React + TypeScript 的静态单页应用**：由 Vite 构建，产物由 FastAPI 在
+采用 **React + TypeScript 的静态单页应用**：由 Vite 构建，产物由本服务在
 `/admin` 下同源提供。组件采用 shadcn/ui（Radix + Tailwind CSS），数据层采用
 TanStack Router 与 TanStack Query。
+
+前后端代码完全隔离：Python 后端只提供 JSON 接口并托管构建产物，不含任何 HTML、
+CSS、JS 字符串；Markdown 渲染也在前端完成。运行时保持同源，边界见
+[迁移计划](admin-frontend-migration.md#前后端边界)。
 
 ## 选择 React 而非 Vue 的理由
 
@@ -39,7 +43,7 @@ TanStack Query（Vue 版），其余架构与本文一致。
 | 拖放 | dnd-kit | 目录树内拖动移动文档；树组件先自行实现，数据量大时再评估 react-arborist |
 | 上传 | react-dropzone + 自建上传队列 | 拖放、逐文件进度；现有幂等键与重试协议在内部处理 |
 | Markdown 编辑 | CodeMirror 6 | 体积小，支持 CSP nonce；不采用 Monaco |
-| Markdown 渲染 | 继续由后端 `markdown_preview.py` 安全渲染 | 保证网页与其他入口看到一致的结果，不在前端另建一套清洗规则 |
+| Markdown 渲染 | markdown-it + DOMPurify | 在前端渲染，阅读与编辑预览共用同一渲染器；与后端已有的 `markdown-it-py` 同属一个规范族，标题提取规则更容易对齐；规则见[迁移计划](admin-frontend-migration.md#markdown-渲染与标题契约)。候选 react-markdown + rehype-sanitize，原型阶段若集成更顺则替换 |
 | 版本差异 | jsdiff + 自建差异视图 | |
 | 多语言 | i18next + react-i18next | 使用语义化键；默认语言按 `Accept-Language` 选择 |
 | 时间 | 原生 Intl，必要时加 date-fns；shadcn Calendar | 按浏览器时区显示，提交时转换为 UTC；不写死固定时差 |
@@ -55,6 +59,7 @@ TanStack Query（Vue 版），其余架构与本文一致。
 | Ant Design、MUI 等运行时注入样式的组件库 | 运行时插入 `<style>` 与严格 CSP 冲突，体积较大，视觉风格较强 |
 | Element Plus（若改用 Vue） | 可用，但视觉风格偏传统后台；优先 shadcn-vue |
 | Redux、Zustand 等全局状态库 | 服务端状态交给 TanStack Query 后，剩余全局状态很少；确有需要时再引入 Zustand |
+| 继续使用后端 `markdown_preview.py` 渲染，并为编辑预览新增“只渲染不保存”接口 | 与前后端隔离的决定冲突，每次预览多一次往返，且阅读与预览会出现两条渲染路径 |
 | 在浏览器存储中保存任何 Token | 违反 ADR 0003 的安全边界 |
 | 从 CDN 加载脚本或样式 | 违反同源 CSP；所有依赖在构建期打包 |
 
