@@ -28,6 +28,9 @@
 
 ## 工程文档
 
+- [知识库工作区与库内 Skills 产品需求](proposals/library-workspace-and-skills.md)：
+  顶部全局导航、概览与分区阅读分层、文本编辑和标题解析、引用批量调整、两级搜索，
+  以及库内多文件 Skill 的网页管理和本机安装更新；产品需求已确认，接口与迁移待审。
 - [三层 README 与 Agent 结构管理](proposals/library-guides-and-agent-structure.md)：
   独立使用说明、空库发现与有库写权限的分区／书籍创建，契约已接受，随本轮 PR 验证。
 - [凭据管理与一次性接入小票](proposals/credential-onboarding-tickets.md)：凭据命名、
@@ -65,7 +68,8 @@
   [小修清单](proposals/admin-frontend-quick-fixes.md)、
   [技术选型](proposals/admin-frontend-stack.md)、
   [交互规范](proposals/admin-frontend-interaction.md)和
-  [迁移计划](proposals/admin-frontend-migration.md)；提案中，尚未实现。
+  [迁移计划](proposals/admin-frontend-migration.md)；交互已同步上述产品需求，技术契约
+  仍为提案中，尚未实现。
 
 ADR 0004 确定多文件的 SQLite 存储方向；主分支已实现统一文件集写入、逐库授权及
 受保护的 Token 再次显示。旧 Archive 与旧 Section 凭据保留兼容边界，旧搜索入口
