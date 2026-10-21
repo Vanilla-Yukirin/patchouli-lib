@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 from alembic import command
 from alembic.config import Config
+from content.helpers import insert_page_graph, page_graph_values
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
@@ -383,8 +384,39 @@ def test_session_boundary_and_structure(browser: tuple[TestClient, dict[str, str
 def test_manual_file_save_history_and_retry(
     browser: tuple[TestClient, dict[str, str], Any],
 ) -> None:
-    client, headers, _ = browser
+    client, headers, engine = browser
     library_id, section_id, book_id = structure(client, headers)
+    legacy = page_graph_values(
+        library_id=library_id,
+        section_id=section_id,
+        book_id=book_id,
+        title="Old stored label",
+        content_md=b"# Legacy visible title\n\nOriginal body.\n",
+    )
+    with immediate_transaction(engine) as connection:
+        insert_page_graph(connection, legacy)
+    legacy_path = f"/admin/api/libraries/{library_id}/pages/{legacy[0].page_id}"
+    with engine.connect() as connection:
+        before = {
+            table: connection.exec_driver_sql(f"SELECT * FROM {table}").all()
+            for table in ("pages", "revisions", "revision_files", "revision_presentations")
+        }
+    legacy_view = client.get(legacy_path)
+    assert legacy_view.json()["stored_title"] == "Legacy visible title"
+    assert legacy_view.json()["primary_file"] == "content.md"
+    assert legacy_view.json()["revisions"][0]["stored_title"] == "Legacy visible title"
+    text_url = legacy_view.json()["files"][0]["text_href"]
+    assert client.get(text_url).content == legacy[1].content_md
+    directory = client.get(f"/admin/api/books/{book_id}").json()["pages"]
+    assert (
+        next(item for item in directory if item["id"] == legacy[0].page_id)["stored_title"]
+        == "Legacy visible title"
+    )
+    assert client.get(legacy_path).headers["ETag"] == legacy_view.headers["ETag"]
+    with engine.connect() as connection:
+        assert before == {
+            table: connection.exec_driver_sql(f"SELECT * FROM {table}").all() for table in before
+        }
     payload = {
         "primary_file": "entry.md",
         "edits": [{"name": "entry.md", "content": "# First title\n"}],

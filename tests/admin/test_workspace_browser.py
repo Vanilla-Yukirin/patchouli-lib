@@ -195,15 +195,22 @@ def workspace_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterat
             name="Browser tag",
             created_at=1_000_000,
         )
-        page = FileSetPageCreateCore(connection).create_page(
-            book=structure.book,
-            title="Workspace title",
-            occurred_at=1_000_000,
-            operation_at=2_000_000,
-            manifest=build_file_manifest((("entry.md", SOURCE.encode()), ("note.txt", ATTACHMENT))),
-            source=ArchiveSourceInput(kind="synthetic_browser"),
-            primary_file="entry.md",
-        )
+        # Seed the same file-set graph as a producer predating presentation metadata.
+        with monkeypatch.context() as legacy_writer:
+            legacy_writer.setattr(
+                "patchouli_lib.content.file_set_create_core.save_presentation",
+                lambda *_a, **_k: None,
+            )
+            page = FileSetPageCreateCore(connection).create_page(
+                book=structure.book,
+                title="Original legacy label",
+                occurred_at=1_000_000,
+                operation_at=2_000_000,
+                manifest=build_file_manifest(
+                    (("entry.md", SOURCE.encode()), ("note.txt", ATTACHMENT))
+                ),
+                source=ArchiveSourceInput(kind="synthetic_browser"),
+            )
         other = FileSetPageCreateCore(connection).create_page(
             book=structure.book,
             title="Other document",
@@ -336,6 +343,14 @@ def test_spa_document_edit_rename_review_and_narrow_directory(
         "?.textContent.includes('Original text.'))",
     )
     unknown_path = f"/admin/libraries/{browser.library}/unknown-screen"
+    assert (
+        tools.evaluate("document.querySelector('.page-heading h1').textContent.trim()")
+        == "# Workspace title"
+    )
+    assert tools.evaluate(
+        "document.querySelector('.tree-pages').textContent.includes('Workspace title')"
+    )
+    assert not tools.evaluate("document.body.innerText.includes('No entry file')")
     tools.command("Page.navigate", {"url": browser.origin + unknown_path})
     wait(tools, "document.querySelector('main .panel h2')?.textContent === '404'")
     assert tools.evaluate("location.pathname") == unknown_path

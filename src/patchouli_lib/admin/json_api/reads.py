@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Request
 from fastapi.openapi.utils import get_openapi
-from sqlalchemy import Connection, func, select
+from sqlalchemy import Connection, select, tuple_
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import Response
 
@@ -21,16 +21,12 @@ from patchouli_lib.admin.json_api.common import (
     encode,
     reply,
 )
+from patchouli_lib.admin.legacy_presentation import RevisionKey, resolve_presentations
 from patchouli_lib.admin.raster_preview import build_raster_preview
 from patchouli_lib.admin.read_model import AdminReadModel
 from patchouli_lib.admin.request_log_filters import RequestLogCursorCodec, parse_request_log_filters
 from patchouli_lib.content.models import Page, Revision
-from patchouli_lib.content.presentation import (
-    UNTITLED,
-    RevisionPresentation,
-    preview_text,
-    read_presentation,
-)
+from patchouli_lib.content.presentation import preview_text
 from patchouli_lib.content.repository import ContentRepository
 from patchouli_lib.library.models import Book, Section
 from patchouli_lib.retrieval.cursor import CursorCodec
@@ -63,46 +59,82 @@ def found[T](value: T | None) -> T:
 
 def current_titles(connection: Connection, library_id: str, page_ids: list[str]) -> dict[str, str]:
     rows = connection.execute(
-        select(Page.page_id, func.coalesce(RevisionPresentation.display_title, UNTITLED))
-        .outerjoin(
-            RevisionPresentation,
-            (RevisionPresentation.library_id == Page.library_id)
-            & (RevisionPresentation.page_uid == Page.page_uid)
-            & (RevisionPresentation.revision_id == Page.current_revision_id)
-            & (RevisionPresentation.revision_number == Page.current_revision_number),
+        select(Page.page_id, Page.page_uid, Page.current_revision_id).where(
+            Page.library_id == library_id, Page.page_id.in_(page_ids)
         )
-        .where(Page.library_id == library_id, Page.page_id.in_(page_ids))
     ).all()
-    return {row[0]: row[1] for row in rows}
+    presentations = resolve_presentations(
+        connection, ((library_id, row.page_uid, row.current_revision_id) for row in rows)
+    )
+    return {
+        row.page_id: presentations[
+            (library_id, row.page_uid, row.current_revision_id)
+        ].display_title
+        for row in rows
+    }
 
 
 def activity_payload(connection: Connection, value: Any) -> Any:
     payload = encode(value)
     items = payload if isinstance(payload, list) else payload["items"]
-    for item in items:
-        if item.get("revision_id") is not None:
-            item["stored_title"] = item.get("skill_name") or item["page_title"]
-            continue
-        if item["page_id"] is None:
-            continue
-        page = ContentRepository(connection).get_page(item["library_id"], item["page_id"])
-        if page is None:
-            continue
-        revision_id = page.current_revision_id
-        if item["revision_number"] is not None:
-            revision_id = (
-                connection.scalar(
-                    select(Revision.revision_id).where(
-                        Revision.library_id == page.library_id,
-                        Revision.page_uid == page.page_uid,
-                        Revision.revision_number == item["revision_number"],
+    page_keys = {(item["library_id"], item["page_id"]) for item in items if item["page_id"]}
+    pages = (
+        {
+            (row.library_id, row.page_id): row
+            for row in connection.execute(
+                select(
+                    Page.library_id, Page.page_id, Page.page_uid, Page.current_revision_id
+                ).where(tuple_(Page.library_id, Page.page_id).in_(page_keys))
+            )
+        }
+        if page_keys
+        else {}
+    )
+    historical = {
+        (
+            item["library_id"],
+            pages[(item["library_id"], item["page_id"])].page_uid,
+            item["revision_number"],
+        )
+        for item in items
+        if (item["library_id"], item["page_id"]) in pages and item["revision_number"] is not None
+    }
+    revisions = (
+        {
+            (row.library_id, row.page_uid, row.revision_number): row.revision_id
+            for row in connection.execute(
+                select(
+                    Revision.library_id,
+                    Revision.page_uid,
+                    Revision.revision_number,
+                    Revision.revision_id,
+                ).where(
+                    tuple_(Revision.library_id, Revision.page_uid, Revision.revision_number).in_(
+                        historical
                     )
                 )
-                or revision_id
             )
-        title = read_presentation(
-            connection, page.library_id, page.page_uid, revision_id
-        ).display_title
+        }
+        if historical
+        else {}
+    )
+    selected: dict[int, RevisionKey] = {}
+    for index, item in enumerate(items):
+        if item["page_id"] is None:
+            if item.get("revision_id") is not None:
+                item["stored_title"] = item.get("skill_name") or item["page_title"]
+            continue
+        page = pages.get((item["library_id"], item["page_id"]))
+        if page is None:
+            continue
+        revision_id = item.get("revision_id") or revisions.get(
+            (page.library_id, page.page_uid, item["revision_number"]), page.current_revision_id
+        )
+        selected[index] = (page.library_id, page.page_uid, revision_id)
+    presentations = resolve_presentations(connection, selected.values())
+    for index, key in selected.items():
+        item = items[index]
+        title = presentations[key].display_title
         item["stored_title"] = item["page_title"] = title
     return payload
 
@@ -156,20 +188,7 @@ def register_reads(router: APIRouter, auth: BrowserAuth) -> None:
                 )
             )
             payload = encode(view)
-            # Explicit per-Revision presentation only; old filenames are not inferred.
-            pages = connection.execute(
-                select(Page.page_id, Page.page_uid, Page.current_revision_id).where(
-                    Page.library_id == library_id,
-                    Page.book_id == book_id,
-                    Page.page_id.in_([item.id for item in view.pages]),
-                )
-            ).all()
-            titles = {
-                item.page_id: read_presentation(
-                    connection, library_id, item.page_uid, item.current_revision_id
-                ).display_title
-                for item in pages
-            }
+            titles = current_titles(connection, library_id, [item.id for item in view.pages])
             for item in payload["pages"]:
                 item["stored_title"] = titles[item["id"]]
             return reply(payload)
@@ -199,9 +218,10 @@ def register_reads(router: APIRouter, auth: BrowserAuth) -> None:
             )
             record = found(ContentRepository(connection).get_page(library_id, page_id))
             snapshot = view.snapshot
-            presentation = read_presentation(
-                connection, library_id, record.page_uid, snapshot.revision_id
-            )
+            key = (library_id, record.page_uid, snapshot.revision_id)
+            presentation = resolve_presentations(
+                connection, [key], manifests={key: snapshot.manifest}
+            )[key]
             base = f"/admin/api/libraries/{library_id}/pages/{page_id}"
             files = []
             for entry in snapshot.manifest.files:
@@ -241,10 +261,13 @@ def register_reads(router: APIRouter, auth: BrowserAuth) -> None:
                 .order_by(Revision.revision_number.desc())
             ).all()
             payload["revisions"] = []
+            saved_presentations = resolve_presentations(
+                connection,
+                ((library_id, record.page_uid, version.revision_id) for version in versions),
+                manifests={key: snapshot.manifest},
+            )
             for version in versions:
-                saved = read_presentation(
-                    connection, library_id, record.page_uid, version.revision_id
-                )
+                saved = saved_presentations[(library_id, record.page_uid, version.revision_id)]
                 payload["revisions"].append(
                     {
                         "number": version.revision_number,
@@ -420,12 +443,31 @@ def register_reads(router: APIRouter, auth: BrowserAuth) -> None:
         codec = CursorCodec(secret.get_secret_value().encode()) if secret else None
 
         def project(connection: Connection, result: SearchResultV2) -> SearchResultV2:
+            page_keys = {(item.library_id, item.page_id) for item in result.items}
+            uids = (
+                {
+                    (row.library_id, row.page_id): row.page_uid
+                    for row in connection.execute(
+                        select(Page.library_id, Page.page_id, Page.page_uid).where(
+                            tuple_(Page.library_id, Page.page_id).in_(page_keys)
+                        )
+                    )
+                }
+                if page_keys
+                else {}
+            )
+            presentations = resolve_presentations(
+                connection,
+                (
+                    (item.library_id, uids[(item.library_id, item.page_id)], item.revision_id)
+                    for item in result.items
+                ),
+            )
             items = []
             for item in result.items:
-                page = found(ContentRepository(connection).get_page(item.library_id, item.page_id))
-                presentation = read_presentation(
-                    connection, item.library_id, page.page_uid, item.revision_id
-                )
+                presentation = presentations[
+                    (item.library_id, uids[(item.library_id, item.page_id)], item.revision_id)
+                ]
                 items.append(replace(item, title=presentation.display_title))
             return SearchResultV2(tuple(items), result.next_cursor)
 
