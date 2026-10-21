@@ -1,6 +1,7 @@
 """Version presentation and title extraction without duplicate browser journeys."""
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -92,6 +93,7 @@ def test_primary_file_only_change_is_a_revision_and_is_immutable(content_engine:
             insert_page_graph(connection, values)
             keys.append((library_id, values[0].page_uid, values[1].revision_id))
         raw = connection.connection.driver_connection
+        assert isinstance(raw, sqlite3.Connection)
         before_changes = raw.total_changes
         event.listen(connection, "before_cursor_execute", capture)
         single = resolve_presentations(connection, [key])
